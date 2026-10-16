@@ -2,7 +2,7 @@
 """Local web page for the lunar simulation.
 
 Serves one page plus a small JSON API.  Everything the page does goes through
-:func:`moonlib.render_moon` and :func:`moonlib.render_region`, so the browser is
+:func:`moonlib_s.render_moon` and :func:`moonlib_s.render_region`, so the browser is
 only a front end for the same code the command line runs.
 
 Run it with::
@@ -44,9 +44,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np  # noqa: E402
 
-import moonlib  # noqa: E402
-from moonlib.annotations import CLASS_LABELS, FEATURE_CLASSES, feature_class  # noqa: E402
-from moonlib.models import MoonRenderSettings  # noqa: E402
+import moonlib_s  # noqa: E402
+from moonlib_s.annotations import CLASS_LABELS, FEATURE_CLASSES, feature_class  # noqa: E402
+from moonlib_s.models import MoonRenderSettings  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -130,8 +130,8 @@ def terrain_km_per_px() -> float:
     the page refused to ask for the detail it holds.
     """
     try:
-        import moonlib
-        sources = moonlib.terrain.global_dem_sources()
+        import moonlib_s
+        sources = moonlib_s.terrain.global_dem_sources()
         if sources:
             return float(sources[0][1])
     except Exception:
@@ -172,7 +172,7 @@ def _opt_f(payload: Dict[str, Any], key: str) -> Optional[float]:
     return None if value != value else value
 
 
-def parse_train(payload: Dict[str, Any]) -> moonlib.ImagingTrain:
+def parse_train(payload: Dict[str, Any]) -> moonlib_s.ImagingTrain:
     """Build the imaging train, falling back to the documented defaults.
 
     A blank field means "use the default", which is how the page can start with
@@ -180,12 +180,12 @@ def parse_train(payload: Dict[str, Any]) -> moonlib.ImagingTrain:
     """
     scope = payload.get("telescope") or {}
     camera = payload.get("camera") or {}
-    aperture = _f(scope, "aperture_mm", moonlib.DEFAULT_TELESCOPE.aperture_mm)
+    aperture = _f(scope, "aperture_mm", moonlib_s.DEFAULT_TELESCOPE.aperture_mm)
     focal_length = _opt_f(scope, "focal_length_mm")
     focal_ratio = None if focal_length else _f(
-        scope, "focal_ratio", moonlib.DEFAULT_TELESCOPE.native_focal_ratio
+        scope, "focal_ratio", moonlib_s.DEFAULT_TELESCOPE.native_focal_ratio
     )
-    telescope = moonlib.Telescope(
+    telescope = moonlib_s.Telescope(
         aperture_mm=aperture,
         focal_ratio=focal_ratio,
         focal_length_mm=focal_length,
@@ -193,14 +193,14 @@ def parse_train(payload: Dict[str, Any]) -> moonlib.ImagingTrain:
         back_focus=_f(scope, "back_focus", 1.0),
         obstruction=_f(scope, "obstruction", 0.34),
     )
-    imx = moonlib.DEFAULT_CAMERA
-    cam = moonlib.Camera(
+    imx = moonlib_s.DEFAULT_CAMERA
+    cam = moonlib_s.Camera(
         width_px=int(_f(camera, "width_px", imx.width_px)),
         height_px=int(_f(camera, "height_px", imx.height_px)),
         pixel_um=_f(camera, "pixel_um", imx.pixel_um),
         color=bool(camera.get("color", True)),
     )
-    return moonlib.ImagingTrain(telescope, cam)
+    return moonlib_s.ImagingTrain(telescope, cam)
 
 
 def _light_option(request: Dict[str, Any], block: str, key: str) -> Any:
@@ -228,7 +228,7 @@ def _optical_model(bag: Any) -> str:
     with the default and says so.
     """
     value = str((bag or {}).get("photometric_model") or "").strip()
-    converter = getattr(moonlib, "as_photometric_model", None)
+    converter = getattr(moonlib_s, "as_photometric_model", None)
     try:
         if converter is not None and value:
             return converter(value).value
@@ -335,7 +335,7 @@ def _earthshine(bag: Any) -> Dict[str, Any]:
     block = bag if isinstance(bag, dict) else {}
     albedo = _finite(block.get("earth_geometric_albedo"), 0.0)
     if not 0.0 < albedo <= 1.0:
-        albedo = moonlib.moonview.DEFAULT_EARTH_GEOMETRIC_ALBEDO
+        albedo = moonlib_s.moonview.DEFAULT_EARTH_GEOMETRIC_ALBEDO
     settings: Dict[str, Any] = {
         "earthshine": bool(block.get("on", True)),
         "earthshine_gain": max(0.0, min(100.0, _finite(block.get("gain"), 1.0))),
@@ -373,7 +373,7 @@ def _earthshine_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
 
 
 #: Tone curves for the single-component exports, mirroring
-#: :func:`moonlib.plotting.write_radiance_png`: the CLI writes the earthshine
+#: :func:`moonlib_s.plotting.write_radiance_png`: the CLI writes the earthshine
 #: with a linear tone auto-exposed to its own range, and the page has to produce
 #: the same picture or the two are not the same product.
 _COMPONENT_TONES = {"sunlit": "srgb", "earthshine": "linear"}
@@ -411,11 +411,11 @@ def _component_image(render: Any, component: str) -> np.ndarray:
     """
     if component == "image":
         return render.image
-    from moonlib.moonview import apply_tone_mapping
+    from moonlib_s.moonview import apply_tone_mapping
 
     field = getattr(render, component, None)
     if field is None:  # pragma: no cover - both are kept for every web render
-        raise moonlib.MoonlibError(f"这一帧没有保留 {component} 分量。")
+        raise moonlib_s.MoonlibError(f"这一帧没有保留 {component} 分量。")
     values = np.asarray(field, dtype=np.float64)
     positive = values[values > 0.0]
     if positive.size == 0:
@@ -445,7 +445,7 @@ def _component_linear(render: Any, component: str) -> np.ndarray:
 
 
 class _ExposedRender:
-    """Just enough of a ``MoonRender`` for :func:`moonlib.sdr_hdr_pair`.
+    """Just enough of a ``MoonRender`` for :func:`moonlib_s.sdr_hdr_pair`.
 
     The pair only reads ``image``, the two radiance components and
     ``stats["exposure_scale"]`` -- so one component that has already been
@@ -469,9 +469,9 @@ def _tz_offset(request: Dict[str, Any]) -> float:
         return 8.0
 
 
-def parse_observer(when: Dict[str, Any]) -> moonlib.Observer:
+def parse_observer(when: Dict[str, Any]) -> moonlib_s.Observer:
     site = when.get("observer") or {}
-    return moonlib.Observer(
+    return moonlib_s.Observer(
         lat=_f(site, "lat", 30),
         lon=_f(site, "lon", 120),
         name=str(site.get("name") or "observer"),
@@ -530,7 +530,7 @@ class MoonService:
         with self._lock:
             if self._terrain is None:
                 started = time.time()
-                self._terrain = moonlib.open_terrain()
+                self._terrain = moonlib_s.open_terrain()
                 self._terrain_seconds = time.time() - started
             return self._terrain
 
@@ -538,13 +538,13 @@ class MoonService:
         """Named landforms, read once: the gazetteer is 9 000 rows of CSV."""
         with self._lock:
             if self._catalogue is None:
-                self._catalogue = moonlib.annotation_catalogue()
+                self._catalogue = moonlib_s.annotation_catalogue()
             return self._catalogue
 
-    def view(self, when_utc: str, site: moonlib.Observer, earth_albedo: float = 0.0):
+    def view(self, when_utc: str, site: moonlib_s.Observer, earth_albedo: float = 0.0):
         return self.report(when_utc, site, earth_albedo)["view"]
 
-    def report(self, when_utc: str, site: moonlib.Observer,
+    def report(self, when_utc: str, site: moonlib_s.Observer,
                earth_albedo: float = 0.0) -> Dict[str, Any]:
         """Geometry plus the full moon_report, cached together.
 
@@ -566,11 +566,11 @@ class MoonService:
         with self._lock:
             cached = self._views.get(key)
         if cached is None:
-            view = moonlib.view_geometry(
+            view = moonlib_s.view_geometry(
                 site, when_utc, earth_albedo=earth_albedo or None
             )
             try:
-                report = moonlib.moon_report(site, when_utc).to_dict()
+                report = moonlib_s.moon_report(site, when_utc).to_dict()
             except Exception:  # pragma: no cover - the report is a nicety
                 report = {}
             cached = {"view": view, "report": report}
@@ -597,7 +597,7 @@ class MoonService:
             "animation_max_frames": ANIMATION_MAX_FRAMES,
             # The page prints this in its header, so "which build is this?" has
             # an answer without opening a terminal.
-            "version": moonlib.__version__,
+            "version": moonlib_s.__version__,
         }
 
     # -- full disk ------------------------------------------------------
@@ -648,7 +648,7 @@ class MoonService:
             # it behind a render nobody has given up on.
             if self._render_lock.acquire(blocking=False):
                 return
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 "上一张还在渲染。等它结束（或稍等几秒）再试；要停它就按「终止」。"
             )
         seconds = _RENDER_HANDOVER_SECONDS if waited is None else float(waited)
@@ -659,7 +659,7 @@ class MoonService:
             if self._render_lock.acquire(blocking=False):
                 return
             if time.monotonic() >= deadline:
-                raise moonlib.MoonlibError(
+                raise moonlib_s.MoonlibError(
                     "上一张还在渲染，而且没有响应「终止」。等它结束再试，"
                     "或者重启一下服务。"
                 )
@@ -678,12 +678,12 @@ class MoonService:
              shadow_steps: int
              ) -> Tuple[np.ndarray, Dict[str, Any]]:
         if int(width) > MAX_DISK_PX:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 f"整月面最大 {MAX_DISK_PX} px（收到 {int(width)}）——"
                 "再往上地形数据已经没有更多细节了。"
             )
         if int(width) < MIN_PX:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 f"整月面最小 {MIN_PX} px（收到 {int(width)}）。"
             )
         when = request.get("when") or {}
@@ -716,17 +716,17 @@ class MoonService:
         # wait for the handover or refuse at once.
         with self._render_slot():
             with self._rendering():
-                render = moonlib.render_moon(
+                render = moonlib_s.render_moon(
                     view=view, settings=settings, terrain=self.terrain(),
                     cancel=self._cancel_event.is_set,
                 )
-        geometry = moonlib.view_summary(render.view)
+        geometry = moonlib_s.view_summary(render.view)
         geometry["report"] = self.report(
             when.get("at") or None, site, earth["earth_geometric_albedo"]
         )["report"]
         if not geometry["report"]:  # pragma: no cover - fallback
-            geometry["moon_altitude_deg"] = moonlib.az_el(
-                "MOON", moonlib.to_et(geometry["when_utc"]), site
+            geometry["moon_altitude_deg"] = moonlib_s.az_el(
+                "MOON", moonlib_s.to_et(geometry["when_utc"]), site
             ).elevation_deg
         geometry["utc_offset_hours"] = _tz_offset(request)
         geometry["render_seconds"] = time.time() - started
@@ -762,11 +762,11 @@ class MoonService:
                 _component_image(render, component),
                 _component_linear(render, component),
             )
-            sdr, high = moonlib.sdr_hdr_pair(source, stops=stops)
-            gains = moonlib.gain_map(sdr, high, stops=stops, gamma=gamma)
+            sdr, high = moonlib_s.sdr_hdr_pair(source, stops=stops)
+            gains = moonlib_s.gain_map(sdr, high, stops=stops, gamma=gamma)
             geometry["hdr"] = {
                 "gain": _data_url(encode_png(gains.data)),
-                "metadata": moonlib.gain_map_metadata(gains),
+                "metadata": moonlib_s.gain_map_metadata(gains),
                 "width": int(width),
                 "height": int(width),
                 "stops": stops,
@@ -787,7 +787,7 @@ class MoonService:
         when = request.get("when") or {}
         selection = request.get("selection") or {}
         if not selection:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 "No selection: drag a box on the Moon image first."
             )
         site = parse_observer(when)
@@ -804,7 +804,7 @@ class MoonService:
         height = int(_f(output, "height", width))
         for label, value in (("宽", width), ("高", height)):
             if not MIN_PX <= value <= MAX_OUTPUT_PX:
-                raise moonlib.MoonlibError(
+                raise moonlib_s.MoonlibError(
                     f"输出{label}必须在 64–{MAX_OUTPUT_PX} px 之间（收到 {value}）。"
                 )
         settings = MoonRenderSettings(
@@ -825,7 +825,7 @@ class MoonService:
         started = time.time()
         with self._render_slot():
             with self._rendering():
-                render = moonlib.render_region(
+                render = moonlib_s.render_region(
                     view,
                     _f(selection, "lon", 0.0),
                     _f(selection, "lat", 0.0),
@@ -940,7 +940,7 @@ class MoonService:
         """
         with self._lock:
             if self._linear is None:
-                raise moonlib.MoonlibError(
+                raise moonlib_s.MoonlibError(
                     "No rendered frame to process yet; press 生成模拟 first."
                 )
             requested = render_id or request.get("render_id")
@@ -961,7 +961,7 @@ class MoonService:
                 linear = (self._linear_sunlit if component == "sunlit"
                           else self._linear_earthshine)
                 if linear is None:  # pragma: no cover - both are kept together
-                    raise moonlib.MoonlibError(
+                    raise moonlib_s.MoonlibError(
                         f"这一帧没有保留 {component} 分量，请重新生成模拟。"
                     )
                 component_exposure = _component_exposure(linear)
@@ -981,7 +981,7 @@ class MoonService:
         photons = _opt_f(processing, "noise_photons")
         sigma = _f(processing, "noise_sigma", 0.0)
         sharpen = _sharpen_radius(processing, arcsec_per_pixel)
-        image = moonlib.process_photograph(
+        image = moonlib_s.process_photograph(
             linear,
             None,
             train,
@@ -1006,7 +1006,7 @@ class MoonService:
         # The report has to describe the frame that was just made, so it is
         # handed the same radius the mask was built with rather than the
         # multiple it would otherwise re-derive.
-        report = moonlib.instrument_report(
+        report = moonlib_s.instrument_report(
             train.telescope,
             arcsec_per_pixel=arcsec_per_pixel,
             seeing_fwhm_arcsec=_f(atmosphere, "seeing", 1.0),
@@ -1045,12 +1045,12 @@ class MoonService:
         start = str(request.get("start") or "")
         end = str(request.get("end") or "")
         if not start or not end:
-            raise moonlib.MoonlibError("事件预报需要开始与结束时间。")
-        if kind not in moonlib.EVENT_KINDS:
-            raise moonlib.MoonlibError(
-                f"未知的事件类型 {kind!r}；可选：{', '.join(moonlib.EVENT_KINDS)}。"
+            raise moonlib_s.MoonlibError("事件预报需要开始与结束时间。")
+        if kind not in moonlib_s.EVENT_KINDS:
+            raise moonlib_s.MoonlibError(
+                f"未知的事件类型 {kind!r}；可选：{', '.join(moonlib_s.EVENT_KINDS)}。"
             )
-        found = moonlib.moon_events(site, start, end, kinds=[kind])
+        found = moonlib_s.moon_events(site, start, end, kinds=[kind])
         return {
             "kind": kind,
             "start": start,
@@ -1074,16 +1074,16 @@ class MoonService:
         start = str(request.get("start") or "")
         end = str(request.get("end") or "")
         if not start or not end:
-            raise moonlib.MoonlibError("动画需要开始与结束时间。")
+            raise moonlib_s.MoonlibError("动画需要开始与结束时间。")
         step = _f(request, "step_seconds", 60.0)
         if not step > 0.0:
-            raise moonlib.MoonlibError("时间步长必须大于 0 秒。")
-        span = moonlib.to_et(end) - moonlib.to_et(start)
+            raise moonlib_s.MoonlibError("时间步长必须大于 0 秒。")
+        span = moonlib_s.to_et(end) - moonlib_s.to_et(start)
         if span < 0.0:
-            raise moonlib.MoonlibError("动画的结束时间早于开始时间。")
+            raise moonlib_s.MoonlibError("动画的结束时间早于开始时间。")
         total = int(math.floor(span / step + 1e-9)) + 1
         if total > ANIMATION_MAX_FRAMES:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 f"这一动画有 {total} 帧，超过上限 {ANIMATION_MAX_FRAMES} 帧；"
                 "把时间步长调大，或把起止范围缩短。"
             )
@@ -1093,7 +1093,7 @@ class MoonService:
         height = int(_f(output, "height", width))
         for side, value in (("宽", width), ("高", height)):
             if not MIN_PX <= value <= MAX_DISK_PX:
-                raise moonlib.MoonlibError(
+                raise moonlib_s.MoonlibError(
                     f"动画分辨率{side}必须在 {MIN_PX}–{MAX_DISK_PX} px 之间"
                     f"（收到 {value}）。"
                 )
@@ -1115,7 +1115,7 @@ class MoonService:
         )
         region = request.get("region")
         if region is not None and not isinstance(region, dict):
-            raise moonlib.MoonlibError("region must be an object when it is given.")
+            raise moonlib_s.MoonlibError("region must be an object when it is given.")
         # The file's size is a separate question from the render's: frames can
         # be rendered at the scale the physics resolves and written at the size
         # the reader asked for.  One number for a square frame, a pair for one
@@ -1124,21 +1124,21 @@ class MoonService:
         if scale_to is not None:
             sides = scale_to if isinstance(scale_to, list) else [scale_to]
             if not all(MIN_PX <= side <= MAX_DISK_PX for side in sides):
-                raise moonlib.MoonlibError(
+                raise moonlib_s.MoonlibError(
                     "动画输出分辨率必须在 "
                     f"{MIN_PX}–{MAX_DISK_PX} px 之间（收到 {scale_to}）。"
                 )
         smooth_px = _f(request, "smooth_px", 0.0)
         if smooth_px < 0.0:
-            raise moonlib.MoonlibError("动画的平滑半径不能是负数。")
+            raise moonlib_s.MoonlibError("动画的平滑半径不能是负数。")
         timestamp = _animation_timestamp(request.get("timestamp"))
         hdr = request.get("hdr") or {}
         fps = _f(request, "fps", 12.0)
         if not fps > 0.0:
-            raise moonlib.MoonlibError("帧率必须大于 0。")
+            raise moonlib_s.MoonlibError("帧率必须大于 0。")
         apply_processing = bool(request.get("apply_processing"))
         if apply_processing and bool(hdr.get("on")):
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 "「应用后期处理」与 HDR 不能同时开：后期处理链的终点是显示图，"
                 "没有线性帧可以写成 HDR。"
             )
@@ -1187,7 +1187,7 @@ class MoonService:
         return {"id": job_id, "state": "running", "total": int(total)}
 
     def _animation_dir(self) -> Path:
-        directory = moonlib.cache_dir() / "animations"
+        directory = moonlib_s.cache_dir() / "animations"
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
@@ -1227,7 +1227,7 @@ class MoonService:
         """
         path = self._animation_dir() / f"moon-{job_id}.mp4"
         try:
-            frames = moonlib.animation_frames(
+            frames = moonlib_s.animation_frames(
                 site, start, end, step, settings=settings, region=region,
                 terrain=self.terrain(), cancel=cancel.is_set,
             )
@@ -1247,7 +1247,7 @@ class MoonService:
                             job["progress"] = job["frames"] / max(1, job["total"])
                     yield processor(frame) if processor is not None else frame
 
-            info = moonlib.write_animation(path, counted(), fps=fps, hdr=hdr,
+            info = moonlib_s.write_animation(path, counted(), fps=fps, hdr=hdr,
                                            stops=hdr_stops, scale_to=scale_to,
                                            smooth_px=smooth_px, timestamp=timestamp)
             with self._animation_lock:
@@ -1258,7 +1258,7 @@ class MoonService:
                         path=str(path), seconds=float(info.get("seconds", 0.0)),
                         bytes=int(path.stat().st_size) if path.is_file() else 0,
                     )
-        except moonlib.MoonlibError as error:
+        except moonlib_s.MoonlibError as error:
             cancelled = "cancel" in str(error).lower()
             try:
                 path.unlink()
@@ -1284,7 +1284,7 @@ class MoonService:
         with self._animation_lock:
             job = self._animations.get(job_id)
             if job is None:
-                raise moonlib.MoonlibError(f"没有这个动画任务：{job_id}")
+                raise moonlib_s.MoonlibError(f"没有这个动画任务：{job_id}")
             payload = dict(job)
         payload["url"] = f"/api/animation/{job_id}/file" if payload["state"] == "done" else None
         payload.pop("path", None)
@@ -1294,10 +1294,10 @@ class MoonService:
         with self._animation_lock:
             job = self._animations.get(job_id)
             if job is None or job["state"] != "done" or not job.get("path"):
-                raise moonlib.MoonlibError(f"动画 {job_id} 还没有准备好。")
+                raise moonlib_s.MoonlibError(f"动画 {job_id} 还没有准备好。")
             path = Path(job["path"])
         if not path.is_file():  # pragma: no cover - purged under our feet
-            raise moonlib.MoonlibError(f"动画 {job_id} 的文件已经不在了。")
+            raise moonlib_s.MoonlibError(f"动画 {job_id} 的文件已经不在了。")
         return path
 
     # -- HDR gain-map JPEG ------------------------------------------------
@@ -1321,9 +1321,9 @@ class MoonService:
             data = _resize_gain(data, sdr.shape[:2])
         gain = _gain_map_from_metadata(data, metadata)
         quality = int(_f(request, "quality", 95))
-        with tempfile.TemporaryDirectory(prefix="moonlib-hdr-") as directory:
+        with tempfile.TemporaryDirectory(prefix="moonlib_s-hdr-") as directory:
             path = Path(directory) / "hdr.jpg"
-            info = moonlib.write_gain_map_jpeg(
+            info = moonlib_s.write_gain_map_jpeg(
                 path, sdr, gain, quality=quality, metadata=metadata
             )
             body = path.read_bytes()
@@ -1336,7 +1336,7 @@ class MoonService:
         from datetime import datetime, timezone
 
         payload = {
-            "schema": "moonlib-web-settings/1",
+            "schema": "moonlib_s-web-settings/1",
             "saved_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "settings": request.get("settings"),
         }
@@ -1353,15 +1353,15 @@ class MoonService:
         """
         frame_name = str(request.get("frame") or "disk")
         language = str(request.get("language") or DEFAULT_LANGUAGE)
-        if language not in moonlib.LANGUAGES:
-            raise moonlib.MoonlibError(
-                f"language must be one of {', '.join(moonlib.LANGUAGES)}; "
+        if language not in moonlib_s.LANGUAGES:
+            raise moonlib_s.MoonlibError(
+                f"language must be one of {', '.join(moonlib_s.LANGUAGES)}; "
                 f"got {language!r}."
             )
         classes = request.get("classes")
         if classes is not None:
             if not isinstance(classes, (list, tuple)):
-                raise moonlib.MoonlibError("classes must be a list of class keys.")
+                raise moonlib_s.MoonlibError("classes must be a list of class keys.")
             classes = [str(key) for key in classes]
         options = {
             "max_labels": max(0, int(_f(request, "labels", DEFAULT_LABELS))),
@@ -1379,11 +1379,11 @@ class MoonService:
             view = self.view(when.get("at") or None, parse_observer(when))
             preview = request.get("preview") or {}
             width = int(_f(preview, "width", PREVIEW_WIDTH))
-            frame = moonlib.disk_frame(view, width, width)
+            frame = moonlib_s.disk_frame(view, width, width)
         elif frame_name == "region":
             frame = self.cached_region_frame(request.get("render_id"))
         else:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 f"unknown frame {frame_name!r}; expected 'disk' or 'region'."
             )
         started = time.time()
@@ -1392,7 +1392,7 @@ class MoonService:
         # on the sphere drifts off its own feature by the relief there -- a
         # kilometre of it is 0.65 px on a 2400 px frame.
         options["terrain"] = self.terrain()
-        payload = moonlib.annotate_frame(frame, self.catalogue(), **options).to_dict()
+        payload = moonlib_s.annotate_frame(frame, self.catalogue(), **options).to_dict()
         payload["seconds"] = time.time() - started
         # Echo the request in the words the wire uses, so the page can quote the
         # density it actually got rather than the one it meant to ask for.
@@ -1426,7 +1426,7 @@ class MoonService:
         wanted = "先生成模拟图像，再添加月面地貌。"
         with self._lock:
             if self._linear is None or self._linear_view is None:
-                raise moonlib.MoonlibError(wanted)
+                raise moonlib_s.MoonlibError(wanted)
             requested = render_id or self._linear_id
             if str(requested) != str(self._linear_id):
                 raise StaleRender(
@@ -1437,8 +1437,8 @@ class MoonService:
             rotation = float(self._linear_meta.get("rotation_deg") or 0.0)
             view = self._linear_view
         if not region:
-            raise moonlib.MoonlibError(wanted)
-        return moonlib.region_frame(
+            raise moonlib_s.MoonlibError(wanted)
+        return moonlib_s.region_frame(
             view,
             float(region["lon_deg"]),
             float(region["lat_deg"]),
@@ -1450,14 +1450,14 @@ class MoonService:
         )
 
 
-class StaleRender(moonlib.MoonlibError):
+class StaleRender(moonlib_s.MoonlibError):
     """The client asked to process a frame the server no longer holds."""
 
 
 # ---------------------------------------------------------------------------
 # settings files
 # ---------------------------------------------------------------------------
-class SettingsError(moonlib.MoonlibError):
+class SettingsError(moonlib_s.MoonlibError):
     """A settings file cannot be read or written as asked."""
 
 
@@ -1553,7 +1553,7 @@ def _frame_processor(
 ):
     """The 后期处理 chain, as a function from an animation frame to pixels.
 
-    The same :func:`moonlib.process_photograph` call :meth:`MoonService.process`
+    The same :func:`moonlib_s.process_photograph` call :meth:`MoonService.process`
     makes for a single frame, with one difference that matters for a sequence:
     the noise seed includes the frame number.  A frozen seed would stamp the
     *same* grain pattern on every frame, which is not what noise looks like --
@@ -1568,13 +1568,13 @@ def _frame_processor(
     def apply(frame: Any) -> np.ndarray:
         render = getattr(frame, "render", None)
         if render is None:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 "「应用后期处理」需要渲染出的帧，而不是已经处理过的像素。"
             )
         sunlit = getattr(render, "sunlit", None)
         earthshine = getattr(render, "earthshine", None)
         if sunlit is None or earthshine is None:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 "这一帧没有保留 sunlit/earthshine 分量，无法应用后期处理。"
             )
         stats = getattr(render, "stats", None) or {}
@@ -1584,7 +1584,7 @@ def _frame_processor(
         photons = _opt_f(processing, "noise_photons")
         sigma = _f(processing, "noise_sigma", 0.0)
         plate_scale = float(stats.get("arcsec_per_pixel") or 1.0)
-        return moonlib.process_photograph(
+        return moonlib_s.process_photograph(
             linear,
             None,
             train,
@@ -1625,10 +1625,10 @@ def _animation_size(value: Any) -> Optional[Any]:
         try:
             return [int(value[0]), int(value[1])]
         except (TypeError, ValueError) as exc:
-            raise moonlib.MoonlibError(
+            raise moonlib_s.MoonlibError(
                 f"动画输出分辨率必须是两个整数（收到 {value!r}）。"
             ) from exc
-    raise moonlib.MoonlibError(
+    raise moonlib_s.MoonlibError(
         f"动画输出分辨率必须是一个数或一对数（收到 {value!r}）。"
     )
 
@@ -1642,15 +1642,15 @@ def _animation_timestamp(value: Any) -> Optional[Dict[str, Any]]:
     if not value:
         return None
     if not isinstance(value, dict):
-        raise moonlib.MoonlibError("时间戳设置必须是一个对象。")
+        raise moonlib_s.MoonlibError("时间戳设置必须是一个对象。")
     corner = str(value.get("corner") or "left-top")
     if corner not in _TIMESTAMP_CORNERS:
-        raise moonlib.MoonlibError(
+        raise moonlib_s.MoonlibError(
             f"时间戳位置只能是 {'/'.join(_TIMESTAMP_CORNERS)}（收到 {corner!r}）。"
         )
     margin = _f(value, "margin_px", 16.0)
     if margin < 0.0:
-        raise moonlib.MoonlibError("时间戳边距不能是负数。")
+        raise moonlib_s.MoonlibError("时间戳边距不能是负数。")
     offset = _f(value, "utc_offset_hours", 0.0)
     return {"corner": corner, "margin_px": int(round(margin)),
             "utc_offset_hours": float(offset)}
@@ -1732,7 +1732,7 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
 # HTTP
 # ---------------------------------------------------------------------------
 def encode_png(image: np.ndarray) -> bytes:
-    from moonlib.plotting import encode_png as _encode
+    from moonlib_s.plotting import encode_png as _encode
 
     return _encode(image)
 
@@ -1769,7 +1769,7 @@ def _decode_data_url(url: Any, mode: str = "RGB", what: str = "the image") -> An
     """
     text = str(url or "")
     if not text.startswith("data:") or "," not in text:
-        raise moonlib.MoonlibError(f"expected a data: URL for {what}.")
+        raise moonlib_s.MoonlibError(f"expected a data: URL for {what}.")
     from PIL import Image
 
     head, body = text.split(",", 1)
@@ -1777,7 +1777,7 @@ def _decode_data_url(url: Any, mode: str = "RGB", what: str = "the image") -> An
     try:
         return Image.open(io.BytesIO(raw)).convert(mode)
     except Exception as error:
-        raise moonlib.MoonlibError(f"{what} could not be decoded: {error}") from error
+        raise moonlib_s.MoonlibError(f"{what} could not be decoded: {error}") from error
 
 
 def _resize_gain(data: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
@@ -1807,10 +1807,10 @@ def _gain_map_from_metadata(data: np.ndarray, metadata: Dict[str, Any]):
             if name in metadata and metadata[name] is not None:
                 return float(metadata[name])
         if default is missing:
-            raise moonlib.MoonlibError(f"the HDR metadata is missing {names[0]!r}.")
+            raise moonlib_s.MoonlibError(f"the HDR metadata is missing {names[0]!r}.")
         return default
 
-    return moonlib.GainMap(
+    return moonlib_s.GainMap(
         data=np.asarray(data, dtype=np.float32),
         min_log2=field("GainMapMin", "min_log2"),
         max_log2=field("GainMapMax", "max_log2"),
@@ -1844,7 +1844,7 @@ def _shift_gain(data: np.ndarray, dx: int, dy: int) -> np.ndarray:
 
 class Handler(BaseHTTPRequestHandler):
     service: MoonService = None  # type: ignore[assignment]
-    server_version = "moonlib-web"
+    server_version = "moonlib_s-web"
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter
         sys.stderr.write("  %s\n" % (fmt % args))
@@ -1890,7 +1890,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return json.loads(raw.decode("utf-8"))
         except ValueError as error:
-            raise moonlib.MoonlibError(f"Malformed JSON body: {error}") from error
+            raise moonlib_s.MoonlibError(f"Malformed JSON body: {error}") from error
 
     # -- routes ---------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
@@ -1922,7 +1922,7 @@ class Handler(BaseHTTPRequestHandler):
                 # animation is tens of megabytes and base64 would inflate it.
                 try:
                     file_path = self.service.animation_file(job_id)
-                except moonlib.MoonlibError as error:
+                except moonlib_s.MoonlibError as error:
                     return self._json(404, {"error": str(error)})
                 return self._send(
                     200, file_path.read_bytes(), "video/mp4",
@@ -1995,7 +1995,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": f"no route {path}"})
         except StaleRender as error:
             return self._json(409, {"error": str(error), "stale": True})
-        except moonlib.MoonlibError as error:
+        except moonlib_s.MoonlibError as error:
             return self._json(400, {"error": str(error)})
         except Exception as error:  # pragma: no cover - surfaced to the page
             traceback.print_exc()
@@ -2013,9 +2013,28 @@ def build_server(host: str, port: int, settings_dir: Optional[Path] = None) -> T
             time.time() - started,
             ", ".join(
                 "%s %.0f m/px" % (p.name, km * 1000)
-                for p, km in moonlib.global_dem_sources()
+                for p, km in moonlib_s.global_dem_sources()
             )
             or "default pyramid",
+        ),
+        flush=True,
+    )
+
+    # Loaded here, in the one thread that exists before a single request is
+    # served.  CSPICE keeps its pool in process-global state, so a load that
+    # happened lazily inside the first request thread would race with the
+    # others; doing it up front also turns a missing kernel into a line in the
+    # banner instead of a 500 on the first render.
+    started = time.time()
+    session = moonlib_s.init_kernels()
+    span = session.coverage_text()
+    print(
+        "kernels ready in %.1f s (%d files, %s%s)"
+        % (
+            time.time() - started,
+            len(session.loaded),
+            session.mode,
+            "" if span is None else ", %s .. %s" % span,
         ),
         flush=True,
     )

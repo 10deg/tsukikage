@@ -3,11 +3,11 @@
 
 The web client draws its labels on a canvas, which is awkward to inspect from a
 terminal and impossible to diff.  This tool renders the same frame through the
-same code path -- :func:`moonlib.render_moon` or :func:`moonlib.render_region`,
-then :func:`moonlib.annotate_frame` -- and draws the result with Pillow, so a
+same code path -- :func:`moonlib_s.render_moon` or :func:`moonlib_s.render_region`,
+then :func:`moonlib_s.annotate_frame` -- and draws the result with Pillow, so a
 change to the projection or the layout can be looked at instead of guessed at.
 
-It needs Pillow, which arrives with matplotlib (``pip install 'moonlib[full]'``).
+It needs Pillow, which arrives with matplotlib (``pip install 'moonlib_s[full]'``).
 
 Usage
 -----
@@ -29,10 +29,10 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 from _bootstrap import ROOT, use_src  # noqa: E402
 
-moonlib = use_src()
+moonlib_s = use_src()
 
-import moonlib  # noqa: E402
-from moonlib.annotations import annotate_frame, disk_frame, region_frame  # noqa: E402
+import moonlib_s  # noqa: E402
+from moonlib_s.annotations import annotate_frame, disk_frame, region_frame  # noqa: E402
 
 #: The page's palette, one colour per landform class.  The page owns this table
 #: -- colour is presentation -- and this tool carries a copy so that what it
@@ -104,7 +104,7 @@ def draw_annotations(
     """Return a copy of *image* with markers, leaders and names drawn on it.
 
     *image* is the renderer's own float frame in ``[0, 1]``; the conversion to
-    bytes is the same one :func:`moonlib.plotting.encode_png` makes, so the
+    bytes is the same one :func:`moonlib_s.plotting.encode_png` makes, so the
     preview and the page look at identical pixels.
     """
     import numpy as np
@@ -253,7 +253,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="pyramid level for the render (higher is quicker)")
     args = parser.parse_args(argv)
     if args.list_classes:
-        from moonlib.annotations import CLASS_LABELS, FEATURE_CLASSES
+        from moonlib_s.annotations import CLASS_LABELS, FEATURE_CLASSES
 
         for key in FEATURE_CLASSES:
             zh, en = CLASS_LABELS[key]
@@ -261,9 +261,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     classes = [key.strip() for key in args.classes.split(",")] if args.classes else None
 
-    site = moonlib.Observer(lat=args.lat, lon=args.lon, name="preview")
-    view = moonlib.view_geometry(site, args.when)
-    settings = moonlib.MoonRenderSettings(
+    site = moonlib_s.Observer(lat=args.lat, lon=args.lon, name="preview")
+    view = moonlib_s.view_geometry(site, args.when)
+    settings = moonlib_s.MoonRenderSettings(
         width=args.width,
         height=args.width,
         samples_per_pixel=1,
@@ -278,18 +278,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         span_km = 2.0 * view.distance_km * math.tan(
             math.radians(args.fov_radius_arcsec / 3600.0)
         )
-        render = moonlib.render_region(
+        render = moonlib_s.render_region(
             view, args.target_lon, args.target_lat, span_km=span_km,
             rotation_deg=args.rotation_deg, settings=settings,
-            terrain=moonlib.open_terrain(),
+            terrain=moonlib_s.open_terrain(),
         )
         frame = region_frame(
             view, args.target_lon, args.target_lat, span_km,
             settings.width, settings.height, args.rotation_deg,
-            terrain=moonlib.open_terrain(),
+            terrain=moonlib_s.open_terrain(),
         )
     else:
-        render = moonlib.render_moon(view=view, settings=settings, terrain=moonlib.open_terrain())
+        render = moonlib_s.render_moon(view=view, settings=settings, terrain=moonlib_s.open_terrain())
         frame = disk_frame(view, settings.width, settings.height, settings.disk_fraction)
     print(f"rendered in {time.time() - started:.1f} s")
 
@@ -304,7 +304,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         outline_min_radius_px=args.outline_min_radius_px,
         # The same height field the picture was traced from, so the names land
         # on the pixels they name rather than on the sphere under them.
-        terrain=moonlib.open_terrain(),
+        terrain=moonlib_s.open_terrain(),
     )
     counts = plan.to_dict()["counts"]
     shown_classes = ", ".join(

@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib  # noqa: E402
+from _cli import add_output_argument, moonlib_s  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,13 +37,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib.Observer(lat=args.lat, lon=args.lon)
+    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon)
 
     if args.supermoon:
         full_moons = [
             entry
-            for entry in moonlib.phase_calendar(args.year, observer)
-            if entry.kind is moonlib.PhaseKind.FULL_MOON
+            for entry in moonlib_s.phase_calendar(args.year, observer)
+            if entry.kind is moonlib_s.PhaseKind.FULL_MOON
         ]
         full_moons.sort(key=lambda entry: entry.angular_diameter_arcsec, reverse=True)
         print(f"{len(full_moons)} full moons in {args.year}, largest first\n")
@@ -63,14 +63,14 @@ def main() -> int:
             )
         return 0
 
-    matches = moonlib.find_moons_by_illumination(
+    matches = moonlib_s.find_moons_by_illumination(
         args.percent,
         args.year,
         observer,
         waxing=args.waxing,
         phase_tolerance_deg=args.tolerance,
     )
-    print(moonlib.reporting.format_illumination_matches(matches))
+    print(moonlib_s.reporting.format_illumination_matches(matches))
 
     if args.no_plots or not matches:
         return 0

@@ -185,6 +185,14 @@
                      title="按预览窗口（屏幕）大小算，与渲染分辨率无关；留空为窗口短边的 2.1%">字号 px
                 <input type="number" id="label-font" min="6" max="64" step="1" placeholder="自动">
               </label>
+              <!-- 锁定：避让算法是按字号算的，改字号就会重排 —— 那是"帮我排一版"的
+                   正确答案，却是"把字调大一点"的错误答案。锁定后只改字的大小，
+                   框的位置与避让方案不动。 -->
+              <label class="check inline"
+                     title="锁定当前标注的位置与避让方案：改字号（或缩放窗口）只改变字形大小，标注不再重排；改分类、语言、密度、明暗或换一帧时会按新条件重排一次，并把这个新布局重新锁定">
+                <input type="checkbox" id="label-lock">
+                <span>锁定布局</span>
+              </label>
               <label class="check inline" title="勾选：标签按地貌分类着色；不勾：全部用下边这一个文字颜色">
                 <input type="checkbox" id="label-colour" checked>
                 <span>彩色</span>

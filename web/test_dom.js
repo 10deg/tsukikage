@@ -245,4 +245,33 @@ check('and each row offers the steps it was asked for',
   check('and it is taken out of the flow', fall.includes('position: fixed'));
 }
 
+/* Three layers float over every picture -- the landform names, the selection
+ * box, and the veil a render puts up -- and the order between them is the whole
+ * of their interaction.  A name drawn over the box hid the handle the reader
+ * was dragging, which is what these checks are here to keep fixed. */
+const layerZ = (selector) => {
+  for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    // The selector text of a rule runs over the lines above its brace; the last
+    // line is the one that names it.  An exact match, because `.busy` is also
+    // the last word of `.status-line.busy`, which is a different rule.
+    const names = rule[1].split(',').map((part) => part.trim().split('\n').pop().trim());
+    if (!names.includes(selector)) continue;
+    const found = rule[2].match(/z-index:\s*(-?\d+)/);
+    if (found) return Number(found[1]);
+  }
+  return null;
+};
+{
+  const labels = layerZ('.view-body > canvas.labels');
+  const overlay = layerZ('.view-body > #overlay');
+  const veil = layerZ('.busy');
+  check('the selection box is drawn above the landform names',
+    labels !== null && overlay !== null && overlay > labels,
+    `overlay ${overlay} vs labels ${labels}`);
+  check('and the render veil covers both',
+    veil !== null && veil > overlay, `veil ${veil} vs overlay ${overlay}`);
+  check("while the picture's own controls stay on top of the veil",
+    layerZ('.view-tools') >= veil);
+}
+
 finish('all checks passed');

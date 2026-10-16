@@ -8,7 +8,7 @@ Tsukikage 以 **MIT** 许可发布（见 [`LICENSE`](LICENSE)），不包含任�
 
 - 来源：<https://github.com/Fluorine7/MoonLabeler>，**GPL**，作者 Fluorine7。
 - 借鉴范围：`moonlabeler/layout.py` 中标签**避让（label placement / collision avoidance）**
-  的算法思路，用于 `moonlib.annotations` 的标注排版。**未复制任何代码**，仅按下述方法
+  的算法思路，用于 `moonlib_s.annotations` 的标注排版。**未复制任何代码**，仅按下述方法
   独立实现；接口、数据结构与命名均为 Tsukikage 自有。
 - 借鉴的方法，归纳起来是四点：
   1. **候选位与起算距离**：以若干方向 × 若干距离档生成候选，斜角方向优先；带轮廓的地貌先把
@@ -22,7 +22,7 @@ Tsukikage 以 **MIT** 许可发布（见 [`LICENSE`](LICENSE)），不包含任�
   4. **重要标注优先**：重要标注先在**空画面**上排布——此时只有其他重要者的标记作为障碍，
      因此一个无名小点无法否决地标的位置；普通标注随后排布，冲突时让位的是普通点。重要标注
      在近距档全部失败后，还可尝试远距档。
-- Tsukikage 侧落点：`src/moonlib/annotations.py`（`plan_annotations` 及其布局函数）。
+- Tsukikage 侧落点：`src/moonlib_s/annotations.py`（`plan_annotations` 及其布局函数）。
 - 说明：以上为算法思想的独立实现。若日后要直接引用它的代码，合并后的作品须整体按 GPL
   发布——MIT 与 GPL 兼容，这样做是允许的——目前**没有**这样做。
 

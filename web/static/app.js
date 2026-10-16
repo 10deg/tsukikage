@@ -56,9 +56,9 @@ const views = {
 /* ── landform classes ──────────────────────────────────────────────────────
  *
  * The categories are the translation table's own sheets -- 环形坑, 月溪, 月谷,
- * 月海 … -- with one size split the table does not make: the moonlib catalogue
+ * 月海 … -- with one size split the table does not make: the moonlib_s catalogue
  * calls a crater wider than 300 km a basin.  The keys must stay in step with
- * `moonlib.annotations.FEATURE_CLASSES`; /api/features reports the same list
+ * `moonlib_s.annotations.FEATURE_CLASSES`; /api/features reports the same list
  * with its counts, and `checkClasses()` below complains in the console if the
  * two ever drift apart.
  *
@@ -498,6 +498,7 @@ const PROC_FIELDS = [
 /** The announce annotations panel's own controls. */
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
+  'label-lock',
   'text-bold', 'text-color', 'outline-style', 'outline-width', 'outline-color',
 ];
 
@@ -721,7 +722,7 @@ function describeEarthshine(block, context) {
   if (!block || block.earthshine_ratio === undefined) { el.textContent = ''; return; }
   const parts = [];
   if (block.earthshine_on === false) parts.push('地照已关闭（未画）');
-  // The Moon's own magnitude is the library's (moonlib.moonview.moon_magnitude,
+  // The Moon's own magnitude is the library's (moonlib_s.moonview.moon_magnitude,
   // Allen's fit); the page only prints it.  The albedo is an input the reader
   // typed, so it is not repeated here.
   const ctx = context || {};
@@ -1856,6 +1857,22 @@ function itemColor(item, style) {
   return (style.classColors && style.classColors[item.class]) || style.textColor;
 }
 
+/** The style a view's labels are painted with, font size included.
+ *
+ * Unlocked, the plan's own ``font_px`` is the size its boxes were laid out for
+ * and nothing else should be used.  Locked, the boxes stay where they are and
+ * the type follows the 字号 field: the number is converted to the target frame's
+ * pixels the same way the request's own ``font_px`` is (screen pixels over the
+ * view's scale, times the frame factor an export is scaling by).
+ */
+function labelStyleForFrame(viewName, frameFactor = 1) {
+  const style = labelStyleFor(viewName, frameFactor);
+  if (labelLockOn()) {
+    style.fontPx = labelFrameFontPx(viewName) * Math.max(1e-6, frameFactor);
+  }
+  return style;
+}
+
 /** Where a view's picture sits on screen, for mapping image pixels onto it.
  *
  * Measured from the picture's own box rather than recomputed from the zoom and
@@ -1905,7 +1922,12 @@ function syncLabelLayer(viewName) {
  */
 function paintLabels(ctx, plan, style) {
   if (!ctx || !plan || !plan.items || !plan.items.length) return;
-  const fontPx = plan.font_px || 13;
+  // The plan carries the size its boxes were laid out for; a *locked* layout is
+  // painted at the size the reader is asking for now, so the style may override
+  // it.  Everything below that is a length -- markers, leader lines, the stroke
+  // an unstyled caller gets -- follows the same number, which is what makes a
+  // locked layout grow in type without moving.
+  const fontPx = (style && style.fontPx) || plan.font_px || 13;
   const ink = style || {};
   const rim = {
     width: ink.outlineWidth === undefined ? 1 : ink.outlineWidth,
@@ -2466,7 +2488,7 @@ function drawViewLabels(viewName) {
       ctx.translate(-cx, -cy);
     }
   }
-  if (hasNames) paintLabels(ctx, plan, labelStyleFor(viewName));
+  if (hasNames) paintLabels(ctx, plan, labelStyleForFrame(viewName));
   if (marks) {
     // The overlay is sized like the labels: the plan's own frame-pixel font
     // when there is one, and what the window would ask for when there is not.
@@ -2789,7 +2811,11 @@ function labelHitTest(viewName, point) {
   if (!plan || !plan.items || !plan.items.length || !map) return null;
   const frame = plan.frame || { width: DISK.width, height: DISK.height };
   const slack = 5 * point.dpr;
-  const fontPx = plan.font_px || 13;
+  // The marker's radius follows the font it was painted at, so the hit test has
+  // to ask the same question the painter did -- a locked layout is painted at
+  // the size the field says, not the one its boxes were laid out for.
+  const fontPx = labelLockOn()
+    ? labelFrameFontPx(viewName) : (plan.font_px || 13);
   const marker = Math.max(1.4, fontPx * 0.16) * Math.max(map.scaleX, map.scaleY);
   for (let index = plan.items.length - 1; index >= 0; index -= 1) {
     const item = plan.items[index];
@@ -3142,7 +3168,7 @@ function savedImageBlob(target, callback) {
   const marks = target === 'disk' && wantedLabels && marksWanted()
     ? { fontPx: plan && plan.font_px ? plan.font_px : 12 } : null;
   const canvas = composeImage(source, wanted.width, wanted.height, plan,
-    labelStyleFor(view), target === 'proc' ? frameOrientation() : null,
+    labelStyleForFrame(view), target === 'proc' ? frameOrientation() : null,
     marks, target === 'proc');
   callback(canvasBlob(canvas, format), format);
 }
@@ -3254,15 +3280,24 @@ async function saveDisk() {
   }
   let plan = null;
   if (state.labelsOn) {
-    setStatus(`正在按 ${width} px 重排地貌标注…`, 'busy');
-    // The reader's own nudges and put-away names travel to the file: the export
-    // is composed from the server's plan, not from the screen, so without this
-    // a name dragged into place would jump back in the saved picture.
-    plan = applyLabelEdits(await diskLabelsAt(width, when), 'disk');
+    // A locked layout is not re-laid-out at the export's resolution: it is
+    // scaled, so the file carries the arrangement the reader locked rather than
+    // the one the avoidance algorithm would choose for a bigger frame.
+    plan = lockedDiskPlan(when, width);
+    if (plan) {
+      setStatus(`正在按 ${width} px 缩放锁定的地貌标注…`, 'busy');
+    } else {
+      setStatus(`正在按 ${width} px 重排地貌标注…`, 'busy');
+      // The reader's own nudges and put-away names travel to the file: the export
+      // is composed from the server's plan, not from the screen, so without this
+      // a name dragged into place would jump back in the saved picture.
+      plan = await diskLabelsAt(width, when);
+    }
+    plan = applyLabelEdits(plan, 'disk');
   }
   try {
     const canvas = centred || composeImage(source.image, width, width, plan,
-      labelStyleFor('disk', width / Math.max(1, DISK.width)), null,
+      labelStyleForFrame('disk', width / Math.max(1, DISK.width)), null,
       annotate ? { fontPx: plan ? plan.font_px : 12 } : null, false, smooth);
     if (hdr) {
       // The gain map comes from the render that made this frame.  If it is not
@@ -3647,7 +3682,7 @@ function wireFeatureSearch() {
 /* ── the mini phase ────────────────────────────────────────────────────────
  *
  * A schematic of the same geometry the full disk is rendered from, drawn the
- * way moonlib.plotting.moon_phase_patch draws it: the terminator is the
+ * way moonlib_s.plotting.moon_phase_patch draws it: the terminator is the
  * semi-ellipse whose axis is cos(phase angle), the lit limb is the other half
  * of the circle, and the whole shape is turned so its bright side points where
  * the Sun is.  `bright_limb_position_angle_deg` is measured from image north
@@ -3656,7 +3691,7 @@ function wireFeatureSearch() {
  */
 /** The lit part of the disk, as a closed polygon centred on the origin.
  *
- * Ported from moonlib.plotting.moon_phase_patch, which is where the shape comes
+ * Ported from moonlib_s.plotting.moon_phase_patch, which is where the shape comes
  * from: the outer edge is half the limb, the inner edge is the terminator, and
  * the terminator projects to a semi-ellipse whose axis is cos(phase angle) --
  * ``-(2f - 1)`` for an illuminated fraction *f*, measured from the dark side.
@@ -3727,7 +3762,7 @@ const PHASE_CANVAS_PX = 72;
 
 /** The approximate lunar-calendar day for an age in days, as a day number.
  *
- * The same banded approximation moonlib.phases.lunar_day_label uses, because
+ * The same banded approximation moonlib_s.phases.lunar_day_label uses, because
  * the page has to agree with the library's own reports: the true Chinese
  * calendar day depends on the civil new-moon date and can differ by one, which
  * is why this is a display label and nothing else is derived from it.
@@ -3890,6 +3925,83 @@ function labelRequestBase() {
   };
 }
 
+/** Is the reader holding the layout still while they tune it?
+ *
+ * The avoidance algorithm is a function of the text size: a bigger font means
+ * bigger boxes, which means a different set of names fits and a different
+ * arrangement of the ones that do.  That is the right answer to "lay these out
+ * for me" and the wrong answer to "make the type bigger", so the lock freezes
+ * the layout and lets the type move inside it. */
+function labelLockOn() {
+  const box = $('label-lock');
+  return !!(box && box.checked);
+}
+
+/** What the layout of a view's plan is a function of -- deliberately *not* the
+ *  font size.
+ *
+ * While the lock is on, a refresh whose key matches the key the plan was laid
+ * out with keeps that plan.  Anything that changes *which* names are being
+ * placed (the frame itself, the classes, the language, the density, the
+ * day/night switch) changes the key and earns a fresh layout, which then
+ * becomes the locked one.  A change of 字号, of the window size or of the zoom
+ * does not, which is the whole point of the switch.
+ */
+function labelLayoutKey(viewName) {
+  const frame = viewName === 'disk'
+    ? `${DISK.width}|${JSON.stringify(state.diskWhen)}`
+    : `${state.renderId}`;
+  return JSON.stringify([frame, labelRequestBase()]);
+}
+
+/** The frame each frozen layout belongs to, as of the request that made it. */
+const labelLockKeys = { disk: null, region: null };
+
+/** The same layout at another resolution: every length in it times *k*.
+ *
+ * A locked layout is not re-laid-out for an export -- it *is* the layout the
+ * reader chose -- so it scales with the picture, exactly as the names on a
+ * paper map do.  Every field that carries a length is listed here on purpose:
+ * the frame and the plan's font are lengths too.
+ */
+function scalePlan(plan, k) {
+  if (!plan || !(k > 0) || k === 1) return plan;
+  const frame = plan.frame || { width: DISK.width, height: DISK.height };
+  return {
+    ...plan,
+    frame: { ...frame, width: frame.width * k, height: frame.height * k },
+    font_px: (plan.font_px || 13) * k,
+    items: (plan.items || []).map((item) => ({
+      ...item,
+      x: item.x * k,
+      y: item.y * k,
+      radius_px: (item.radius_px || 0) * k,
+      label_x: item.label_x === null || item.label_x === undefined
+        ? item.label_x : item.label_x * k,
+      label_y: item.label_y === null || item.label_y === undefined
+        ? item.label_y : item.label_y * k,
+      label_w: (item.label_w || 0) * k,
+      label_h: (item.label_h || 0) * k,
+      outline: item.outline
+        ? item.outline.map(([x, y]) => [x * k, y * k]) : item.outline,
+    })),
+  };
+}
+
+/** The frozen full-disk layout, when it describes the frame being exported.
+ *
+ * The plan is in the *preview's* pixels, so the caller scales it to the export;
+ * if the reader has moved the clock since the lock was taken, the frozen layout
+ * belongs to a frame nobody is looking at and the answer is ``null`` -- a fresh
+ * request is the honest thing there.
+ */
+function lockedDiskPlan(when, width) {
+  if (!labelLockOn() || !state.labels.disk) return null;
+  if (labelLockKeys.disk !== labelLayoutKey('disk')) return null;
+  if (JSON.stringify(when) !== JSON.stringify(state.diskWhen)) return null;
+  return scalePlan(state.labels.disk, width / Math.max(1, DISK.width));
+}
+
 /** The plan for the full disk at an arbitrary render size.
  *
  * The frame's pixel counts scale with the picture, so every length the server
@@ -3920,6 +4032,11 @@ async function diskLabelsAt(width, when) {
  * render is landing is the ordinary case -- so each call takes a ticket and
  * only the newest one is allowed to write.  Without that, the slower answer
  * wins and the picture ends up captioned for the frame before it.
+ *
+ * With the layout locked, a view whose key still matches keeps the plan it has:
+ * the request that would move the names is the one thing the lock is for.  Each
+ * landing plan records the key it was laid out for, so unlocking -- or any
+ * change that alters *what* is being placed -- re-flows immediately.
  */
 let labelSeq = 0;
 
@@ -3928,25 +4045,40 @@ async function refreshLabels() {
   if (!state.labelsOn) {
     state.labels.disk = null;
     state.labels.region = null;
+    labelLockKeys.disk = null;
+    labelLockKeys.region = null;
     drawAllLabels();
     return;
   }
-  const base = labelRequestBase();
+  const locked = labelLockOn();
   if (state.diskImage && state.diskWhen) {
-    const plan = await diskLabelsAt(DISK.width);
-    if (seq !== labelSeq) return;
-    if (plan) state.labels.disk = plan;
+    const key = labelLayoutKey('disk');
+    if (!(locked && state.labels.disk && labelLockKeys.disk === key)) {
+      const plan = await diskLabelsAt(DISK.width);
+      if (seq !== labelSeq) return;
+      if (plan) {
+        state.labels.disk = plan;
+        labelLockKeys.disk = key;
+      }
+    }
     drawViewLabels('disk');
   }
   if (state.rawImage && state.renderId) {
-    const plan = await fetchLabels('region', {
-      frame: 'region',
-      render_id: state.renderId,
-      ...base,
-      font_px: labelFrameFontPx('raw'),
-    });
-    if (seq !== labelSeq) return;
-    if (plan) state.labels.region = plan;
+    const key = labelLayoutKey('region');
+    if (!(locked && state.labels.region && labelLockKeys.region === key)) {
+      const base = labelRequestBase();
+      const plan = await fetchLabels('region', {
+        frame: 'region',
+        render_id: state.renderId,
+        ...base,
+        font_px: labelFrameFontPx('raw'),
+      });
+      if (seq !== labelSeq) return;
+      if (plan) {
+        state.labels.region = plan;
+        labelLockKeys.region = key;
+      }
+    }
     drawViewLabels('raw');
     drawViewLabels('proc');
   }
@@ -4598,7 +4730,7 @@ const SETTING_FIELDS = [
   'image-rotation', 'image-rotation-num',
   'noise-poisson', 'noise-gaussian',
   'annotate', 'label-language', 'label-density', 'label-font',
-  'label-shadow', 'label-colour',
+  'label-shadow', 'label-colour', 'label-lock',
   'text-color', 'text-stroke', 'text-stroke-width', 'text-bold',
   'outline-color', 'outline-width', 'outline-style',
   'mark-terminator', 'mark-poles', 'mark-limb', 'mark-equator',
@@ -4782,10 +4914,13 @@ async function importSettingsFile() {
 }
 
 /** The saved settings, as the options of the name field's own datalist. */
+let knownSettings = [];                 // the names the server last listed
+
 async function refreshSettingsList() {
   try {
     const payload = await post('/api/settings/list', {});
     const files = payload.files || [];
+    knownSettings = files.map((file) => file.name);
     const list = $('settings-files');
     if (!list) return;
     list.innerHTML = '';
@@ -4799,6 +4934,53 @@ async function refreshSettingsList() {
   }
 }
 
+/** Apply the settings file the name field names, when the server has one.
+ *
+ * The field is two things at once -- the name 导出 writes and the file 导入
+ * reads -- so picking one of the datalist's names is already the whole request:
+ * asking the reader to press 导入 afterwards only gave them a chance to look at
+ * the name and wonder whether it had done anything.  A name the server does not
+ * have is a name for 导出 to create, and gets no reaction at all.
+ */
+async function applyNamedSettings() {
+  const name = $('settings-name').value.trim();
+  if (!name) return;
+  if (!knownSettings.includes(name)) {
+    await refreshSettingsList();
+    if (!knownSettings.includes(name)) return;
+  }
+  await loadSettings();
+}
+
+/** The reader's own save dialog: which folder, and what to call the file.
+ *
+ * Returns the file handle they picked, ``null`` when they cancelled, and
+ * ``undefined`` when this browser has no such dialog (Safari, Firefox, or a
+ * page that is not in a secure context).  The caller turns ``undefined`` into
+ * the download every browser can do, so nothing here is required to work.
+ *
+ * It has to be called *before* any await: the picker needs the click's own user
+ * activation, and a round trip to the server spends it.
+ */
+async function askSaveFile(suggestedName, description) {
+  if (typeof window === 'undefined' || typeof window.showSaveFilePicker !== 'function') {
+    return undefined;
+  }
+  try {
+    return await window.showSaveFilePicker({
+      suggestedName,
+      types: [{
+        description,
+        accept: { 'application/json': ['.conf', '.json'] },
+      }],
+    });
+  } catch (error) {
+    // AbortError is the reader closing the dialog; anything else means the
+    // browser would not open one, which is what the fallback is for.
+    return error && error.name === 'AbortError' ? null : undefined;
+  }
+}
+
 async function saveSettings() {
   const name = $('settings-name').value.trim();
   if (!name) {
@@ -4806,22 +4988,37 @@ async function saveSettings() {
     return;
   }
   const settings = collectSettings();
+  const asText = (stamp) => JSON.stringify({
+    schema: 'moonlib_s-web-settings/1',
+    saved_utc: stamp,
+    settings,
+  }, null, 2);
+  const handle = await askSaveFile(`${name}.conf`, '月球网页设置文件');
+  if (handle === null) {
+    setStatus('已取消导出');
+    return;
+  }
   try {
     const payload = await post('/api/settings/save', {
       name, settings,
     });
     $('settings-name').value = payload.saved.name;
     await refreshSettingsList();
-    // And the file itself, because "导出" means the reader gets a file: the
-    // server's settings directory is the page's own list, not their disk.
-    const text = JSON.stringify({
-      schema: 'moonlib-web-settings/1',
-      saved_utc: payload.saved.saved_utc || new Date().toISOString(),
-      settings,
-    }, null, 2);
+    const text = asText(payload.saved.saved_utc || new Date().toISOString());
+    const size = `${(payload.saved.bytes / 1024).toFixed(1)} KB`;
+    if (handle) {
+      const stream = await handle.createWritable();
+      await stream.write(new Blob([text], { type: 'application/json' }));
+      await stream.close();
+      setStatus(`已导出 ${handle.name}（${size}）`);
+      return;
+    }
+    // No dialog in this browser: the file still leaves, as a download into
+    // whatever folder it puts downloads in.  The server's own settings
+    // directory is the page's list, not the reader's disk, so both are written.
     downloadUrl(URL.createObjectURL(new Blob([text], { type: 'application/json' })),
       `${payload.saved.name}.conf`);
-    setStatus(`已导出 ${payload.saved.name}.conf（${(payload.saved.bytes / 1024).toFixed(1)} KB）`);
+    setStatus(`已导出 ${payload.saved.name}.conf（${size}）`);
   } catch (error) {
     setStatus('导出失败：' + String(error.message || error), 'error');
   }
@@ -4939,7 +5136,7 @@ function fitAll() {
   drawMagnifier();
 }
 
-/* The left column mirrors moonlib.moon_report.  Times are shown in the
+/* The left column mirrors moonlib_s.moon_report.  Times are shown in the
    observer's own zone, which is the offset the page sends up. */
 function localTime(iso, offsetHours) {
   if (!iso) return '—';
@@ -7148,10 +7345,31 @@ function init() {
     scheduleOutputRender();
   });
   // The frame font is a *layout* input to the server, not a canvas style: the
-  // plan is laid out for one text size, so a new size is a new request.
+  // plan is laid out for one text size, so a new size is a new request.  With
+  // the layout locked it is neither -- the plan stays, the type changes -- and
+  // refreshLabels() is what knows the difference.
   $('label-font').addEventListener('change', () => {
     if (!state.labelsOn) { drawAllLabels(); return; }
-    setStatus('字号已改，正在重排月面地貌…', 'busy');
+    setStatus(labelLockOn() ? '字号已改，布局仍锁定…' : '字号已改，正在重排月面地貌…', 'busy');
+    refreshLabels().then(() => setStatus('就绪'));
+  });
+  // Locking takes the layouts that are already on screen as the frozen ones, so
+  // the very next font change is a restyle rather than a re-layout; unlocking
+  // throws them away and lays them out again for whatever the page says now.
+  $('label-lock').addEventListener('change', () => {
+    if (labelLockOn()) {
+      labelLockKeys.disk = state.labels.disk ? labelLayoutKey('disk') : null;
+      labelLockKeys.region = state.labels.region ? labelLayoutKey('region') : null;
+      drawAllLabels();
+      setStatus(state.labels.disk
+        ? '已锁定当前标注布局：改字号只改变字形大小，位置与避让不再重排'
+        : '已锁定标注布局：下一版标注排好后不再移动');
+      return;
+    }
+    labelLockKeys.disk = null;
+    labelLockKeys.region = null;
+    if (!state.labelsOn) { drawAllLabels(); setStatus('已解锁标注布局'); return; }
+    setStatus('已解锁标注布局，正在按当前条件重排…', 'busy');
     refreshLabels().then(() => setStatus('就绪'));
   });
   $('preview-px').addEventListener('change', () => {
@@ -7270,6 +7488,14 @@ function init() {
   });
   $('settings-pick').addEventListener('change', importSettingsFile);
   $('settings-name').addEventListener('focus', () => refreshSettingsList());
+  // Picking a name out of the list applies it there and then; Enter does the
+  // same, so the field behaves the same whether the name was clicked or typed.
+  $('settings-name').addEventListener('change', () => { applyNamedSettings(); });
+  $('settings-name').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    applyNamedSettings();
+  });
   $('sel-sync-last').addEventListener('click', syncBackToLastSelection);
   updateSelectionSyncButton();
   $('sel-reset-rot').addEventListener('click', () => {

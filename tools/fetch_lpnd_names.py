@@ -51,10 +51,10 @@ from urllib.parse import urlencode
 # already normalised when the catalogue was built, so it takes them as written.
 from _bootstrap import CATALOGUE_COLUMNS, ROOT, fold  # noqa: E402
 
-CATALOGUE = ROOT / "src" / "moonlib" / "data" / "lunar_nomenclature.csv"
+CATALOGUE = ROOT / "src" / "moonlib_s" / "data" / "lunar_nomenclature.csv"
 CACHE = ROOT / ".cache" / "lpnd" / "answers.jsonl"
-OUTPUT = ROOT / "src" / "moonlib" / "data" / "lunar_names_lpnd.csv"
-PROVENANCE = ROOT / "src" / "moonlib" / "data" / "lunar_names_lpnd.provenance.json"
+OUTPUT = ROOT / "src" / "moonlib_s" / "data" / "lunar_names_lpnd.csv"
+PROVENANCE = ROOT / "src" / "moonlib_s" / "data" / "lunar_names_lpnd.provenance.json"
 
 SITE = "https://lpnd.bao.ac.cn"
 #: The API lives under /web (``requestCtx`` in the site's own bundle), and the

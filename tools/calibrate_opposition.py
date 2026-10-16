@@ -9,11 +9,11 @@ The opposition effect is the sharp brightening of the Moon within a few
 degrees of full phase: the shadowing between regolith grains switches off when
 the illumination and the view coincide.  It is the one feature of the lunar
 phase curve that a plain Lambert or Lommel-Seeliger law cannot reproduce, and
-it is why :data:`moonlib.models.PhotometricModel.HAPKE` exists in this project.
+it is why :data:`moonlib_s.models.PhotometricModel.HAPKE` exists in this project.
 
 The observable used here is the *disk-integrated* phase curve: the whole-Moon
 brightness a photometer measures as the phase angle sweeps.  It is computed
-straight from the disk functions by :func:`moonlib.moonview.disk_integrated_phase`,
+straight from the disk functions by :func:`moonlib_s.moonview.disk_integrated_phase`,
 so no render, no tone curve and no exposure enters.
 
 What "calibrated" means here
@@ -52,7 +52,7 @@ from _bootstrap import use_src  # noqa: E402
 import numpy as np  # noqa: E402
 
 use_src()
-from moonlib.moonview import _HAPKE_DEFAULTS, disk_integrated_phase  # noqa: E402
+from moonlib_s.moonview import _HAPKE_DEFAULTS, disk_integrated_phase  # noqa: E402
 
 MODELS = ("lambert", "lommel_seeliger", "lunar_lambert", "hapke")
 

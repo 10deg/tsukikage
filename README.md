@@ -1,6 +1,27 @@
 # Tsukikage — 本地月球计算服务
 
-**当前版本 / Version：1.0.9**
+**当前版本 / Version：1.1.1**
+
+> **备注：更新核心包名** —— 核心包由 `moonlib` 更名为 **`moonlib_s`**（发布名 **`moonlib-s`**：
+> 发行版名可以带连字符，而 Python 的 import 名不能，pip 又会把 `-` 与 `_` 归一成同一个项目，
+> 所以 `pip install moonlib-s` 之后是 `import moonlib_s`）。随之更新的是：`src/moonlib_s/` 目录、
+> 全部 `import` 与文档示例、`python -m moonlib_s`、派生缓存目录 `.cache/moonlib_s`、
+> 设置文件里的 schema 标记 `moonlib_s-web-settings/1`。**有意保留**的是：环境变量
+> `MOONLIB_*`（`MOONLIB_KERNEL_DIR` 等）、命令行 `moon`、异常类 `MoonlibError`、
+> `legacy/moonlib.py` 这份重构前快照，以及已经存下来的 `.conf`（读文件不校验 schema）。
+> 旧的用户配置文件 `~/.config/moonlib/config.json` 仍会被读取。
+>
+> 上一版（1.1.0）的备注：**功能微调** —— 标注面板新增「锁定布局」（勾选后调字号只改变字形大小，
+> 标注的位置与避让方案不再重排）；选框连同手柄始终画在地名之上；设置文件导出改为弹出"另存为"
+> 窗口，目录与文件名都由读者决定（浏览器没有该窗口时退回下载）；在设置文件下拉里选中一份已识别
+> 的文件即刻应用。
+>
+> 同时修掉一个只在本地跑起来才会遇到的报错：**CSPICE 不是线程安全的**，内核池、DAF 文件表与
+> "名称→编号"哈希都是进程级全局变量，连一次查找都可能往里写，而网页版每个请求一个线程、首帧渲染
+> 又恰好在线程里装载内核，于是池中被塞进第二份 `FRAME_31008_CLASS`
+> （`SPICE(BADVARIABLESIZE)`，"size 2"），此后所有要算月面坐标的请求全部失败——现在 `moonlib_s`
+> 的所有 SPICE 调用都串行在一把可重入锁上，内核装载对其它线程原子可见，并在服务启动时先装好。
+> 复现与回归测试见 [`docs/04-重构与缺陷修复记录.md`](docs/04-重构与缺陷修复记录.md) §6.8。
 
 一套**完全离线**的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
 **位置、月相、升落、天平动、月牙可见性与边缘目标预报**，并能用 NASA SVS 的 LOLA 高程与
@@ -29,7 +50,7 @@ python3 -m venv .venv
 确认装好了：
 
 ```bash
-./.venv/bin/python -c "import moonlib; print(moonlib.__version__)"
+./.venv/bin/python -c "import moonlib_s; print(moonlib_s.__version__)"
 ```
 
 > 上面建了虚拟环境，所以下文一律用 `./.venv/bin/python`。没有做可编辑安装时，
@@ -38,16 +59,16 @@ python3 -m venv .venv
 ## 简单运行
 
 ```bash
-./.venv/bin/python -m moonlib info                          # 内核与历表覆盖范围
-./.venv/bin/python -m moonlib moon --at 2026-05-25T15:30:00 --language zh
+./.venv/bin/python -m moonlib_s info                          # 内核与历表覆盖范围
+./.venv/bin/python -m moonlib_s moon --at 2026-05-25T15:30:00 --language zh
 ```
 
 ```python
-import moonlib
+import moonlib_s
 
-site = moonlib.Observer(lat=30, lon=120)
-report = moonlib.moon_report(site, "2026-05-25T15:30:00")
-print(moonlib.reporting.format_moon_report(report))
+site = moonlib_s.Observer(lat=30, lon=120)
+report = moonlib_s.moon_report(site, "2026-05-25T15:30:00")
+print(moonlib_s.reporting.format_moon_report(report))
 ```
 
 ```
@@ -74,7 +95,7 @@ print(moonlib.reporting.format_moon_report(report))
 
 | 路径 | 为什么需要 |
 |---|---|
-| `src/moonlib/` | 库本身 |
+| `src/moonlib_s/` | 库本身 |
 | `pyproject.toml` | 安装、依赖声明、`moon` 命令行入口 |
 | `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，随仓库发布 |
 
@@ -114,7 +135,7 @@ USGS 的全球 256 像素/度高程：
 （`ldem_64` + EXR 约 350 MB；换成 256 像素/度的全球高程约 3 GB）。
 
 色彩镶嵌优先用线性的 `lroc_color.exr`（自带解码器，无需额外依赖）。若手头只有
-`lroc_color_16bit_srgb.tif`，则需要 Pillow（`pip install 'moonlib[tiff]'`；装了
+`lroc_color_16bit_srgb.tif`，则需要 Pillow（`pip install 'moonlib-s[tiff]'`；装了
 matplotlib 就有），两条路径结果一致。
 
 ---
@@ -134,22 +155,22 @@ matplotlib 就有），两条路径结果一致。
 
 | 能力 | 入口 |
 |---|---|
-| 月球位置、距离、视直径、赤经赤纬、方位高度 | `moonlib.moon_state` |
-| 月相（地心 + 站心）、月龄、朔望弦搜索与全年历表 | `moon_state().phase`、`moonlib.phase_calendar` |
-| 月出 / 中天 / 月落（含下次升落与中天上边缘高度） | `moonlib.moon_report` |
+| 月球位置、距离、视直径、赤经赤纬、方位高度 | `moonlib_s.moon_state` |
+| 月相（地心 + 站心）、月龄、朔望弦搜索与全年历表 | `moon_state().phase`、`moonlib_s.phase_calendar` |
+| 月出 / 中天 / 月落（含下次升落与中天上边缘高度） | `moonlib_s.moon_report` |
 | 天平动、月面地球直下点与日下点 | `moon_state().libration` |
-| 按照明率反查月亮（按视直径排名） | `moonlib.find_moons_by_illumination` |
-| 极限月牙拍摄窗口与可见性判据（Danjon / Odeh / Yallop） | `moonlib.crescent` |
-| 边缘／极区目标的天平动可见性预报（53 个目标） | `moonlib.libration` |
-| 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib.sun`、`moonlib.analemma`、`moonlib.plotting` |
-| 月面地形：高程与反照率采样、金字塔缓存、三维网格导出 | `moonlib.terrain` |
-| **观测模拟**：按观测点与时刻渲染月面（地形阴影、明暗界线、地照） | `moonlib.moonview` |
-| **月面特写与自动取景**：按目标真实直径决定视场，并报告地形数据是否够用 | `moonlib.moonview.render_region`、`moonlib.render_feature` |
-| **地貌标注**：10 431 项（中文名覆盖 99.9%），按分类着色并逐类开关，中／英切换 | `moonlib.annotations` |
-| **与实拍对齐**：衍射（含副镜遮挡）、像素采样、视宁度、噪声、锐化、旋转与后截距补偿 | `moonlib.instrument` |
-| **动画 → MP4**：H.264，或 10 bit HEVC / HDR10 PQ，可带逐帧时间戳；**HDR 保存**（ISO 21496-1 增益图 JPEG） | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |
+| 按照明率反查月亮（按视直径排名） | `moonlib_s.find_moons_by_illumination` |
+| 极限月牙拍摄窗口与可见性判据（Danjon / Odeh / Yallop） | `moonlib_s.crescent` |
+| 边缘／极区目标的天平动可见性预报（53 个目标） | `moonlib_s.libration` |
+| 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib_s.sun`、`moonlib_s.analemma`、`moonlib_s.plotting` |
+| 月面地形：高程与反照率采样、金字塔缓存、三维网格导出 | `moonlib_s.terrain` |
+| **观测模拟**：按观测点与时刻渲染月面（地形阴影、明暗界线、地照） | `moonlib_s.moonview` |
+| **月面特写与自动取景**：按目标真实直径决定视场，并报告地形数据是否够用 | `moonlib_s.moonview.render_region`、`moonlib_s.render_feature` |
+| **地貌标注**：10 431 项（中文名覆盖 99.9%），按分类着色并逐类开关，中／英切换 | `moonlib_s.annotations` |
+| **与实拍对齐**：衍射（含副镜遮挡）、像素采样、视宁度、噪声、锐化、旋转与后截距补偿 | `moonlib_s.instrument` |
+| **动画 → MP4**：H.264，或 10 bit HEVC / HDR10 PQ，可带逐帧时间戳；**HDR 保存**（ISO 21496-1 增益图 JPEG） | `moonlib_s.anim`、`moonlib_s.encode`、`moonlib_s.hdr` |
 | **本地网页**：全月面与 1:1 特写、框选与旋转、地貌搜索、设置存成 .conf | `web/server.py` |
-| JSON 服务契约 | `moonlib.service` |
+| JSON 服务契约 | `moonlib_s.service` |
 
 ---
 
@@ -221,7 +242,7 @@ node web/test_dom.js && node web/test_page.js && node web/test_projection.js
 
 `render_region` 会自己发现它、按需从本地文件里裁出画幅所需的那一小块，于是任意目标
 都能拿到 118 m/px，无需联网。换一份自己的 DEM 也可以：
-`export MOONLIB_DEM=/path/to/dem.tif`，单位按文件名识别（见 `moonlib.terrain._dem_scale`）。
+`export MOONLIB_DEM=/path/to/dem.tif`，单位按文件名识别（见 `moonlib_s.terrain._dem_scale`）。
 
 ---
 

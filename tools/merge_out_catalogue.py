@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "src" / "moonlib" / "data"
+DATA = ROOT / "src" / "moonlib_s" / "data"
 OUT = ROOT / "out"
 DB = DATA / "lunar_nomenclature.csv"
 PROVENANCE = DATA / "lunar_nomenclature.provenance.json"

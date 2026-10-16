@@ -4,8 +4,8 @@
 The annotation layer needs *every* named feature, not the few dozen showpieces
 in ``lunar_features.csv``: a close-up of an arbitrary area should be able to say
 what is in it.  This tool turns the authoritative USGS / IAU gazetteer into the
-same CSV shape the rest of ``moonlib`` already reads, so
-:func:`moonlib.load_nomenclature` needs no special parser.
+same CSV shape the rest of ``moonlib_s`` already reads, so
+:func:`moonlib_s.load_nomenclature` needs no special parser.
 
 Source
 ------
@@ -17,7 +17,7 @@ gazetteer for the Moon.  It is a shapefile whose attributes live in a dBase
 rather than through a shapefile library, because the coordinates this needs are
 in the attribute table and adding a dependency for them would be silly.
 
-The zip is cached under ``.cache/moonlib/nomenclature/`` and never committed:
+The zip is cached under ``.cache/moonlib_s/nomenclature/`` and never committed:
 only the derived CSV is, and it is small enough to travel with the package.
 
 Columns written (identical to ``lunar_features.csv``)
@@ -49,18 +49,18 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from _bootstrap import CATALOGUE_COLUMNS, ROOT, normalise_lon, use_src  # noqa: E402
 
-moonlib = use_src()
+moonlib_s = use_src()
 
-import moonlib  # noqa: E402
+import moonlib_s  # noqa: E402
 
 CATALOGUE_URL = (
     "https://asc-planetarynames-data.s3.us-west-2.amazonaws.com/"
     "MOON_nomenclature_center_pts.zip"
 )
-#: Derived file, read by :func:`moonlib.load_nomenclature`.
-TARGET = ROOT / "src" / "moonlib" / "data" / "lunar_nomenclature.csv"
+#: Derived file, read by :func:`moonlib_s.load_nomenclature`.
+TARGET = ROOT / "src" / "moonlib_s" / "data" / "lunar_nomenclature.csv"
 PROVENANCE = TARGET.with_suffix(".provenance.json")
-USER_AGENT = "moonlib-nomenclature/1.0 (offline lunar simulator)"
+USER_AGENT = "moonlib_s-nomenclature/1.0 (offline lunar simulator)"
 
 #: Gazetteer types that name a *place* worth annotating, mapped to the short
 #: kind the renderer and the page display.  Anything absent keeps the first word
@@ -280,7 +280,7 @@ def check(target: Path = TARGET) -> int:
     if not target.is_file():
         print(f"missing    : {target}")
         return 1
-    features = moonlib.load_nomenclature(target)
+    features = moonlib_s.load_nomenclature(target)
     kinds: Dict[str, int] = {}
     for feature in features:
         kinds[feature.kind] = kinds.get(feature.kind, 0) + 1
@@ -308,7 +308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return check(args.out)
 
     archive = args.zip or download(
-        args.url, moonlib.cache_dir() / "nomenclature" / Path(args.url).name, force=args.force
+        args.url, moonlib_s.cache_dir() / "nomenclature" / Path(args.url).name, force=args.force
     )
     raw = dbf_from_zip(archive)
     rows = gazetteer_rows(raw)

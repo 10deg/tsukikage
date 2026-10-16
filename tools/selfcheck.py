@@ -21,11 +21,11 @@ from typing import Callable, List, Tuple
 
 from _bootstrap import use_src  # noqa: E402
 
-moonlib = use_src()
+moonlib_s = use_src()
 
 
 REFERENCE = datetime(2026, 5, 25, 15, 30, tzinfo=timezone.utc)
-SITE = moonlib.Observer(lat=30, lon=120, name="selfcheck")
+SITE = moonlib_s.Observer(lat=30, lon=120, name="selfcheck")
 
 
 def _timed(label: str, action: Callable[[], object]) -> Tuple[str, object, float]:
@@ -53,17 +53,17 @@ def main() -> int:
         return result
 
     # -- environment -------------------------------------------------------
-    session = run("kernels", lambda: moonlib.init_kernels())
-    run("describe", lambda: moonlib.describe())
+    session = run("kernels", lambda: moonlib_s.init_kernels())
+    run("describe", lambda: moonlib_s.describe())
 
     # -- L1: state, report, sun, frames ------------------------------------
-    state = run("moon_state", lambda: moonlib.moon_state(SITE, REFERENCE))
-    report = run("moon_report", lambda: moonlib.moon_report(SITE, REFERENCE))
-    run("sun_state", lambda: moonlib.sun_state(moonlib.to_et(REFERENCE), SITE))
-    run("equation_of_time", lambda: moonlib.equation_of_time_minutes(moonlib.to_et(REFERENCE)))
-    run("az_el", lambda: moonlib.az_el("MOON", moonlib.to_et(REFERENCE), SITE))
-    run("scan_geometry", lambda: moonlib.scan_geometry(
-        moonlib.TimeRange.utc_days(REFERENCE, 1.0).grid(600.0), SITE, with_horizontal=True))
+    state = run("moon_state", lambda: moonlib_s.moon_state(SITE, REFERENCE))
+    report = run("moon_report", lambda: moonlib_s.moon_report(SITE, REFERENCE))
+    run("sun_state", lambda: moonlib_s.sun_state(moonlib_s.to_et(REFERENCE), SITE))
+    run("equation_of_time", lambda: moonlib_s.equation_of_time_minutes(moonlib_s.to_et(REFERENCE)))
+    run("az_el", lambda: moonlib_s.az_el("MOON", moonlib_s.to_et(REFERENCE), SITE))
+    run("scan_geometry", lambda: moonlib_s.scan_geometry(
+        moonlib_s.TimeRange.utc_days(REFERENCE, 1.0).grid(600.0), SITE, with_horizontal=True))
 
     # -- invariants --------------------------------------------------------
     if state is not None:
@@ -79,24 +79,24 @@ def main() -> int:
         failures.append("rise/transit/set are not ordered")
 
     # -- L2: phases, crescent, libration, analemma -------------------------
-    calendar = run(f"phase_calendar({args.year})", lambda: moonlib.phase_calendar(args.year, SITE))
-    run("find_phase_events", lambda: moonlib.find_phase_events(2026, step_seconds=7200.0))
-    run("find_moons_by_illumination", lambda: moonlib.find_moons_by_illumination(50.0, args.year, SITE))
+    calendar = run(f"phase_calendar({args.year})", lambda: moonlib_s.phase_calendar(args.year, SITE))
+    run("find_phase_events", lambda: moonlib_s.find_phase_events(2026, step_seconds=7200.0))
+    run("find_moons_by_illumination", lambda: moonlib_s.find_moons_by_illumination(50.0, args.year, SITE))
     crescents = run(f"find_crescent_windows({args.year})",
-                    lambda: moonlib.crescent.find_crescent_windows(SITE, args.year))
-    targets = run("load_targets", lambda: moonlib.libration.load_targets())
+                    lambda: moonlib_s.crescent.find_crescent_windows(SITE, args.year))
+    targets = run("load_targets", lambda: moonlib_s.libration.load_targets())
     samples = run("libration.sweep(3 d)",
-                  lambda: moonlib.libration.sweep(
-                      moonlib.libration.load_targets(),
-                      moonlib.as_time_range("2026-08-01", "2026-08-04"),
+                  lambda: moonlib_s.libration.sweep(
+                      moonlib_s.libration.load_targets(),
+                      moonlib_s.as_time_range("2026-08-01", "2026-08-04"),
                       SITE, step_minutes=60.0))
     if samples is not None:
-        run("libration.summarize", lambda: moonlib.libration.summarize(samples, None))
+        run("libration.summarize", lambda: moonlib_s.libration.summarize(samples, None))
         run("libration.best_windows",
-            lambda: moonlib.libration.best_windows(samples, "Plaskett", top_n=3))
-    points = run("classical_analemma", lambda: moonlib.analemma.classical_analemma(SITE, args.year))
+            lambda: moonlib_s.libration.best_windows(samples, "Plaskett", top_n=3))
+    points = run("classical_analemma", lambda: moonlib_s.analemma.classical_analemma(SITE, args.year))
     if points is not None:
-        run("analemma_extremes", lambda: moonlib.analemma.analemma_extremes(points))
+        run("analemma_extremes", lambda: moonlib_s.analemma.analemma_extremes(points))
 
     if calendar is not None:
         counts = {}
@@ -109,19 +109,19 @@ def main() -> int:
 
     # -- service contract --------------------------------------------------
     payloads = run("service payloads", lambda: {
-        "lunar_report": moonlib.service.lunar_report(SITE, REFERENCE),
-        "phase_calendar": moonlib.service.phase_calendar(SITE, 2026),
-        "crescent_windows": moonlib.service.crescent_windows(
-            SITE, moonlib.TimeRange.utc_days(REFERENCE, 60.0)),
-        "illumination_matches": moonlib.service.illumination_matches(50.0, SITE, 2026),
-        "limb_targets": moonlib.service.limb_targets(),
-        "analemma": moonlib.service.analemma(SITE, 2026, sample_days=(1, 15)),
-        "environment": moonlib.service.environment(),
+        "lunar_report": moonlib_s.service.lunar_report(SITE, REFERENCE),
+        "phase_calendar": moonlib_s.service.phase_calendar(SITE, 2026),
+        "crescent_windows": moonlib_s.service.crescent_windows(
+            SITE, moonlib_s.TimeRange.utc_days(REFERENCE, 60.0)),
+        "illumination_matches": moonlib_s.service.illumination_matches(50.0, SITE, 2026),
+        "limb_targets": moonlib_s.service.limb_targets(),
+        "analemma": moonlib_s.service.analemma(SITE, 2026, sample_days=(1, 15)),
+        "environment": moonlib_s.service.environment(),
     })
     if payloads is not None:
         for kind, payload in payloads.items():
             try:
-                encoded = moonlib.service.dumps(payload)
+                encoded = moonlib_s.service.dumps(payload)
             except (TypeError, ValueError) as error:
                 failures.append(f"service payload {kind} is not JSON-safe: {error}")
                 continue
@@ -131,43 +131,43 @@ def main() -> int:
 
     # -- reporting / plotting ----------------------------------------------
     if report is not None:
-        run("format_moon_report", lambda: moonlib.reporting.format_moon_report(report))
+        run("format_moon_report", lambda: moonlib_s.reporting.format_moon_report(report))
     if calendar is not None:
         run("format_phase_calendar",
-            lambda: moonlib.reporting.format_phase_calendar(calendar, SITE))
+            lambda: moonlib_s.reporting.format_phase_calendar(calendar, SITE))
     if crescents is not None:
         run("format_crescent_windows",
-            lambda: moonlib.reporting.format_crescent_windows(crescents, SITE, ranked=True, top_n=3))
+            lambda: moonlib_s.reporting.format_crescent_windows(crescents, SITE, ranked=True, top_n=3))
     try:
         import matplotlib
 
         matplotlib.use("Agg")
-        figure = run("plot_sky", lambda: moonlib.plotting.plot_sky(SITE, REFERENCE))
+        figure = run("plot_sky", lambda: moonlib_s.plotting.plot_sky(SITE, REFERENCE))
         if figure is not None:
-            from moonlib.plotting import close_figure
+            from moonlib_s.plotting import close_figure
 
             close_figure(figure)
-        png = run("sky_chart_png", lambda: moonlib.service.sky_chart_png(SITE, REFERENCE, dpi=70))
+        png = run("sky_chart_png", lambda: moonlib_s.service.sky_chart_png(SITE, REFERENCE, dpi=70))
         if png is not None and not png.startswith(b"\x89PNG"):
             failures.append("sky_chart_png did not return PNG bytes")
     except ImportError:
         checks.append(("plotting (skipped: matplotlib missing)", None, 0.0))
 
     # -- lunar surface simulation ------------------------------------------
-    view = run("view_geometry", lambda: moonlib.view_geometry(SITE, REFERENCE))
+    view = run("view_geometry", lambda: moonlib_s.view_geometry(SITE, REFERENCE))
     payload = run(
         "service moon_view",
-        lambda: moonlib.service.moon_view(SITE, REFERENCE, width=64, height=64, samples=1),
+        lambda: moonlib_s.service.moon_view(SITE, REFERENCE, width=64, height=64, samples=1),
     )
     if payload is not None:
-        payloads["moon_view"] = len(moonlib.service.dumps(payload))
-    if moonlib.found_sources() is None:
+        payloads["moon_view"] = len(moonlib_s.service.dumps(payload))
+    if moonlib_s.found_sources() is None:
         checks.append(("terrain (skipped: rasters missing)", None, 0.0))
     else:
-        settings = moonlib.MoonRenderSettings(
+        settings = moonlib_s.MoonRenderSettings(
             width=96, height=96, samples_per_pixel=1, shadow_steps=24
         )
-        render = run("render_moon", lambda: moonlib.render_moon(view=view, settings=settings))
+        render = run("render_moon", lambda: moonlib_s.render_moon(view=view, settings=settings))
         if render is not None:
             stats = render.stats
             if not 0.60 < stats["disk_fraction_of_frame"] < 0.72:
@@ -182,17 +182,17 @@ def main() -> int:
                 failures.append("render_moon earthshine ratio is out of range")
         run(
             "format_moon_view",
-            lambda: moonlib.reporting.format_moon_view(moonlib.view_geometry(SITE, REFERENCE)),
+            lambda: moonlib_s.reporting.format_moon_view(moonlib_s.view_geometry(SITE, REFERENCE)),
         )
         png = run(
             "moon_view_png",
-            lambda: moonlib.service.moon_view_png(SITE, REFERENCE, width=64, height=64, samples=1),
+            lambda: moonlib_s.service.moon_view_png(SITE, REFERENCE, width=64, height=64, samples=1),
         )
         if png is not None and not png.startswith(b"\x89PNG"):
             failures.append("moon_view_png did not return PNG bytes")
         mesh = run(
             "visible_mesh",
-            lambda: moonlib.open_terrain().visible_mesh(view, level=5, rings=24),
+            lambda: moonlib_s.open_terrain().visible_mesh(view, level=5, rings=24),
         )
         if mesh is not None and mesh.n_faces < 100:
             failures.append("visible_mesh produced too few faces")
@@ -200,7 +200,7 @@ def main() -> int:
     # -- output ------------------------------------------------------------
     if not args.quiet:
         print("=" * 72)
-        print("  moonlib self check")
+        print("  moonlib_s self check")
         print("=" * 72)
         for label, result, elapsed in checks:
             summary = _summarise(result)

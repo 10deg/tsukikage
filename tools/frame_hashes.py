@@ -24,7 +24,7 @@ Two things make the hashes reproducible and worth trusting:
 
 * the renders run through :class:`server.MoonService`, which is the page's own
   path -- not a private test-only entry point;
-* ``MOONLIB_BAND_WORKERS=1`` is forced before :mod:`moonlib` is imported, because
+* ``MOONLIB_BAND_WORKERS=1`` is forced before :mod:`moonlib_s` is imported, because
   bands reduce in a different order when they run in parallel and the last bits
   of a float sum are not associative.  A frame hash is only a guardrail if it is
   the same number on every machine.
@@ -46,7 +46,7 @@ from typing import Any, Dict
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "web"))
 
-# Before moonlib, so every band runs in the same order on every machine.
+# Before moonlib_s, so every band runs in the same order on every machine.
 os.environ["MOONLIB_BAND_WORKERS"] = "1"
 
 import numpy as np  # noqa: E402
@@ -153,7 +153,7 @@ SOURCES_KEY = "_sources"
 
 def sources_fingerprint() -> Dict[str, Any]:
     """Name and pixel size of the rasters the frames are drawn from."""
-    from moonlib.terrain import find_sources, global_dem_sources
+    from moonlib_s.terrain import find_sources, global_dem_sources
 
     try:
         found = global_dem_sources()

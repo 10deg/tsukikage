@@ -40,7 +40,7 @@ kernels/*.part
 
 # ---- derived data ----------------------------------------------------------
 # Terrain pyramids baked from the SVS rasters (~350 MB).  Regenerable with
-# `python -m moonlib terrain --bake`, so never version controlled.
+# `python -m moonlib_s terrain --bake`, so never version controlled.
 .cache/
 
 # ---- local artefacts -------------------------------------------------------
@@ -82,7 +82,7 @@ MoonLabeler-test/
 # The whole legacy/ snapshot belongs to the refactor, not to the shipped
 # library: ``legacy/moonlib.py`` is the pre-refactor implementation and its
 # target CSV is a byte-for-byte duplicate of the one the library actually reads
-# (``src/moonlib/data/libration_targets.csv``).  Only
+# (``src/moonlib_s/data/libration_targets.csv``).  Only
 # ``tools/make_legacy_baseline.py`` looks at it, and that tool writes into the
 # unpublished ``tests/`` as well -- so for anyone downloading the library to use
 # it, the directory has no role at all.
@@ -97,3 +97,10 @@ AGENTS.md
 # are how a number was arrived at, not something the library imports, so the
 # working copy keeps them and the repository does not.
 /scratch/
+
+# ---- local safety nets and logs --------------------------------------------
+# A pre-refactor tarball of this checkout (``backups/``) is a local rollback, not
+# repository content: it is gigabytes of everything except kernels/, and the
+# copy a clone needs is the code itself.
+/backups/
+*.log

@@ -22,8 +22,8 @@ import argparse
 import time
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib, shown  # noqa: E402
-from moonlib.models import MoonRenderSettings  # noqa: E402
+from _cli import add_output_argument, moonlib_s, shown  # noqa: E402
+from moonlib_s.models import MoonRenderSettings  # noqa: E402
 
 
 def main() -> int:
@@ -39,10 +39,10 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    site = moonlib.Observer(lat=args.lat, lon=args.lon, name="示例观测点")
-    view = moonlib.view_geometry(site, args.at)
+    site = moonlib_s.Observer(lat=args.lat, lon=args.lon, name="示例观测点")
+    view = moonlib_s.view_geometry(site, args.at)
 
-    print(moonlib.reporting.format_moon_view(view))
+    print(moonlib_s.reporting.format_moon_view(view))
 
     settings = MoonRenderSettings(
         width=args.width,
@@ -56,36 +56,36 @@ def main() -> int:
     )
 
     started = time.time()
-    render = moonlib.render_moon(view=view, settings=settings)
+    render = moonlib_s.render_moon(view=view, settings=settings)
     elapsed = time.time() - started
-    print(moonlib.reporting.format_render_summary(render))
+    print(moonlib_s.reporting.format_render_summary(render))
     print(f"  渲染耗时 / elapsed      : {elapsed:.2f} s")
 
     # 目视观感（自适应 asinh 压缩，亮面与地照同时可见）
-    visual = moonlib.plotting.write_radiance_png(render, out_dir / "moon_visual.png")
+    visual = moonlib_s.plotting.write_radiance_png(render, out_dir / "moon_visual.png")
     # 单一线性曝光：只有被照亮的一侧，地照几乎全黑——这才是「拍到」的样子
-    photographic = moonlib.apply_tone_mapping(
+    photographic = moonlib_s.apply_tone_mapping(
         render.sunlit + render.earthshine,
         tone="srgb",
         auto_exposure=True,
         reference=render.sunlit,
     )
-    photo = moonlib.plotting.write_array_png(
+    photo = moonlib_s.plotting.write_array_png(
         photographic, out_dir / "moon_photographic.png"
     )
     # 地照分量单独曝光，可以看清暗面的纹理
-    earthshine = moonlib.plotting.write_radiance_png(
+    earthshine = moonlib_s.plotting.write_radiance_png(
         render, out_dir / "moon_earthshine.png", component="earthshine"
     )
     # 线性 I/F 辐亮度堆栈，供 HDR 合成或定量分析
-    hdr = moonlib.plotting.write_radiance_npy(render, out_dir / "moon_radiance.npy")
+    hdr = moonlib_s.plotting.write_radiance_npy(render, out_dir / "moon_radiance.npy")
 
     print("\n  输出 / written")
     for path in (visual, photo, earthshine, hdr):
         print(f"    {shown(path)}  ({path.stat().st_size / 1024:.0f} KB)")
 
     # 三维数据：可见半球的高程网格，带顶点法线与纹理坐标
-    mesh = moonlib.open_terrain().visible_mesh(view, level=3)
+    mesh = moonlib_s.open_terrain().visible_mesh(view, level=3)
     ply = mesh.export_ply(out_dir / "moon_visible.ply")
     print(f"    {shown(ply)}  "
           f"({mesh.n_vertices} 顶点 / {mesh.n_faces} 面, "

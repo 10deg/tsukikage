@@ -2,7 +2,7 @@
 """Bake the lunar terrain pyramid cache.
 
 The renderer samples the global LOLA/LROC rasters through a downsampled,
-memory-mappable pyramid.  :func:`moonlib.terrain.open_terrain` builds it
+memory-mappable pyramid.  :func:`moonlib_s.terrain.open_terrain` builds it
 automatically on first use, so running this script is optional -- but it lets
 you see the progress, choose the resolution, or warm the cache before a batch
 run.
@@ -27,7 +27,7 @@ from pathlib import Path
 
 from _bootstrap import use_src  # noqa: E402
 
-moonlib = use_src()
+moonlib_s = use_src()
 
 
 def _progress(fraction: float, message: str) -> None:
@@ -66,23 +66,23 @@ def main() -> int:
     cache = Path(args.cache_dir) if args.cache_dir else None
 
     if args.clear:
-        removed = moonlib.clear_terrain_cache(cache)
+        removed = moonlib_s.clear_terrain_cache(cache)
         print(f"removed {removed} cached pyramid(s)")
         return 0
 
-    sources = moonlib.find_sources()
+    sources = moonlib_s.find_sources()
     print(f"topography : {sources.dem_path}")
     print(f"colour     : {sources.albedo_path}")
 
     if args.check:
-        terrain = moonlib.open_terrain(cache=cache, bake=False)
+        terrain = moonlib_s.open_terrain(cache=cache, bake=False)
         print(f"cache      : {terrain.cache_path}")
         print(f"levels     : topography {terrain.dem.n_levels}, "
               f"colour {terrain.albedo.n_levels if terrain.albedo else 0}")
         return 0
 
     started = time.time()
-    target = moonlib.bake_terrain_cache(
+    target = moonlib_s.bake_terrain_cache(
         sources,
         cache=cache,
         detail=args.detail,

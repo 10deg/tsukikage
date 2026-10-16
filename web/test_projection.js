@@ -451,7 +451,7 @@ console.log('landform labels');
    the call counts, since a painter in the wrong space is the bug to catch. */
 function recordingContext() {
   const calls = { arcs: [], texts: [], lines: 0, strokes: 0, moves: 0, closes: 0,
-                  dashes: [], marks: [], alphas: [] };
+                  dashes: [], marks: [], alphas: [], fonts: [] };
   const ctx = {
     calls,
     _fill: '', _stroke: '', _alpha: 1,
@@ -460,11 +460,11 @@ function recordingContext() {
     stroke() { calls.strokes++; calls.marks.push(ctx._stroke); },
     moveTo() { calls.moves++; }, lineTo() { calls.lines++; },
     closePath() { calls.closes++; },
-    arc(x, y) { calls.arcs.push([x, y]); },
+    arc(x, y, radius) { calls.arcs.push([x, y, radius]); },
     fillText(text, x, y) { calls.texts.push([text, x, y, ctx._fill, ctx._alpha]); },
     strokeText() {},
     setLineDash(dash) { calls.dashes.push((dash || []).slice()); },
-    set font(_v) {}, 
+    set font(value) { calls.fonts.push(value); },
     set fillStyle(value) { ctx._fill = value; },
     set strokeStyle(value) { ctx._stroke = value; },
     get strokeStyle() { return ctx._stroke; },
@@ -553,6 +553,31 @@ T.paintLabels(emptyCtx, { frame: labelPlan.frame, font_px: 12, items: [] });
 check('an empty plan draws nothing', emptyCtx.calls.arcs.length === 0);
 T.paintLabels(null, labelPlan);
 check('a missing context is not an error', true);
+
+/* 锁定布局: the plan's own font_px is the size its boxes were laid out for, and
+   a locked layout keeps those boxes while the type follows the 字号 field.  The
+   override therefore has to win over the plan, and every length the painter
+   derives from the font -- the marker, the leader, the default stroke -- has to
+   follow it.  Drawn at the same plan, twice: once as laid out, once as
+   re-sized. */
+{
+  const asLaidOut = recordingContext();
+  T.paintLabels(asLaidOut, labelPlan);
+  const resized = recordingContext();
+  T.paintLabels(resized, labelPlan, { fontPx: 30 });
+  check('a plan is painted at the size it was laid out for',
+    String(asLaidOut.calls.fonts[0]).includes(`${labelPlan.font_px}px`),
+    asLaidOut.calls.fonts[0]);
+  check('and a locked layout is painted at the size the style asks for',
+    String(resized.calls.fonts[0]).includes('30px'), resized.calls.fonts[0]);
+  check('with the names left exactly where they were',
+    JSON.stringify(resized.calls.texts.map((t) => [t[1], t[2]])) ===
+    JSON.stringify(asLaidOut.calls.texts.map((t) => [t[1], t[2]])),
+    JSON.stringify(resized.calls.texts.map((t) => [t[1], t[2]])));
+  check('while the markers grow with the type',
+    resized.calls.arcs[0][2] > asLaidOut.calls.arcs[0][2],
+    `${resized.calls.arcs[0][2]} / ${asLaidOut.calls.arcs[0][2]}`);
+}
 
 /* Every feature is drawn in its own class colour, and the night side is faded
    rather than hidden: the two things the class work added to the painter. */

@@ -9,10 +9,10 @@ times, and it drifted: examples 01-07 shared a byte-identical bootstrap while
 
 What lives here
 ---------------
-``moonlib``
+``moonlib_s``
     Imported after ``src/`` has been added to ``sys.path``, so a checkout works
     without ``pip install -e .``.  Examples import it from here:
-    ``from _cli import moonlib``.
+    ``from _cli import moonlib_s``.
 ``ROOT``
     The repository root -- the directory holding ``src/``, ``out/`` and
     ``.cache/``.
@@ -24,7 +24,7 @@ What lives here
     plotting examples and the simulation ones but whose help text did not.
 
 This module is private to the examples (leading underscore) and is not part of
-the installed package: the examples only ever call the public :mod:`moonlib`
+the installed package: the examples only ever call the public :mod:`moonlib_s`
 API, and this file holds no lunar logic at all -- just the plumbing that lets a
 script in a checkout find the library and describe where it wrote its output.
 """
@@ -39,7 +39,7 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Re-exported for the examples: this is the module's whole purpose.
-__all__ = ["ROOT", "moonlib", "shown", "add_output_argument"]
+__all__ = ["ROOT", "moonlib_s", "shown", "add_output_argument"]
 
 
 def shown(path) -> str:
@@ -59,14 +59,14 @@ def shown(path) -> str:
 
 # Running a script by path puts *its own* directory on sys.path, not the
 # repository root, so the checkout's `src/` has to be added explicitly.
-if (ROOT / "src" / "moonlib").is_dir():
+if (ROOT / "src" / "moonlib_s").is_dir():
     sys.path.insert(0, str(ROOT / "src"))
 
 try:
-    import moonlib
+    import moonlib_s
 except ImportError as error:  # pragma: no cover - environment dependent
     raise SystemExit(
-        f"Cannot import moonlib ({error}).\n"
+        f"Cannot import moonlib_s ({error}).\n"
         f"Run this script with the project interpreter, which has numpy, "
         f"spiceypy and matplotlib installed:\n"
         f"    {ROOT}/.venv/bin/python {shown(sys.argv[0])}"

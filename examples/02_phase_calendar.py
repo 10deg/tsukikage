@@ -18,7 +18,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib  # noqa: E402
+from _cli import add_output_argument, moonlib_s  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,13 +33,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib.Observer(lat=args.lat, lon=args.lon)
+    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon)
 
-    entries = moonlib.phase_calendar(args.year, observer)
-    print(moonlib.reporting.format_phase_calendar(entries, observer))
+    entries = moonlib_s.phase_calendar(args.year, observer)
+    print(moonlib_s.reporting.format_phase_calendar(entries, observer))
 
     counts = Counter(entry.kind for entry in entries)
-    expected = {moonlib.PhaseKind.NEW_MOON: 12, moonlib.PhaseKind.FULL_MOON: 13}
+    expected = {moonlib_s.PhaseKind.NEW_MOON: 12, moonlib_s.PhaseKind.FULL_MOON: 13}
     for kind, minimum in expected.items():
         found = counts.get(kind, 0)
         flag = "ok" if found >= minimum else "UNEXPECTED"
@@ -57,14 +57,14 @@ def main() -> int:
     outdir.mkdir(parents=True, exist_ok=True)
 
     colours = {
-        moonlib.PhaseKind.NEW_MOON: "#4c72b0",
-        moonlib.PhaseKind.FIRST_QUARTER: "#55a868",
-        moonlib.PhaseKind.FULL_MOON: "#c44e52",
-        moonlib.PhaseKind.LAST_QUARTER: "#8172b2",
+        moonlib_s.PhaseKind.NEW_MOON: "#4c72b0",
+        moonlib_s.PhaseKind.FIRST_QUARTER: "#55a868",
+        moonlib_s.PhaseKind.FULL_MOON: "#c44e52",
+        moonlib_s.PhaseKind.LAST_QUARTER: "#8172b2",
     }
 
     figure, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=False)
-    for kind in moonlib.PhaseKind:
+    for kind in moonlib_s.PhaseKind:
         subset = [entry for entry in entries if entry.kind is kind]
         days = [entry.when_utc.timetuple().tm_yday for entry in subset]
         diameters = [entry.angular_diameter_arcsec for entry in subset]
@@ -76,7 +76,7 @@ def main() -> int:
     axes[0].grid(alpha=0.3)
 
     full_moons = sorted(
-        (entry for entry in entries if entry.kind is moonlib.PhaseKind.FULL_MOON),
+        (entry for entry in entries if entry.kind is moonlib_s.PhaseKind.FULL_MOON),
         key=lambda entry: entry.angular_diameter_arcsec,
     )
     labels = [entry.when_utc.strftime("%m-%d") for entry in full_moons]

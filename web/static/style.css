@@ -241,28 +241,32 @@ html, body {
 }
 /* The overlay is a sibling of the stage, covering the whole visible box.  Inside
    the stage it could only ever be as large as the un-zoomed picture, which is
-   why a magnified selection was clipped. */
+   why a magnified selection was clipped.  It sits *above* the label layer: the
+   box is a control, and a name drawn over one of its edges would hide the
+   handle the reader is dragging. */
 .view-body > #overlay {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
-  z-index: 1;
+  z-index: 2;
 }
 
 /* The landform labels get their own layer for the same reason the selection
    has one, and one more: text drawn into the picture's own canvas is rasterised
    at the *preview's* resolution and then stretched to the screen, so zooming in
    only magnified the pixels.  This layer is sized in device pixels and redrawn
-   on every zoom, so the type is rendered at the resolution it is read at. */
+   on every zoom, so the type is rendered at the resolution it is read at.
+   It is the bottom of the three floating layers -- under the selection box
+   (z-index 2) and under the picture's own controls (z-index 3). */
 .view-body > canvas.labels {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
-  z-index: 2;
+  z-index: 1;
 }
 input:disabled, select:disabled { opacity: .45; }
 
@@ -326,7 +330,10 @@ input:disabled, select:disabled { opacity: .45; }
   background: rgba(7, 9, 13, .68);
   color: var(--warn);
   font-size: 12px;
-  z-index: 2;
+  /* Above the label layer (1) and above the selection box (2): while a render
+     is running the veil covers the picture, and a marquee drawn on top of it
+     would read as a control that still works. */
+  z-index: 3;
 }
 .busy.on { display: flex; }
 /* Centred over the picture, the way a render reports itself on a camera. */
@@ -599,7 +606,7 @@ button[aria-pressed="true"] {
    top-left corner and the save row below it. */
 .view-title { color: var(--accent); font-weight: 600; }
 
-/* Controls floating over a picture.  Both sit above the label layer (z-index 2)
+/* Controls floating over a picture.  Both sit above the label layer (z-index 1)
    and neither may start a selection drag: the script checks for `.view-tools`. */
 .view-tools {
   position: absolute;

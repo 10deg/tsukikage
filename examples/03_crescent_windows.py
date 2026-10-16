@@ -17,7 +17,7 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib  # noqa: E402
+from _cli import add_output_argument, moonlib_s  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,13 +34,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib.Observer(lat=args.lat, lon=args.lon)
+    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     if args.sky:
         moment = datetime.fromisoformat(args.sky).replace(tzinfo=timezone.utc)
-        figure = moonlib.plotting.plot_sky(observer, moment, span_hours=1.5)
+        figure = moonlib_s.plotting.plot_sky(observer, moment, span_hours=1.5)
         target = outdir / "crescent_sky.png"
         figure.savefig(target, dpi=120)
         import matplotlib.pyplot as plt
@@ -49,16 +49,16 @@ def main() -> int:
         print(f"wrote {target}")
         return 0
 
-    criteria = moonlib.crescent.CrescentCriteria(
+    criteria = moonlib_s.crescent.CrescentCriteria(
         illumination_max_percent=args.illum_max,
         step_minutes=args.step_minutes,
     )
-    sessions = moonlib.crescent.find_crescent_windows(
+    sessions = moonlib_s.crescent.find_crescent_windows(
         observer, args.year, criteria=criteria
     )
     print(f"{len(sessions)} sessions in {args.year}\n")
     print(
-        moonlib.reporting.format_crescent_windows(
+        moonlib_s.reporting.format_crescent_windows(
             sessions, observer, ranked=True, top_n=6
         )
     )
@@ -80,7 +80,7 @@ def main() -> int:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    figure = moonlib.plotting.plot_sky(observer, best.best_utc, span_hours=1.5)
+    figure = moonlib_s.plotting.plot_sky(observer, best.best_utc, span_hours=1.5)
     target = outdir / "crescent_best.png"
     figure.savefig(target, dpi=120)
     plt.close(figure)
@@ -112,8 +112,8 @@ def main() -> int:
     )
     axes.plot(curve, theoretical, "--", color="#c44e52", lw=1.2,
               label="illum = (1 - cos ARCL) / 2")
-    axes.axvline(moonlib.crescent.DANJON_LIMIT_DEG, color="#555555", ls=":",
-                 label=f"Danjon limit ({moonlib.crescent.DANJON_LIMIT_DEG:.0f} deg)")
+    axes.axvline(moonlib_s.crescent.DANJON_LIMIT_DEG, color="#555555", ls=":",
+                 label=f"Danjon limit ({moonlib_s.crescent.DANJON_LIMIT_DEG:.0f} deg)")
     axes.set_xlim(0.0, 60.0)
     axes.set_ylim(0.0, 30.0)
     axes.set_xlabel("elongation / ARCL (deg)")

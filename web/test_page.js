@@ -35,7 +35,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'applySettings', 'centrePlacement', 'setAllClasses', 'aimingFrame',
   'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setProcTab',
   'buildEventKinds', 'drawViewLabels', 'labelEdits', 'labelHidden', 'labelClass',
-  'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler'];
+  'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler',
+  'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'lockedDiskPlan',
+  'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -415,7 +417,18 @@ function respond(url, body) {
              classes: [{ key: 'mare', zh: '月海', en: 'Mare', count: 23 },
                        { key: 'crater', zh: '环形坑', en: 'Crater', count: 8716 }] };
   }
-  if (url === '/api/settings/list') return { dir: '/tmp', files: [] };
+  if (url === '/api/settings/list') {
+    return { dir: '/tmp', files: [
+      { name: 'default', bytes: 4096, saved_utc: '2026-05-25T07:30:00+00:00' },
+      { name: 'default2', bytes: 4096, saved_utc: '2026-05-25T07:30:00+00:00' },
+    ] };
+  }
+  if (url === '/api/settings/load') {
+    // A file the page itself wrote: it carries the annotation switch too, so
+    // applying it does not read as "turn the labels off".
+    return { name: body.name,
+             settings: { 'label-density': 0.42, 'text-bold': true, annotate: true } };
+  }
   if (url === '/api/disk') {
     const width = (body.preview && body.preview.width) || 1000;
     const asked = body.earthshine || {};
@@ -572,7 +585,7 @@ const set = (id, value) => {
   if (el.type === 'checkbox') el.checked = Boolean(value);
   return el;
 };
-const fire = (id, name) => document.getElementById(id).fire(name);
+const fire = (id, name, event) => document.getElementById(id).fire(name, event);
 
 (async function main() {
   console.log('boot');
@@ -2134,6 +2147,211 @@ const fire = (id, name) => document.getElementById(id).fire(name);
   check('and the mirror, which is two latches rather than a value',
     values['image-mirror'] === 'none' || values['image-mirror'] === 'vertical' ||
     values['image-mirror'] === 'horizontal', values['image-mirror']);
+
+  console.log('');
+  console.log('导出 asks where to put the file');
+  /* 导出 wrote its own copy into the page's settings directory and handed the
+     browser a download.  It now opens the browser's own save dialog first, so
+     the folder and the file name are the reader's; where there is no such
+     dialog it still downloads, because that is what every browser can do. */
+  {
+    const written = [];
+    let asked = null;
+    const downloads = () => created.filter((el) => el.download).length;
+    sandbox.window.showSaveFilePicker = async (options) => {
+      asked = options;
+      return {
+        name: options.suggestedName,
+        createWritable: async () => ({
+          write: async (blob) => { written.push(blob); },
+          close: async () => {},
+        }),
+      };
+    };
+    set('settings-name', '对话框测试');
+    const saves = fetchCalls.filter((c) => c.url === '/api/settings/save').length;
+    const downloadsBefore = downloads();
+    fire('settings-save', 'click');
+    await tick(); await tick(); await tick();
+    check('the dialog is offered the name in the field',
+      asked && asked.suggestedName === '对话框测试.conf',
+      JSON.stringify(asked && asked.suggestedName));
+    check('and the file is offered as the settings format',
+      !!asked && asked.types[0].accept['application/json'].includes('.conf'),
+      JSON.stringify(asked && asked.types));
+    check('the file the reader picked is the one written',
+      written.length === 1 && String(written[0].parts[0]).includes('"schema"'),
+      `${written.length} writes`);
+    check('and it still keeps its own copy for the list',
+      fetchCalls.filter((c) => c.url === '/api/settings/save').length === saves + 1);
+    check('with nothing downloaded behind the dialog', downloads() === downloadsBefore,
+      `${downloads()} downloads`);
+    check('and the status line names the file',
+      /对话框测试\.conf/.test(document.getElementById('status').textContent),
+      document.getElementById('status').textContent);
+
+    // The same button, in a browser without the dialog.
+    delete sandbox.window.showSaveFilePicker;
+    set('settings-name', '下载回退');
+    fire('settings-save', 'click');
+    await tick(); await tick(); await tick();
+    check('without a dialog the file goes out as a download',
+      downloads() === downloadsBefore + 1, `${downloads()} downloads`);
+  }
+
+  console.log('');
+  console.log('a name picked out of the list applies that file');
+  /* The name field is both "what 导出 writes" and "what 导入 reads": picking a
+     saved name and then having to press a button that opens a *file chooser*
+     was the confusing part. */
+  {
+    fire('settings-name', 'focus');
+    await tick();
+    // The list is a datalist the page fills at run time, so the harness reads
+    // what it appended rather than a selector query.
+    const names = [...new Set(document.getElementById('settings-files').children
+      .map((option) => option.value))];
+    check('the saved files are in the list', names.length === 2, names.join(','));
+    const loads = () => fetchCalls.filter((c) => c.url === '/api/settings/load').length;
+    const before = loads();
+    set('settings-name', names[1]);
+    fire('settings-name', 'change');
+    await tick(); await tick();
+    const load = fetchCalls.filter((c) => c.url === '/api/settings/load').pop();
+    check('picking one applies it at once, with no second press',
+      loads() === before + 1 && load.body.name === names[1],
+      JSON.stringify(load && load.body));
+    check('and its parameters land in the controls',
+      Number(document.getElementById('label-density').value) === 0.42 &&
+      document.getElementById('text-bold').checked === true,
+      `${document.getElementById('label-density').value} / ` +
+      `${document.getElementById('text-bold').checked}`);
+    // A name the server does not have is a name for 导出 to create.
+    const beforeNew = loads();
+    set('settings-name', '还没保存过的名字');
+    fire('settings-name', 'change');
+    await tick(); await tick();
+    check('a name that is not a saved file is left alone', loads() === beforeNew,
+      `${loads()} / ${beforeNew}`);
+    // Enter is the same gesture as clicking the name in the list.
+    set('settings-name', names[0]);
+    fire('settings-name', 'keydown', { key: 'Enter', preventDefault() {} });
+    await tick(); await tick();
+    check('and Enter applies it too', loads() === beforeNew + 1, `${loads()}`);
+  }
+
+  console.log('');
+  console.log('锁定布局 holds the names still while the type changes');
+  /* The avoidance algorithm is a function of the text size, so making the type
+     bigger used to redistribute every name.  With the lock on, the plan stays
+     exactly as it is and only the glyphs change; anything that changes *which*
+     names are being placed is still a fresh layout. */
+  {
+    if (!T.state.labelsOn) { fire('annotate', 'click'); await tick(); await tick(); }
+    set('label-font', '');
+    fire('label-font', 'change');
+    await tick(); await tick();
+    check('there is a layout on screen to lock', !!T.state.labels.disk);
+    const annotations = () => fetchCalls.filter((c) => c.url === '/api/annotations').length;
+    set('label-lock', true);
+    fire('label-lock', 'change');
+    await tick();
+    check('the lock is a switch the page can read', T.labelLockOn() === true);
+    const frozen = T.state.labels.disk;
+    const beforeFont = annotations();
+    set('label-font', 22);
+    fire('label-font', 'change');
+    await tick(); await tick();
+    check('changing the font does not ask for a new layout',
+      annotations() === beforeFont, `${annotations()} / ${beforeFont}`);
+    check('the plan is the very same one, so no name moved',
+      T.state.labels.disk === frozen && frozen.font_px !== undefined);
+    check('while the type follows the field, not the plan',
+      Math.abs(T.labelStyleForFrame('disk').fontPx - T.labelFrameFontPx('disk')) < 1e-9 &&
+      T.labelStyleFor('disk').fontPx === undefined,
+      `${T.labelStyleForFrame('disk').fontPx} / ${frozen.font_px}`);
+    check('and an unlocked style still leaves the size to the plan',
+      (set('label-lock', false), fire('label-lock', 'change'),
+       evalIn(sandbox, 'labelStyleFor("disk").fontPx') === undefined));
+    set('label-lock', true);
+    fire('label-lock', 'change');
+    await tick();
+    const beforeClass = annotations();
+    set('class-rima', true);
+    fire('class-rima', 'change');
+    await tick(); await tick();
+    check('a change of what is labelled still re-lays out when locked',
+      annotations() > beforeClass, `${annotations()} / ${beforeClass}`);
+    check('and that new layout becomes the locked one',
+      T.state.labels.disk !== frozen);
+    set('class-rima', false);
+    fire('class-rima', 'change');
+    await tick(); await tick();
+    const beforeUnlock = annotations();
+    set('label-lock', false);
+    fire('label-lock', 'change');
+    await tick(); await tick();
+    check('unlocking asks for a fresh layout', annotations() > beforeUnlock,
+      `${annotations()} / ${beforeUnlock}`);
+    set('label-font', '');
+    fire('label-font', 'change');
+    await tick();
+  }
+
+  console.log('');
+  console.log('a locked layout scales to the export');
+  /* The export re-lays out for its own resolution -- unless the reader locked
+     the arrangement, in which case it is scaled, or the file would carry a
+     different map from the one on screen. */
+  {
+    const plan = {
+      frame: { width: 1000, height: 1000 },
+      font_px: 13,
+      items: [{ x: 100, y: 200, radius_px: 8, label_x: 110, label_y: 194,
+                label_w: 40, label_h: 16, label: '雨海', labelled: true,
+                outline: [[0, 0], [10, 0]] }],
+    };
+    const scaled = T.scalePlan(plan, 2);
+    check('every length in the plan scales, the outline included',
+      scaled.items[0].x === 200 && scaled.items[0].label_w === 80 &&
+      scaled.items[0].label_h === 32 && scaled.items[0].radius_px === 16 &&
+      scaled.font_px === 26 && scaled.frame.width === 2000 &&
+      scaled.items[0].outline[1][0] === 20,
+      JSON.stringify(scaled.items[0]));
+    check('and the original is left alone', plan.items[0].x === 100);
+    check('a plan with no label box keeps its nulls',
+      T.scalePlan({ frame: plan.frame, font_px: 13,
+                    items: [{ x: 1, y: 2, label_x: null, label_y: null }] }, 2)
+        .items[0].label_x === null);
+
+    // The export path itself: the frozen layout comes back scaled to the
+    // export's resolution, and a frame nobody locked is never reused.
+    set('label-lock', true);
+    fire('label-lock', 'change');
+    await tick();
+    if (!T.state.labelsOn) { fire('annotate', 'click'); await tick(); await tick(); }
+    set('label-font', '');
+    fire('label-font', 'change');
+    await tick(); await tick();
+    const onScreen = T.state.labels.disk;
+    if (!onScreen) {
+      check('the frozen plan is available to the export', false, 'no plan on screen');
+    } else {
+      const width = 2400;
+      const forExport = T.lockedDiskPlan(T.state.diskWhen, width);
+      const k = width / 1200;                    // the preview canvas is 1200 px
+      check('the export gets the locked layout, scaled, not a new one',
+        !!forExport && forExport.items.length === onScreen.items.length &&
+        Math.abs(forExport.items[0].x - onScreen.items[0].x * k) < 1e-9 &&
+        Math.abs(forExport.font_px - onScreen.font_px * k) < 1e-9,
+        forExport ? `${forExport.items[0].x} vs ${onScreen.items[0].x * k}` : 'null');
+      check('and another instant is laid out afresh instead',
+        T.lockedDiskPlan({ at: '2030-01-01T00:00:00' }, width) === null);
+    }
+    set('label-lock', false);
+    fire('label-lock', 'change');
+    await tick(); await tick();
+  }
 
   console.log('');
   console.log('the phase name hides a joke');

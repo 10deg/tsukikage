@@ -2,7 +2,7 @@
 
 Eleven of the twelve tools open with the same four lines -- find the repository
 root from ``__file__``, insert ``src/`` (or ``web/``) on ``sys.path``, then import
-:mod:`moonlib`.  Two names were in use for the same value (``ROOT`` and
+:mod:`moonlib_s`.  Two names were in use for the same value (``ROOT`` and
 ``_REPO``) and two idioms for computing it (``parent.parent`` and ``parents[1]``),
 and one tool skipped the constant altogether and inlined the whole path.
 
@@ -12,7 +12,7 @@ themselves are run::
 
     from _bootstrap import ROOT, use_src
 
-    moonlib = use_src()
+    moonlib_s = use_src()
 
 ``use_src`` returns the library so a tool can bind it to whatever name it likes.
 It raises ``SystemExit`` with the interpreter to use when ``src/`` is there but
@@ -40,18 +40,18 @@ def interpreter_hint(script: Any = None) -> str:
 
 
 def use_src(script: Any = None) -> Any:
-    """Put the checkout's ``src/`` on ``sys.path`` and return :mod:`moonlib`."""
+    """Put the checkout's ``src/`` on ``sys.path`` and return :mod:`moonlib_s`."""
     if SRC.is_dir():
         sys.path.insert(0, str(SRC))
     try:
-        import moonlib
+        import moonlib_s
     except ImportError as error:  # pragma: no cover - environment dependent
         raise SystemExit(
-            f"Cannot import moonlib ({error}).\n"
+            f"Cannot import moonlib_s ({error}).\n"
             f"Run this with the project interpreter:\n"
             f"{interpreter_hint(script)}"
         ) from error
-    return moonlib
+    return moonlib_s
 
 
 def use_web(script: Any = None) -> None:
@@ -63,12 +63,12 @@ def use_web(script: Any = None) -> None:
 # ---------------------------------------------------------------------------
 # shared catalogue conventions
 # ---------------------------------------------------------------------------
-#: The column order of every catalogue under ``src/moonlib/data``.
+#: The column order of every catalogue under ``src/moonlib_s/data``.
 #:
 #: Written out five times before this existed -- twice in ``fetch_nomenclature``
 #: (the writer and its provenance block) and once each in ``fetch_lpnd_names``
 #: and ``build_landform_db``, plus a copy in a test.  The readers in
-#: :mod:`moonlib.features` and :mod:`moonlib.annotations` look the same keys up
+#: :mod:`moonlib_s.features` and :mod:`moonlib_s.annotations` look the same keys up
 #: by name, so a rename in one writer would have quietly emptied a column rather
 #: than failing.
 CATALOGUE_COLUMNS = ("English Name", "名称", "Lat", "Lon", "Diameter", "Type", "Note")
