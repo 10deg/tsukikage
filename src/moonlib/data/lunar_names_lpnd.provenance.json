@@ -1,0 +1,10 @@
+{
+  "source": "LPND (月球与行星地名库) https://lpnd.bao.ac.cn",
+  "asked": 2062,
+  "answered": 2045,
+  "derived_satellites": 6986,
+  "named_rows": 9031,
+  "rows": 9048,
+  "coverage_percent": 99.8,
+  "generated_utc": "2026-10-12T05:42:06+00:00"
+}

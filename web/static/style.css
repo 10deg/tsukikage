@@ -1,0 +1,1545 @@
+/* Lunar simulator — layout
+ *
+ * Three columns separated by draggable splitters:
+ *
+ *   left    observer conditions and a readout of the Moon's state
+ *   centre  three pictures: the full disk on the left, and the geometric and
+ *           processed simulations stacked on the right
+ *   right   two sub-columns of parameters
+ *
+ * Every picture sits in a `.view` that owns its own zoom, so the full disk can
+ * be magnified for picking a target while the results stay fitted.  The Moon
+ * canvas and the selection overlay share a `.canvas-stack`, which is what keeps
+ * the overlay's lines at screen resolution instead of scaling with the preview.
+ */
+
+:root {
+  --bg: #0f1116;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --line: #2b303b;
+  --ink: #e6e8ee;
+  --ink-dim: #98a0b0;
+  --accent: #7aa2f7;
+  --accent-2: #9ece6a;
+  --warn: #e0af68;
+  --radius: 8px;
+  /* The colour a picture window opens onto.  It has two users on purpose: the
+     window itself, and the tab that names it -- a tab is the pane it opens, so
+     the selected one is painted this rather than a shade of its own. */
+  --viewport: #07090d;
+
+  /* Column widths, written by the splitter drags.  The left column is wide
+     enough for the date/time and the zone to share one row; the right one is
+     two panes of short fields, so it gives the pictures the rest -- the disk's
+     own width is then fitted to the picture's height. */
+  --w-left: 252px;
+  --w-right: 560px;
+  --splitter: 6px;
+  /* How the centre's three pictures divide up. */
+  --disk-w: 1fr;
+  --raw-h: 1fr;
+  /* The right column's two parameter panes; the divider between them drags it. */
+  --w-pane-a: 1fr;
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` has to win over every `display` a rule of ours sets: `.as-link` is
+   an inline-block and `.zoom` is a flex box, and without this the "save image"
+   link stayed on screen from the moment the page loaded, doing nothing when
+   pressed.  (`!important` because a rule that says how a thing looks is
+   normally more specific than one that says whether it is there at all.) */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.5 -apple-system, "SF Pro Text", "Helvetica Neue",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+/* ── the three columns ───────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns:
+    var(--w-left) var(--splitter) minmax(280px, 1fr) var(--splitter) var(--w-right);
+  height: 100%;
+  min-height: 0;
+}
+
+.col { min-height: 0; min-width: 0; overflow-y: auto; }
+.col-left  { background: var(--panel); }
+.col-right {
+  background: var(--panel);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* The two run buttons sit at the top of the right column, above the parameters
+   and outside their scroll area, so they are reachable from anywhere. */
+.col-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* One line, always: the status line lives here now, and a long message must
+     not push the buttons onto a second row and change the header's height.
+     It is the status line that gives up the space (see `.status-line`). */
+  flex-wrap: nowrap;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+/* Every item keeps its own width and the row simply runs out of the column when
+   the column is dragged narrow -- the version number included.  What used to
+   happen instead is the thing to avoid: 自动刷新 was allowed to shrink below its
+   own text, `white-space: nowrap` meant the text did not follow it, and the
+   label's overflow landed on top of the version.  A header that runs off the
+   edge reads as "there is more here than fits"; two controls on top of each
+   other reads as a bug. */
+.col-actions > * { flex: 0 0 auto; }
+/* The page's own status line: one line, clipped with an ellipsis, with no
+   scrollbar, no wrapping and no say in how wide the header is.  It is the one
+   thing in this row that gives. */
+.col-actions .status-line {
+  flex: 1 1 6em;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+.col-actions .status-line.error { color: #f7768e; }
+.col-actions .status-line.busy { color: var(--warn); }
+
+/* The centre never scrolls; its grid of pictures takes the whole box. */
+.col-centre {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* No padding at all: the pictures run to the column's edges, the dividers
+     between them are the only lines there are, and the 6 px of daylight that
+     used to sit above and below them read as a black band under the panes and
+     as a gap at the top of the vertical divider.  The frame this column sits in
+     already has its own border. */
+  padding: 0;
+  gap: 0;
+}
+
+.splitter {
+  cursor: col-resize;
+  background: var(--line);
+  position: relative;
+}
+.splitter::after { content: ""; position: absolute; inset: 0 -3px; }
+.splitter:hover, .splitter.dragging { background: var(--accent); }
+/* The left column can be dragged away: at zero width the bar it left behind
+   grows a chevron, and clicking it brings the column back. */
+.layout.left-hidden .splitter[data-target="left"] { cursor: pointer; }
+.layout.left-hidden .splitter[data-target="left"]::before {
+  content: "›";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+}
+.layout.left-hidden .splitter[data-target="left"]:hover::before { border-color: var(--accent); }
+
+/* ── the three pictures ──────────────────────────────────────────── */
+.views {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  /* Draggable in both directions: one divider sets how much width the disk
+     gets, the other how the right-hand column splits. */
+  grid-template-columns:
+    minmax(140px, var(--disk-w)) var(--splitter) minmax(140px, 1fr);
+  grid-template-rows:
+    minmax(110px, var(--raw-h)) var(--splitter) minmax(110px, 1fr);
+}
+.view-disk { grid-row: 1 / span 3; grid-column: 1; }
+.view-info { grid-row: 1; grid-column: 3; }
+.view-stack { grid-row: 3; grid-column: 3; }
+.splitter.v { grid-row: 1 / span 3; grid-column: 2; cursor: col-resize; }
+.splitter.h { grid-row: 2; grid-column: 3; cursor: row-resize; }
+.splitter.h::after { inset: -3px 0; }
+
+.view {
+  /* The three pictures are columns of the page, not framed boxes: no border, no
+     rounding, no panel of their own -- they fill the cell the grid gives them,
+     the way the two side columns fill theirs.  The dividers still work: what
+     says where a column ends is the divider, not a line drawn round it. */
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+.view > figcaption {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 2px 5px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.view > figcaption > span:first-child { color: var(--accent); font-weight: 600; }
+
+.view-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--viewport);
+}
+.view-body.grabbable { cursor: grab; }
+.view-body.grabbing { cursor: grabbing; }
+
+/* Zoom is a CSS transform on the stack, so the drawing code is untouched and
+   getBoundingClientRect() -- which the selection maths relies on -- stays
+   correct under magnification. */
+/* One "stage" per view, positioned and sized by fitCanvas().  Everything drawn
+   inside it fills it, so the picture always matches its frame exactly whatever
+   the column widths, the zoom and the preview resolution are. */
+.canvas-stack,
+.view-body > canvas {
+  position: absolute;
+  transform-origin: center center;
+  will-change: transform;
+  display: block;
+}
+.canvas-stack > canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* The overlay is a sibling of the stage, covering the whole visible box.  Inside
+   the stage it could only ever be as large as the un-zoomed picture, which is
+   why a magnified selection was clipped. */
+.view-body > #overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* The landform labels get their own layer for the same reason the selection
+   has one, and one more: text drawn into the picture's own canvas is rasterised
+   at the *preview's* resolution and then stretched to the screen, so zooming in
+   only magnified the pixels.  This layer is sized in device pixels and redrawn
+   on every zoom, so the type is rendered at the resolution it is read at. */
+.view-body > canvas.labels {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+input:disabled, select:disabled { opacity: .45; }
+
+.view-foot {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 3px 8px;
+  font-size: 10px;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--line);
+  min-height: 17px;
+}
+/* The full disk's foot carries three things: the picture's size and scale, the
+   earthshine it was drawn with, and the gestures that are not obvious.  The
+   last is pushed to the right edge, out of the way of the numbers. */
+#disk-info {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+#disk-info > span { min-width: 0; }
+#disk-info #disk-info-earthshine { font-size: 10px; }
+#disk-info .view-foot-hint {
+  margin-left: auto;
+  white-space: nowrap;
+  padding-left: 8px;
+  color: #6b7280;
+}
+
+/* One button instead of bilingual labels everywhere: every English gloss is a
+   `.en` span, so hiding them is a class on the body, not a second stylesheet. */
+/* The English glosses in the markup are the source of the English labels the
+   Moon readout switches to; everywhere else the page reads Chinese. */
+.en { display: none; }
+
+.zoom { margin-left: auto; display: flex; align-items: center; gap: 3px; }
+.zoom button {
+  padding: 0 6px;
+  line-height: 16px;
+  font-size: 12px;
+  border-radius: 4px;
+  background: transparent;
+  border-color: var(--line);
+}
+.zoom b {
+  min-width: 38px;
+  text-align: center;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.busy {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 9, 13, .68);
+  color: var(--warn);
+  font-size: 12px;
+  z-index: 2;
+}
+.busy.on { display: flex; }
+/* Centred over the picture, the way a render reports itself on a camera. */
+.busy-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: rgba(7, 9, 13, .55);
+}
+.busy-label { color: var(--warn); font-size: 12.5px; font-weight: 600; }
+.busy-note { color: var(--ink-dim); font-size: 11px; }
+.busy .progress { width: 190px; margin: 0; }
+
+
+/* ── the right column's two panes ────────────────────────────────── */
+.panes {
+  display: grid;
+  /* The divider between the two parameter columns sizes the left one
+     (--w-pane-a); the right one takes what is left, with its own floor. */
+  grid-template-columns:
+    minmax(220px, var(--w-pane-a, 1fr)) var(--splitter) minmax(230px, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.pane { min-width: 0; overflow-y: auto; }
+/* The divider between the two parameter columns *is* the splitter; a border
+   here as well would draw two lines side by side. */
+.pane-a { border-right: 0; }
+.pane-b { border-right: 0; }
+/* The right-hand pane is a column so the events table can be told to take the
+   rest of it: `flex: 1` needs a definite height above it. */
+.pane-b { display: flex; flex-direction: column; }
+.pane-b > .proc-panel { flex: 1 1 auto; min-height: 0; display: flex;
+                         flex-direction: column; }
+#proc-events { flex: 1 1 auto; min-height: 0; display: flex;
+               flex-direction: column; }
+#proc-events > .event-list { flex: 1 1 auto; min-height: 2em; }
+
+/* ── parameter groups ────────────────────────────────────────────── */
+.group { padding: 9px 11px 11px; border-bottom: 1px solid var(--line); }
+.group:last-child { border-bottom: 0; }
+.col-left .group.grow { display: flex; flex-direction: column; }
+.group h2 {
+  margin: 0 0 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: .02em;
+}
+/* The parameter column is a stack of titled blocks and the eye reads the seams
+   between them, not the titles: the titles stay and the air around them goes.
+   Measured against the previous padding this is 5 px per group, four groups
+   deep -- which is a whole row of controls back. */
+.pane .group { padding: 7px 11px 8px; }
+.pane .group h2 { margin: 0 0 5px; }
+/* 望远镜/相机 and 事件预报/生成动画 have no title at all: their tab strip is the
+   title, so it takes the title's place in the rhythm rather than floating. */
+.group > .tabs:first-child { margin-bottom: 5px; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 9px; }
+/* Two field groups without a title between them (模拟设置's resolution block
+   and its light block) still need a little air. */
+.grid2 + .grid2 { margin-top: 8px; }
+
+/* A plain block, not a flex column: the caption, its English gloss and the
+   value must sit on ONE line, with only the input dropping to the next.  As a
+   flex column each of those became its own row, which pushed the English
+   underneath the Chinese. */
+label {
+  display: block;
+  font-size: 11px;
+  color: var(--ink-dim);
+  min-width: 0;
+  margin-bottom: 8px;
+}
+label > input,
+label > select { display: block; margin-top: 2px; }
+label > output { line-height: 1.6; }
+
+input[type="number"],
+input[type="datetime-local"],
+input[type="text"],
+select {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--ink);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+input:disabled { opacity: .45; }
+
+input[type="range"] { width: 100%; accent-color: var(--accent); margin: 1px 0 0; min-width: 60px; }
+
+label > output {
+  float: right;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Saturation keeps its slider, its number and the colour switch on one line, so
+   the switch reads as belonging to the slider rather than to the section. */
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.slider-row .slider-label { flex: 0 0 auto; }
+.slider-row input[type="range"] { flex: 1 1 auto; }
+.slider-row output {
+  flex: 0 0 auto;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  text-align: right;
+}
+.slider-row .check { margin: 0; flex: 0 0 auto; }
+
+.check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  margin-bottom: 7px;
+}
+.check input { margin: 0; flex: 0 0 auto; }
+.check.inline { margin: 0; white-space: nowrap; }
+
+/* A hint with nothing in it takes no room: several of them are filled in only
+   once a render has reported something. */
+.hint:empty { display: none; }
+.hint {
+  margin: 5px 0 6px;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+/* A hint that rides beside the switch it explains (目镜视场遮罩) rather than
+   under it: as a flex item of the label its own margins would misalign it. */
+.check .hint { margin: 0; }
+
+/* English glosses, in parentheses, right after the Chinese term. */
+.en { color: #6b7280; font-weight: 400; font-size: 10px; }
+h2 .en { font-size: 10px; }
+
+/* ── the Moon readout ────────────────────────────────────────────── */
+.readout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 11px;
+}
+.readout dt { color: var(--ink-dim); }
+.readout dt.sep { border-top: 1px solid var(--line); padding-top: 4px; margin-top: 3px; }
+.readout dt.sep + dd { border-top: 1px solid var(--line); padding-top: 4px; margin-top: 3px; }
+/* One language at a time in the readout, chosen by its own button: Chinese by
+   default, English on request -- never both at once.  `.en` is hidden by
+   default everywhere, so the English labels only ever appear here. */
+.readout .zh { display: inline; }
+.readout .en { display: none; }
+.readout.lang-en .zh { display: none; }
+.readout.lang-en .en { display: inline; font-size: 11px; }
+.group h2 .en { display: none; }
+.group h2.lang-en .zh { display: none; }
+.group h2.lang-en .en { display: inline; }
+.readout dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+/* The distance carries both origins on one line; wrapping it would read as two
+   separate quantities. */
+.readout #mi-dist { white-space: nowrap; }
+/* One letter per origin: 站 = topocentric (from the site), 地 = geocentric.
+   Only the quantities where the two actually differ carry one, and the two
+   colours keep them apart at a glance. */
+.ref {
+  font-style: normal;
+  font-size: 9px;
+  color: var(--warn);
+  margin-right: 3px;
+  vertical-align: .3em;
+}
+.ref-geo { color: var(--accent); }
+
+/* Date/time and its time zone read as one row: they are two halves of the same
+   instant, and they have to be the same height to look like one row. */
+.col-left .time-row {
+  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
+  gap: 7px;
+}
+.col-left .time-row > label { margin-bottom: 8px; }
+.col-left .time-row input {
+  height: 26px;
+  padding: 3px 5px;
+  font-size: 11.5px;
+}
+/* The zone is a whole number of hours: type it, or step it by one -- and it is
+   still "UTC", which the field alone does not say. */
+.col-left .tz-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  height: 26px;
+}
+.col-left .tz-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  text-align: center;
+}
+.col-left .tz-field .unit { font-size: 10.5px; color: var(--ink-dim); }
+
+/* The status line, in the header's own row beside the version.  It no longer
+   needs its own bar across the bottom of the left column, and it must not give
+   the header a second line: see `.col-actions .status-line`, which pins it to
+   one clipped row whatever it has to say. */
+.col-left { display: flex; flex-direction: column; }
+.status { color: var(--ink-dim); font-size: 10.5px; }
+.status.busy { color: var(--warn); }
+.status.error { color: #f7768e; }
+
+/* ── buttons ─────────────────────────────────────────────────────── */
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+button, .as-link {
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover, .as-link:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: #10131a; border-color: var(--accent); font-weight: 600; }
+button.primary:hover { filter: brightness(1.08); }
+button.ghost { background: transparent; }
+/* The label toggle is a latch, so it has to look like one: its pressed state is
+   the only thing on the page explaining why names are on the picture. */
+button[aria-pressed="true"] {
+  background: rgba(255, 214, 102, .16);
+  border-color: #ffd666;
+  color: #ffe6a3;
+}
+/* `select` is full width by default, which is right in a form column and wrong
+   in the action row. */
+.col-actions select { width: auto; }
+.col-actions input[type="number"] { width: 4.6em; text-align: center; }
+
+/* The full disk's title is the same blue as every other window's; the picture's
+   own controls no longer live up here -- the resolution went into the picture's
+   top-left corner and the save row below it. */
+.view-title { color: var(--accent); font-weight: 600; }
+
+/* Controls floating over a picture.  Both sit above the label layer (z-index 2)
+   and neither may start a selection drag: the script checks for `.view-tools`. */
+.view-tools {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(15, 17, 22, .74);
+}
+.view-tools .check { margin: 0; }
+.view-tools select { width: auto; }
+.view-tools input[type="text"] {
+  width: 5.2em;
+  padding: 1px 5px;
+  text-align: right;
+}
+.view-body > .zoom {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 3;
+  margin: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(15, 17, 22, .74);
+}
+
+/* ── the full disk's save row ──────────────────────────────────────────────
+   Everything that belongs to saving the whole disk, in the order it is read:
+   what it is, how big, whether the landform labels and the earthshine go into
+   the file, and in which format.  It sits under the picture's status line. */
+.disk-save-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 10.5px;
+}
+/* One line is the target: everything in this row is a short label or a small
+   control, and the fitDiskColumn() below gives the picture the width to do it. */
+.disk-save-bar > * { font-size: 10.5px; }
+.disk-save-bar .check { gap: 4px; }
+.disk-save-bar .check { margin: 0; }
+.disk-save-bar select { width: auto; padding: 1px 4px; }
+/* A file input that has to be clickable, so it cannot be `display: none`. */
+.offscreen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* The save link is always in the row; before the first render it says so. */
+.as-link[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+.disk-save-bar #out-px, .disk-save-bar button { padding: 2px 8px; }
+.disk-save-bar #out-ref { margin-right: 2px; }
+/* 保存图像 in the close-up's row: the same button, as a link. */
+.as-link.gold {
+  border-color: var(--warn);
+  color: #ffd666;
+  font-weight: 600;
+  padding: 3px 10px;
+}
+.as-link.gold:hover { border-color: #ffd666; background: rgba(255, 214, 102, .12); }
+/* The typed field only appears when 自定义 is picked; the select holds the
+   presets, which is what a datalist on a text input never showed. */
+.disk-save-bar #disk-px { width: 5.4em; padding: 1px 5px; text-align: right; }
+/* Every typed field in these rows needs its own width: the base rule is
+   `width: 100%`, which on a flex row means "take the whole line". */
+.disk-save-bar #out-px { width: 5.6em; padding: 1px 5px; text-align: right; }
+.disk-save-bar .unit { white-space: nowrap; }
+/* Its own width, or `width: 100%` on a flex row runs it into 格式 next door. */
+.disk-save-bar #disk-earthshine-gain,
+.disk-save-bar #region-earthshine-gain {
+  width: 3.4em;
+  padding: 1px 4px;
+  text-align: center;
+}
+.disk-save-bar select { width: auto; }
+.disk-save-bar .unit { color: var(--ink-dim); font-size: 11px; }
+
+/* The one button on the page that starts a long render, so it is the one
+   button that is not grey. */
+button.gold {
+  background: transparent;
+  border-color: var(--warn);
+  color: #ffd666;
+  font-weight: 600;
+}
+button.gold:hover { border-color: #ffd666; background: rgba(255, 214, 102, .12); }
+
+/* ── the action bar: the two run buttons and the version ───────────────── */
+/* The build number is also the way to the repository: "which build is this?"
+   and "where do I get it?" are the same question, so it is a link. */
+.app-version {
+  color: var(--ink-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.app-version:hover { color: var(--accent); text-decoration: underline; }
+
+/* The switch that flips one block's labels between Chinese and English. */
+button.mini {
+  float: right;
+  padding: 0 6px;
+  line-height: 15px;
+  font-size: 10px;
+  border-radius: 4px;
+  color: var(--ink-dim);
+}
+button.mini[aria-pressed="true"] { color: var(--ink); }
+
+/* 时间微调：九个一排。字号比别的 .mini 再小一号，八个步长按钮**均分**剩下的宽度，
+   因为 252 px 的左栏里要放得下「-1M -1d -1h -1m [钟] +1m +1h +1d +1M」这一整行，
+   而左栏拖宽时它们跟着铺开比留一条空隙好看。 */
+.time-nudge {
+  flex-wrap: nowrap;
+  gap: 2px;
+  margin-top: 2px;
+}
+.time-nudge button {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 0;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+#sync-now { flex: 0 0 auto; padding: 1px 4px; }
+#sync-now svg { display: block; width: 13px; height: 13px; }
+
+/* The settings file row: a name, 导入, 导出 -- nothing else. */
+.settings-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 2px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+.settings-row input[type="text"] { flex: 1 1 auto; min-width: 0; }
+.settings-row button { flex: 0 0 auto; padding: 4px 9px; font-size: 11px; }
+/* The observer group is the tightest block on the page: every row here is a
+   label with a field under it, and the padding is what makes it tall. */
+.col-left .group { padding: 6px 11px 7px; }
+.col-left .group h2 { margin-bottom: 4px; }
+/* The rows under the heading are label + field, one after another: the gap
+   between them was sized for a taller column and read as an empty paragraph. */
+.col-left label { margin-bottom: 4px; }
+.col-left .time-row > label { margin-bottom: 4px; }
+.col-left .grid2 { gap: 3px 9px; }
+.col-left .time-row { gap: 6px; }
+.col-left .settings-row { margin-top: 1px; padding-top: 5px; }
+/* A native date field is a head taller than the text inputs beside it. */
+.col-left input[type="datetime-local"] { padding: 3px 6px; }
+
+/* A row that puts its button on the right. */
+.row.right { justify-content: flex-end; }
+/* 更新图像: the same weight as 保存图像, in the accent colour. */
+button.outline {
+  background: transparent;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+button.outline:hover { border-color: var(--ink); color: var(--ink); }
+
+/* ── the landform panel, at the top of the full disk ───────────────────────
+   The names and the geometric overlays both land on this picture, so the panel
+   that switches them on sits above it, in its own header.  Three rows: the
+   labels and their style, the geometric overlays, then search plus classes.
+   Selected as `.view > figcaption.disk-head` because `.view > figcaption`
+   already styles every caption, and a bare `.disk-head` would lose to it. */
+.view > figcaption.disk-head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px 8px 5px;
+}
+.disk-head .label-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px 9px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+/* Everything the switch folds away: the style controls, the search, the
+   geometric overlays and the class switches. */
+.disk-head .annot-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+}
+.disk-head .find-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.disk-head .find-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.disk-head .mark-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px 6px;
+  flex-wrap: wrap;
+}
+.disk-head .label-bar { padding-top: 5px; border-top: 1px solid var(--line); }
+/* Everything after the switch can be folded away, leaving the one button: the
+   panel is worth having, but not worth two rows of the picture's height. */
+.disk-head .label-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px 9px;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.label-bar .caret {
+  padding: 0 7px;
+  line-height: 18px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+/* The geometric switches belong to the search above them: no rule between. */
+.disk-head .mark-bar { padding-top: 4px; }
+.disk-head .find-bar {
+  align-items: flex-start;
+  padding-top: 5px;
+  border-top: 1px solid var(--line);
+}
+/* The geometric switches are short names: they do not need the width the
+   search box above them takes, and holding that width pushed the class
+   switches off to the right for no reason. */
+.disk-head .find-left {
+  flex: 0 1 19em;
+  min-width: 0;
+}
+.disk-head .mark-bar { max-width: 19em; }
+.disk-head .class-bar { flex: 1 1 auto; min-width: 0; }
+.label-bar input[type="number"] { width: 4.2em; text-align: center; }
+/* The label panel is a wall of small pills, so a full-height form control in
+   the middle of it stands a head taller than everything around it (the 线条
+   row's width box did).  One height for every control in this panel. */
+.label-bar input[type="number"],
+.label-bar input[type="text"],
+.label-bar select {
+  padding: 1px 5px;
+  height: 1.75em;
+  line-height: 1.35;
+  font-size: 11px;
+}
+.label-bar select { width: auto; }
+.label-bar > button { flex: 0 0 auto; }
+/* The switch for the labels is the one button that starts this whole panel, so
+   it carries the accent colour; pressed, the generic latch rule paints it. */
+#annotate { border-color: var(--accent); }
+#annotate[aria-pressed="true"] { border-color: #ffd666; }
+/* Density is a slider because "sparse / standard / dense" is not a choice
+   between three things but a position on one axis.  Long, because the useful
+   range is in the middle and the ends are only ever visited once. */
+.label-bar input[type="range"] {
+  width: 13em;
+  vertical-align: middle;
+  accent-color: var(--accent);
+}
+.label-bar #density-value {
+  min-width: 2.1em;
+  text-align: right;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.label-bar input[type="color"] {
+  width: 2.2em;
+  height: 1.55em;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+/* The geometric overlays, as pills: one switch each, all of them on the full
+   disk, none of them needing a heading. */
+.mark-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.mark-chip:hover { border-color: var(--accent); }
+/* The pill is the label, so the box itself is invisible -- but it stays in the
+   tab order, or the switch would be mouse-only. */
+.mark-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.mark-chip:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.mark-chip[data-on="true"] {
+  color: var(--ink);
+  border-color: var(--accent);
+  background: rgba(122, 162, 247, .14);
+}
+.mark-chip[data-on="false"] { opacity: .55; }
+
+/* The search box on the left of the block, the class switches on the right. */
+.find-bar .find-label {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  white-space: nowrap;
+}
+.find-bar .find-label input[type="text"] { width: 13em; padding: 2px 6px; }
+.find-bar .class-bar { flex: 1 1 14em; }
+
+/* A select with its own text field beside it (物理分辨率). */
+.pick-row { display: flex; align-items: center; gap: 5px; margin-top: 2px; }
+.pick-row select { flex: 0 1 auto; min-width: 0; }
+.pick-row input { flex: 0 1 5.4em; min-width: 0; }
+
+/* A number typed beside its slider, and the two mirror icons. */
+input.num-inline {
+  flex: 0 0 4.6em;
+  width: 4.6em;
+  padding: 1px 4px;
+  text-align: right;
+}
+/* A reset button: icon only, and the icon is an inline SVG. */
+button.reset { padding: 1px 5px; }
+button.reset svg { display: block; }
+button.reset:hover { color: var(--accent); border-color: var(--accent); }
+/* A reset that sits in a tab strip is not a tab: keep it clear of them. */
+.tabs button.reset { margin-left: 6px; vertical-align: middle; }
+.group h2 > button.reset { margin-left: 6px; vertical-align: middle; }
+
+button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
+
+/* 事件预报 / 生成动画：开始与结束各占一行——「开始 | 时间 | 同步所选时间」在同一行里，
+   时间框只拿剩下的宽度（旁边还有按钮，不需要占满整栏），按钮的高度跟着时间框走。
+   中间那一排是范围微调：开始与结束一起挪，窗口长度不变。 */
+.proc-panel .event-when {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+/* `margin: 0` is the vertical centring: a `<label>` carries the base rule's
+   8 px bottom margin, and inside a centred flex row that margin box is what is
+   centred -- so the text sat 4 px high. */
+.proc-panel .event-when > .when-label {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.proc-panel .event-when > input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+/* `align-self: stretch` is the whole point: the button is exactly as tall as
+   the field beside it, rather than as tall as its own smaller text. */
+.proc-panel .event-when > button {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+#proc-events .time-nudge,
+#proc-animation .time-nudge { margin: 0 0 8px; }
+#proc-events .mark-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: 1px 0 2px;
+}
+#proc-events .mark-chip {
+  padding: 1px 7px;
+  margin: 0;
+  font-size: 10px;
+}
+
+/* 生成动画 的几行是短数字与短菜单：控件按自己内容的宽度，不拉满整栏。 */
+#proc-animation .param-row input[type="number"],
+#proc-animation .param-row select { flex: 0 0 auto; }
+#proc-animation .param-row input[type="number"] {
+  width: 5em;
+  text-align: right;
+  padding: 1px 5px;
+}
+#proc-animation .param-row select { width: auto; max-width: 100%; }
+/* 物理分辨率's menu is the one select here whose options are long enough to
+   eat the row; the 原生 option is 10 full-width characters, which left the
+   km/px unit sitting ~11 px off the right edge.  The label is shorter now, and
+   this lets the menu give ground as well, so a narrower pane can never pin the
+   unit against the edge. */
+#proc-animation #anim-kmpx-preset { flex: 0 1 auto; }
+/* 采样 / 平滑 share one row: they are the two answers to "how clean is this
+   frame", and each is a one-word label with a short menu after it.  `.row`
+   only carries a top margin, so without an explicit bottom one the 范围 row
+   below rides straight up against these two menus -- the pane's rhythm is
+   9 px (the margin every `.param-row` already ends with). */
+#proc-animation .anim-quality { gap: 10px; margin-bottom: 9px; }
+#proc-animation .anim-quality select { width: auto; }
+#proc-animation #anim-timestamp-margin { width: 4.4em; text-align: right; }
+#proc-animation #anim-px { width: 5.5em; text-align: right; padding: 1px 5px; }
+#proc-animation .progress { margin: 2px 0 4px; }
+
+/* 后期处理从标签页里搬出来之后，它自己也成了一栏：标题下面给一点气口，和最上面
+   那几栏的节奏一致。 */
+#proc-controls { padding-top: 2px; }
+
+/* 进度条与「更新图像 / 复位」同排：它吃掉按钮之外剩下的宽度，但不小于 40 px、
+   不大于 150 px，所以窄栏里也不会压到按钮上——两边都是 flex 项，不会重叠。 */
+.proc-actions { flex-wrap: nowrap; gap: 6px; }
+/* The buttons keep their own width whatever happens to the row.  With the
+   progress bar out of the row, the something that gives is the space before
+   复位: 镜像 stays against the left edge, where the parameter names above it
+   are, and the two actions stay against the right. */
+.proc-actions > button { flex: 0 0 auto; }
+.proc-actions #proc-reset { margin-left: auto; padding: 4px 7px; }
+/* 后期处理的进度条：单独一行，占满整栏。 */
+.proc-progress { margin: 7px 0 1px; }
+
+/* 事件预报的列表：一行一个时刻，地平线以下的灰掉。
+ *
+ * It runs to the bottom of the column.  It used to stop at 46 vh, which left
+ * the table hanging in the middle of the pane with empty space under it -- the
+ * one thing on this page whose length the reader is actually comparing. */
+.event-list {
+  flex: 1 1 auto;
+  min-height: 2em;
+  margin-top: 6px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+.event-list .event-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 2px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  cursor: pointer;
+}
+.event-list .event-row:hover { background: var(--panel-2); }
+.event-list .event-row[data-observable="false"] { color: var(--ink-dim); opacity: .55; }
+.event-list .event-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.event-list .event-row span { color: var(--ink-dim); }
+.event-list .event-row[data-observable="true"] b { color: var(--accent); }
+
+/* A folded-away block of advanced settings (高级设置). */
+details.fold { margin-top: 7px; }
+details.fold > summary {
+  cursor: pointer;
+  padding: 3px 0;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+details.fold[open] > summary { color: var(--ink); }
+details.fold .grid2 { margin-top: 5px; }
+
+/* The instrument panes: label above field, one rhythm down the column. */
+.train-pane .grid2 > label {
+  display: block;
+  margin-bottom: 7px;
+}
+.train-pane .grid2 > label > select,
+.train-pane .grid2 > label > input { width: 100%; max-width: none; }
+
+/* Render progress.  The page cannot see inside the server's ray march -- the
+   render is one call -- so this bar is honest about being an estimate: it is
+   driven by the measured speed of previous renders and never claims to finish
+   before the answer arrives. */
+/* The magnifier: a 1:1 window on the selection.  It lives in the info panel
+   rather than floating over the Moon, so it can be as large as the panel and
+   never covers the picture it is magnifying. */
+/* The live close-up owns the whole window: it is the one thing here. */
+.info-body { display: flex; flex-direction: column; gap: 6px; }
+.magnifier {
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: var(--viewport);
+}
+/* 实时特写：三个数并作一排，等分这一栏的宽度。它们是同一个选框的三个坐标，
+   分两排读就像两组设置；`.`grid2` 的 1fr 1fr 正是把第三个挤下去的那条规则。 */
+.selection-inputs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px 6px;
+  flex-wrap: nowrap;
+  padding: 0 2px;
+}
+.selection-inputs > label {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-bottom: 0;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+/* Short fields: what goes in them is a coordinate, and the English glosses the
+   other columns carry are dropped here (`.en` inside a 10.5 px label is more
+   width than the number). */
+.selection-inputs input {
+  margin-top: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 5px;
+  font-size: 11px;
+}
+.selection-inputs .en { display: none; }
+/* 旋转角 and its ↺ sit on one line; the field gives the icon its room. */
+.selection-inputs .pick-row { margin-top: 2px; gap: 3px; }
+.selection-inputs .pick-row input { flex: 1 1 0; width: auto; min-width: 0; }
+.selection-inputs .pick-row button { flex: 0 0 auto; padding: 2px 5px; }
+.info-body .row { margin-top: 0; }
+
+/* 同步回当前视场 rides at the right-hand end of the tab row, where the thing it
+   acts on (the window) is named, rather than in the coordinate row where it read
+   as a fourth field.  A size smaller than the tab beside it and a few pixels
+   lower: the tab belongs flush with the top of its strip, this is a small action
+   in the corner and looked like it was stuck to the ceiling when it was neither.
+ */
+#sel-sync-last {
+  margin-left: auto;
+  margin-top: 3px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  line-height: 15px;
+  /* One line, always.  Chinese breaks between any two characters, so the flex
+     row's automatic minimum let this label wrap into two lines and the button
+     grew to the full height of the strip -- which is what "stuck to the top"
+     was: not its position, its size. */
+  white-space: nowrap;
+}
+/* 同步回当前视场 is an *action*, not a latch, so its two colours mean the two
+   things an action can mean: amber is "there is something here to press", grey
+   is "nothing to do".  Nothing to do happens twice -- the box is already the one
+   the last render used, or there has not been a render yet -- and those are the
+   same statement to the reader, so they are the same colour.
+ *
+ * It used to be the other way round: the generic pressed rule painted the
+ * *already synced* state amber (which reads as "press me", the one thing it is
+ * not) and left the actionable state as a plain ghost button.  Grey here is the
+ * strip's own colour with the ordinary border, so a button with nothing to do
+ * is part of the row rather than a control that looks switched off. */
+#sel-sync-last[disabled],
+#sel-sync-last[aria-pressed="true"] {
+  background: var(--viewport);
+  border-color: var(--line);
+  color: var(--ink-dim);
+  opacity: 1;
+}
+#sel-sync-last:not([disabled]):not([aria-pressed="true"]) {
+  background: rgba(255, 214, 102, .16);
+  border-color: #ffd666;
+  color: #ffe6a3;
+  font-weight: 600;
+}
+#sel-sync-last:not([disabled]):not([aria-pressed="true"]):hover {
+  background: rgba(255, 214, 102, .26);
+  border-color: #ffd666;
+}
+.magnifier > canvas { display: block; margin: 0 auto; }
+.magnifier > figcaption {
+  padding-top: 3px;
+  font-size: 10px;
+  color: var(--ink-dim);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.magnifier[hidden] { display: none; }
+
+/* ── the info panel: the live close-up ───────────────────────────── */
+.info-body { overflow-y: auto; padding: 8px; }
+
+/* ── the strip in the left column: the phase, and that instant ──────
+   It sits under the Moon readout, above the status line, so the picture and
+   the numbers that belong to the same instant are read together.  The column
+   is narrow, so the little disk keeps to the left and the facts run down the
+   right in one column of label/value pairs. */
+.disk-strip {
+  flex: 0 0 auto;
+  display: flex;
+  /* The disc is centred against the facts beside it: it is a picture, and a
+     picture that hangs off the top of its row reads as a mistake. */
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  /* No rule of its own: the group above already ends with one. */
+  background: var(--panel-2);
+}
+.disk-strip > canvas {
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+  cursor: pointer;
+  border-radius: 50%;
+  background: var(--viewport);
+}
+.strip-body { min-width: 0; flex: 1 1 auto; }
+.strip-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  font-size: 11px;
+}
+.strip-title b { color: var(--ink); font-weight: 600; }
+.strip-title span { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+
+/* ── the phase name is a joke waiting to happen ───────────────────────────
+ *
+ * Eleven quick taps on it and the page snows (see moonfall() in the script).
+ * The overlay takes no pointer events, so everything underneath stays usable
+ * while it is up, and it is removed on a timer rather than left in the DOM.
+ * Each flake carries its own --peak so they do not all fade in and out in
+ * lockstep.
+ */
+#phase-name { cursor: pointer; }
+.moonfall {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  overflow: hidden;
+  pointer-events: none;
+}
+.moonfall span {
+  position: absolute;
+  top: -10vh;
+  color: var(--ink);
+  animation-name: moonfall-fall;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+  will-change: transform, opacity;
+}
+@keyframes moonfall-fall {
+  from { transform: translateY(0) rotate(0deg); opacity: 0; }
+  12% { opacity: var(--peak, 1); }
+  80% { opacity: var(--peak, 1); }
+  to { transform: translateY(120vh) rotate(340deg); opacity: 0; }
+}
+/* The numbers that go with the little phase picture: one label/value pair per
+   row, so a long value (two distances) still gets a whole line. */
+.strip-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1px 8px;
+  margin: 3px 0 0;
+  font-size: 10px;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.strip-grid dt { color: var(--ink-dim); }
+.strip-grid dd { margin: 0; color: var(--ink); }
+
+/* ── landform classes: one switch per category the gazetteer knows ── */
+/* The class switches: one pill per category, the colour the picture uses. */
+.class-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 1px 0 0;
+}
+.cls-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.cls-chip:hover { border-color: var(--accent); }
+.cls-chip input { display: none; }
+.cls-chip .cls-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 1px rgba(7, 9, 13, .8);
+}
+.cls-chip[data-on="true"] { color: var(--ink); background: rgba(255, 255, 255, .03); }
+.cls-chip[data-on="false"] { opacity: .42; }
+.cls-chip[data-on="false"] .cls-dot { background: #6b7280; }
+.cls-chip em { font-style: normal; color: #6b7280; font-size: 9.5px; }
+
+/* ── the processing panel: every row is as wide as the column ────── */
+/* 视宁度 and 叠加优化 are typed numbers rather than sliders, but they are the
+   same kind of row: one label in the gutter the sliders below share, the
+   control filling whatever is left. */
+.proc-panel .param-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+/* Left-aligned inside the shared gutter, which is what makes this read as two
+   columns: every label starts at the same x, and every control starts at the
+   same x after it.  Right-aligning the labels (tried, reverted) moved the
+   ragged edge to the left, where the eye lands first, and the column stopped
+   looking like a column.  All five `.param-row`s are in the animation panel. */
+.proc-panel .param-row .slider-label { flex: 0 0 5.4em; }
+/* 视宁度 and 叠加优化 are typed numbers, not sliders: the label shares the
+   sliders' gutter, but the field is a short number and has no business
+   stretching to the far edge of the column. */
+.proc-panel .param-row input[type="number"] {
+  flex: 0 0 auto;
+  width: 6em;
+  min-width: 0;
+  text-align: right;
+}
+.proc-panel .param-row select {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+/* A unit menu (秒 / 分 / 时 / 天) is a suffix, not the value: it keeps its own
+   width and lets the number beside it have the rest.  After the select rule
+   above, so it wins. */
+.proc-panel .param-row .unit { flex: 0 0 auto; white-space: nowrap; }
+.proc-panel .slider-row.wide { margin-bottom: 9px; }
+.proc-panel .slider-row.wide .slider-label { flex: 0 0 5.4em; }
+.proc-panel .slider-row.wide input[type="range"] {
+  flex: 1 1 auto;
+  max-width: none;          /* the pane's 9em cap is for the compact rows */
+  min-width: 0;
+}
+.proc-panel .slider-row.wide output { min-width: 3.2em; }
+.proc-panel .row .check.inline { margin: 0; }
+/* 镜像's two glyphs are text, not an icon font: ◀▶ and ▲▼ are two triangles each,
+   and at the 13 px `button.icon` uses they read as a hyphen and a smudge. */
+.proc-actions .mirror {
+  font-size: 11px;
+  line-height: 17px;
+  letter-spacing: -.5px;
+  padding: 1px 6px;
+}
+/* The gesture has to be discoverable from the control itself: a slider with no
+   reset button anywhere near it is one nobody thinks to double-click. */
+.proc-panel .slider-row input[type="range"],
+.label-bar input[type="range"] { cursor: pointer; }
+
+/* ── instrument tabs: telescope and camera are one instrument ────── */
+.tabs { display: flex; gap: 2px; }
+.tab {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px 5px 0 0;
+  background: var(--panel-2);
+  /* A tab is a name, and a name that breaks in half makes the whole strip as
+     tall as two of them -- which moves the picture down and makes the row of
+     tabs beside it look misaligned.  Chinese breaks between any two characters,
+     so this has to be said. */
+  white-space: nowrap;
+  /* A tab is the name of a window, so it wears the window's colour. */
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+/* The generic pressed-button rule paints all four borders amber; a tab is a
+   tab, so it takes the panel colour back on every side.  The border goes
+   *transparent* rather than being redrawn: the box is what says "there is
+   something to press here", and the page you are already on is not one.
+   The colour is the panel's own, so the tab and what it opens onto are one
+   surface -- which is the whole difference between a tab strip and a row of
+   buttons that happen to be lit. */
+.tab[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--panel);
+  color: var(--accent);
+  font-weight: 600;
+}
+/* Inside a picture window the panel is the viewport, not the sidebar's grey. */
+.view > figcaption .tab[aria-pressed="true"] { background: var(--viewport); }
+
+/* 实时特写 / 几何模拟 / 后期成片: the tab strip *is* the caption, so the caption
+   is the strip and nothing else -- and it is painted the *picture's* colour, so
+   the row, the tab that is current and the pane it opens onto are one surface
+   with no seam between them.
+ *
+ * That is exactly how 事件预报 / 生成动画 already work in the right column: the
+   group's background is the panel's, the current tab wears the panel's colour
+   and the events list sits on the panel, so the three read as one window with a
+   strip on top.  The centre column's windows open onto the viewport instead of
+ * the panel, which is the only difference -- same scheme, this column's colour.
+ *
+ * The rule that used to run under this row separated the tabs from the picture
+ * they name; once the strip is the same colour as the pane, a line across the
+ * join reads as a seam.  Less padding, too: this row is a label, not a header. */
+.view-info > figcaption,
+.view-stack > figcaption {
+  padding: 2px 2px 3px;
+  border-bottom: 0;
+  gap: 2px 8px;
+  background: var(--viewport);
+  /* The tabs never break in half (see .tab), so a pane dragged narrow has to
+     be able to put the row's other items -- 同步回当前视场, the zoom cluster --
+     on a line of their own instead of cutting them off at the edge. */
+  flex-wrap: wrap;
+}
+.train-pane { padding-top: 8px; }
+.train-pane[hidden] { display: none; }
+
+.progress {
+  height: 6px;
+  margin: 8px 0 3px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.progress > div,
+.progress > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width .25s linear;
+}
+.progress.on > div,
+.progress.on > span { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+button .en { color: #8b93a3; }
+button .en::before, button .en::after { content: ""; }
+.as-link { text-decoration: none; display: inline-block; font-size: 11px; }
+
+/* ── narrow screens: stack ───────────────────────────────────────── */
+@media (max-width: 1100px) {
+  html, body { overflow: auto; }
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .splitter { display: none; }
+  .col { overflow: visible; }
+  .col-right { overflow: visible; }
+  .views { grid-template-columns: 1fr; grid-template-rows: none; }
+  .view-disk, .view-info, .view-stack { grid-column: 1; grid-row: auto; }
+  .view-body { min-height: 46vh; }
+  .panes { grid-template-columns: 1fr; }
+  .pane-a { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* The tabbed result window: one box, two pictures, one of them on screen. */
+.view-stack .tabs { display: flex; gap: 2px; }
+/* 实时特写 was the one window painted the sidebar's grey instead of the
+   viewport's near-black.  That made it the odd one out twice over: its own tab
+   strip did not match the page under it (the seam the reader pointed at), and
+   the three windows of this column did not match each other.  The coordinate
+   row at its foot reads fine on the dark: its fields carry their own panel
+   colour and border, the same way the full disk's floating tools do. */
+
+/* The magnifier's own bar: the zoom selector sits above the window. */
+.magnifier > canvas { cursor: crosshair; }
+
+/* Compact instrument panes: most of these fields hold a handful of digits, and
+   a row of full-width inputs makes the column three times taller than the
+   information in it.  The label keeps its own width; the field stops growing
+   past what it can hold. */
+.pane label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+.pane label > select,
+.pane label > input[type="number"],
+.pane label > input[type="text"] {
+  flex: 0 1 auto;
+  min-width: 3.6em;
+  max-width: 8.5em;
+  padding: 1px 4px;
+}
+.pane label > input[type="range"] { flex: 1 1 auto; min-width: 4em; max-width: 9em; }
+.pane .grid2 { gap: 4px 8px; }
+.pane .grid2 > label { min-width: 0; }
+.pane input[type="color"] { width: 2em; height: 1.4em; }
+.pane .check.inline { gap: 4px; }
+.pane > p.hint { margin: 2px 0 6px; line-height: 1.45; }
+
+/* The observation row: date/time and the zone it is quoted in belong together. */
+.col-left .row { flex-wrap: wrap; row-gap: 3px; }
+
+/* One zoom box per tab, and only the active tab's is shown.  The rule is needed
+   because `.zoom` sets `display: flex`, which outranks the user agent's
+   `[hidden] { display: none }` -- without it both boxes are on screen at once. */
+.view-stack .zoom[hidden] { display: none; }
+
+/* ── 观测信息有了余地（状态行搬去右上角之后） ────────────────────── */
+/* The nudge row used to sit right on top of the coordinate fields, because the
+   status line below them was competing for the same column of space. */
+.col-left .time-nudge { margin-top: 3px; margin-bottom: 9px; }
+.col-left .time-row > label { margin-bottom: 9px; }

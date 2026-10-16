@@ -1,0 +1,940 @@
+{
+  "features": 10431,
+  "translation_rows": 9057,
+  "rules": {
+    "exact": 9057
+  },
+  "unmatched_rows": [],
+  "position_attached": [],
+  "duplicate_rows": [],
+  "unnamed_features": [
+    "Bandfield",
+    "Easley",
+    "Henson",
+    "Marvin",
+    "Mons Mouton",
+    "Rima Louville",
+    "Spudis",
+    "Stose"
+  ],
+  "derived_names": [],
+  "stale_rows": [],
+  "named": 10423,
+  "coverage_percent": 99.9,
+  "sources": {
+    "features": "searchresults.csv",
+    "translation": [
+      "lunar_names_manual.csv",
+      "lunar_names_lpnd.csv"
+    ],
+    "translation_precedence": "earlier files win",
+    "spelling_reference": "iau-2026.csv",
+    "catalogue": [
+      "out/01_Named_formations_EN.csv",
+      "out/03_Historical_sites_EN.csv",
+      "out/04_Domes_EN.csv",
+      "out/05_Pyroclastic_formations_EN.csv",
+      "out/08_NELIOTA_impacts_EN.csv",
+      "out/09_Impact_basins_EN.csv",
+      "out/10_Lunar_pits_EN.csv",
+      "out/11_IMP_EN.csv",
+      "out/named_cn.xlsx",
+      "out/lunar_chinese_names.json"
+    ],
+    "catalogue_note": "Virtual Moon Atlas (https://www.ap-i.net/avl/en/start) tables, the project's own named_cn.xlsx compilation, and Chinese names from LPND 月球与行星地名库 (NADC)."
+  },
+  "dropped": [
+    "Mons Agnes (no diameter)",
+    "Planitia Descensus (no diameter)"
+  ],
+  "damaged_names": [],
+  "generated_utc": "2026-10-12T05:51:55+00:00",
+  "regenerate": "python tools/build_landform_db.py --features searchresults.csv --translation 月面标记.xlsx --translation 月球地名.xlsx --spelling .cache/moonlib/nomenclature/iau-2026.csv",
+  "unnamed_confirmed": [
+    "Bandfield",
+    "Easley",
+    "Henson",
+    "Marvin",
+    "Mons Mouton",
+    "Rima Louville",
+    "Spudis",
+    "Stose"
+  ],
+  "nameless_note": "Confirmed absent from LPND (with prefix and variant search), NADC, 月面标记.xlsx and 月球地名.xls; left blank on purpose rather than guessed.",
+  "catalogue_merge": {
+    "generated_utc": "2026-10-16T12:13:41+00:00",
+    "names_filled": 0,
+    "names_changed": 0,
+    "classes_reassigned": 0,
+    "classes": {
+      "Crater": 8698,
+      "Statio": 148,
+      "Catena": 23,
+      "Dorsum": 38,
+      "Lacus": 20,
+      "Mare": 4,
+      "Mons": 50,
+      "Dome": 527,
+      "Palus": 3,
+      "Promontorium": 9,
+      "Albedo Feature": 1,
+      "Rima": 113,
+      "Rupes": 8,
+      "Sinus": 11,
+      "Vallis": 12,
+      "Other": 3,
+      "Basin": 86,
+      "Pit": 266,
+      "IMP": 91,
+      "Pyroclastic": 99,
+      "Impact": 221
+    },
+    "workbook_names_rejected": "reported, never applied: the workbook names a different feature in places and disagrees with LPND on 7015 of 8774 rows",
+    "atlas_added": {
+      "Crater": 18,
+      "Statio": 71,
+      "Catena": 3,
+      "Other": 3,
+      "Dome": 525,
+      "Basin": 86,
+      "Pit": 266,
+      "IMP": 91,
+      "Pyroclastic": 99,
+      "Impact": 221
+    },
+    "atlas_added_by_table": {
+      "03_Historical_sites_EN.csv": 63
+    },
+    "atlas_skipped": [
+      {
+        "name": "MONS AGNES",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "PLANITIA DESCENSUS",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ALMANON 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ALPHONSUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 7",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO 8",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARAGO D 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ARCHIMEDES 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BEER 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BEER 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BEER B 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSARION C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSEL 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSEL F 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSEL G 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSEL G 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BESSEL G 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BIRMINGHAM L 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BÃ¼RG 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME BYRGIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CARLINI 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CARLINI H 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CARMICHAEL 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CARMICHAEL 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CASSINI 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CASSINI C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CAUCHY 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CAUCHY 8",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CAVALERIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME CROZIER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DAWES 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DAWES 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DAWES 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DELISLE 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DELISLE 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DIOPHANTUS 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DIOPHANTUS 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DIOPHANTUS 7",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DIOPHANTUS 8",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME DIOPHANTUS D 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE A 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE B 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE B 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME EGEDE P 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 10",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 11",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 7",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FLAMMARION 9",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FONTENELLE G 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FRA MAURO 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FRA MAURO 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FRACASTORIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME FRACASTORIUS 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME G BOND 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART C 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART C 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART C 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAMBART K 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAUSS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GAUSS 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GRIMALDI 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GRIMALDI L 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GRIMALDI L 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME GRIMALDI L 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HAHN A 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HALL J 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HARPALUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HELICON 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HERCULES 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HERCULES 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HERIGONIUS 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HERODOTUS A 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HOLDEN W 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HORROCKS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HORTENSIUS 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HORTENSIUS DA 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HORTENSIUS G 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HUXLEY 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN C 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN C 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN R 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN T 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSEN T 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JANSSEN 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JULIUS CAESAR 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JULIUS CAESAR 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JULIUS CAESAR 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME JULIUS CAESAR 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME KEPLER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME KONIG 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME KONIG 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME KONIG 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME KONIG 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LANGRENUS DB 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LANSBERG 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LICK 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LICK 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LINNE 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LINNE 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME LUBBOCK S 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME MARALDI 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME MARIUS L 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME MARIUS R 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME MAURY D 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME METON C 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME METON C 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME MOLTKE 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PICO 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME RÃ¼MKER 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PALLAS F",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PUTREDINIS 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PETAVIUS B 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PETAVIUS B 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PITATUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PITATUS 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PITATUS 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PITISCUS 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PLATO 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PLINIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME POLYBIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME POSIDONIUS 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PRINZ 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME HERACLIDES 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME PYTHEAS C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME REAUMUR 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME REINER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME RITTER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROCCA D 6",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROSS D 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROSS D 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROTHMANN 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROTHMANN 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ROTHMANN 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SANTBECH E 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SANTBECH H 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SINAS 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SINAS 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SINAS E 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SIRSALIS B 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SIRSALIS C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SIRSALIS C 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SIRSALIS C 3",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SIRSALIS Z 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME SUESS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TOBIAS MAYER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TOBIAS MAYER P 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TARUNTIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME THEBIT B 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TIMOCHARIS 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TIMOCHARIS 5",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TIMOCHARIS A 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TIMOCHARIS C 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME TRIESNECKER 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME VENDELINUS L 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME VITRUVIUS E 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME VITRUVIUS G 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME WALLACE 4",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME WOLF 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME WROTTESLEY 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "DOME ZUCCHIUS 1",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "MEDII IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LAMONT IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "ASPERITATIS IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "AESTUUM IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "AL-KHWARIZMI-KING IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "SCHRODINGER-ZEEMAN IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "PROCELLARUM IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "BARTELS-VOSKRESENSKIY IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "COPERNICUS H IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "FOWLER-CHARLIER IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "SERENITATIS NORTH IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "SZILARS NORTH IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "TOPO-13 IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "VAPORUM IMPACT BASIN",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT COPERNICUS 10",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT COPERNICUS 14",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT COPERNICUS 17A",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT COPERNICUS 20",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT CROOKES 2",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT DAS 1A",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT JACKSON 2B",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT LALANDE 13",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT SOUTHWEST MARE TRANQUILLITATIS B PIT",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT MESSIER A 4B",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT STEVINUS 9B",
+        "why": "no diameter in the atlas"
+      },
+      {
+        "name": "LUNAR PIT THARP 1B",
+        "why": "no diameter in the atlas"
+      }
+    ],
+    "atlas_added_note": "Features the atlas has and the IAU export did not.  They carry their English name in the name column until a translation exists, and say so in the Note.",
+    "workbook_name_note": "named_cn.xlsx disagrees with LPND on 7015 of 8774 features and is misaligned in places (Schorr -> 薛定谔, Quetelet -> 伦琴).  Its names are treated as suspect and are not applied; see the tool's docstring.",
+    "regenerate": "python3 tools/merge_out_catalogue.py --write"
+  },
+  "manual_patches": [
+    {
+      "row": "Reiner Gamma",
+      "field": "Type",
+      "from": "Crater",
+      "to": "Albedo Feature",
+      "why": "The IAU export types it 'Albedo Feature' but the 环形坑 translation sheet overruled that with the coarse 'Crater', which left the 反射率特征点 class with nothing in it.  tools/build_landform_db.py now prefers a specific IAU type over a coarse sheet kind (resolve_kind), so a rebuild reproduces this row; the catalogue itself was patched by hand because the build inputs (searchresults.csv and the two translation workbooks) are not in the repository.",
+      "generated_utc": "2026-10-12T05:51:55+00:00"
+    }
+  ]
+}

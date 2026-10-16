@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moonlib"
+version = "1.0.6"
+description = "Offline lunar computation library: position, phases, rise/set, libration, crescents and limb-target prediction from local JPL SPICE kernels"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Tsukikage" }]
+keywords = ["moon", "lunar", "spice", "ephemeris", "astronomy", "libration", "crescent"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+dependencies = [
+  "numpy>=1.21",
+  "spiceypy>=6.0",
+]
+
+[project.optional-dependencies]
+# Local-time resolution from coordinates.  Without it, moonlib falls back to a
+# longitude/15 fixed offset.
+tz = ["timezonefinder>=6.0"]
+# Charts.  Without it, every moonlib computation still works; only
+# moonlib.plotting raises.
+plot = ["matplotlib>=3.5"]
+# Reading a *compressed* colour TIFF.  The shipped linear lroc_color.exr needs
+# nothing, and neither does an uncompressed TIFF; this is only for people who
+# have the sRGB companion instead.  matplotlib already depends on Pillow, so
+# `full` picks it up for free.  Pillow also writes the two JPEGs of an HDR gain
+# map (`moonlib.hdr`), which is the other reason it is listed here.
+tiff = ["Pillow>=9.0"]
+# MP4 animation.  imageio-ffmpeg ships a static ffmpeg binary, so an animation
+# needs no system package; with neither it nor `ffmpeg` on PATH,
+# `moonlib.encode.write_mp4` raises rather than writing something else.
+video = ["imageio-ffmpeg>=0.4"]
+# HDR gain-map JPEG (ISO 21496-1).  Pillow encodes the two JPEG streams; the
+# MPF/APP2 and XMP boxes are written by hand in moonlib.hdr.
+hdr = ["Pillow>=9.0"]
+# Everything a normal installation wants.
+full = ["timezonefinder>=6.0", "matplotlib>=3.5"]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+]
+
+[project.scripts]
+moon = "moonlib.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+moonlib = ["data/*.csv"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "spice: requires the SPICE kernels on disk (the full test suite except --fast runs)",
+  "slow: takes more than a couple of seconds",
+]
+filterwarnings = [
+  "error::DeprecationWarning:moonlib.*",
+]

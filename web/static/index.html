@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tsukikage</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Three columns with draggable dividers.  Widths live in CSS variables so a
+     drag is one style write, and the centre column takes what is left. -->
+<main class="layout" id="layout">
+
+  <!-- ── 左栏：观测信息与月球信息 ───────────────────────────────── -->
+  <aside class="col col-left" id="col-left">
+    <section class="group">
+      <h2>观测信息 <span class="en">Observer</span></h2>
+      <div class="grid2 time-row">
+        <label>日期时间 <span class="en">Date and time</span>
+          <input type="datetime-local" id="when" step="60">
+        </label>
+        <label>时区 <span class="en">Time zone</span>
+          <span class="tz-field">
+            <i class="unit">UTC</i>
+            <input type="text" id="tz" inputmode="numeric" value="+8" size="3"
+                   title="整小时，带符号（+8 / -5）；也可以用 ↑↓ 每次 ±1">
+          </span>
+        </label>
+      </div>
+      <!-- 时间微调：九个按钮一排，中间是「同步设备时间」。步长从外到内由粗到细，
+           所以最左是 -1w（周）、最右是 +1w。一周是读者真正会用的最粗一档：月相
+           一个月走一圈，而"把某一相位往前挪一周"是挑观测日期时最常做的一件事；
+           日历月那一档留给事件预报的范围微调（那里两个端点一起挪，不改变窗口长度）。 -->
+      <div class="row time-nudge" id="time-nudge">
+        <button class="ghost mini" id="nudge-back-week" data-nudge="-1w"
+                title="往前一周">-1w</button>
+        <button class="ghost mini" id="nudge-back-day" data-nudge="-1d"
+                title="往前一天">-1d</button>
+        <button class="ghost mini" id="nudge-back-hour" data-nudge="-1h"
+                title="往前一小时">-1h</button>
+        <button class="ghost mini" id="nudge-back-minute" data-nudge="-1m"
+                title="往前一分钟">-1m</button>
+        <button class="ghost icon" id="sync-now"
+                title="同步设备时间：把日期时间设为此刻（按左边的时区）">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M19 2.4v4.2h-4.2" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 7.6V12l3.1 1.9" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="ghost mini" id="nudge-fwd-minute" data-nudge="+1m"
+                title="往后一分钟">+1m</button>
+        <button class="ghost mini" id="nudge-fwd-hour" data-nudge="+1h"
+                title="往后一小时">+1h</button>
+        <button class="ghost mini" id="nudge-fwd-day" data-nudge="+1d"
+                title="往后一天">+1d</button>
+        <button class="ghost mini" id="nudge-fwd-week" data-nudge="+1w"
+                title="往后一周">+1w</button>
+      </div>
+
+      <div class="grid2">
+        <label>纬度 °N <span class="en">Latitude</span>
+          <input type="number" id="lat" value="30" step="0.0001">
+        </label>
+        <label>经度 °E <span class="en">Longitude</span>
+          <input type="number" id="lon" value="120" step="0.0001">
+        </label>
+      </div>
+      <div class="settings-row">
+        <input type="text" id="settings-name" list="settings-files"
+               placeholder="加载设置文件">
+        <datalist id="settings-files"></datalist>
+        <!-- 导入从磁盘挑一份 .conf，导出把这一页参数写进 web/settings/ -->
+        <input type="file" id="settings-pick" accept=".conf,.json" class="offscreen">
+        <button class="ghost" id="settings-load">导入</button>
+        <button class="ghost" id="settings-save">导出</button>
+      </div>
+    </section>
+
+    <section class="group grow">
+      <h2><span class="zh">月球信息</span><span class="en">Moon</span>
+        <button class="mini" id="moon-lang" aria-pressed="false"
+                title="月球信息用中文 / English 显示">EN</button>
+      </h2>
+      <dl class="readout" id="moon-info">
+        <!-- 站 = 站心（从观测地看），地 = 地心（从地心看）。凡一眼就知道是站心的
+             量（升落、地平高度方位、太阳高度）不标注，免得每行都是记号。 -->
+        <dt><span class="zh">月相</span><span class="en">Phase</span></dt><dd id="mi-phase-name">—</dd>
+        <dt><span class="zh">照亮比例</span><span class="en">Illumination</span></dt><dd><i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="mi-illum">—</span></dd>
+        <dt><span class="zh">相位角</span><span class="en">Phase angle</span></dt><dd><i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="mi-phase">—</span></dd>
+        <dt><span class="zh">月龄</span><span class="en">Age</span></dt><dd id="mi-age">—</dd>
+        <dt><span class="zh">天平动</span><span class="en">Libration</span></dt><dd id="mi-lib">—</dd>
+        <dt><span class="zh">日下点</span><span class="en">Sub-solar</span></dt><dd id="mi-subsolar">—</dd>
+        <dt><span class="zh">余经度</span><span class="en">Colongitude</span></dt><dd id="mi-colong">—</dd>
+        <dt><span class="zh">地心距</span><span class="en">Distance</span></dt><dd id="mi-dist"><i class="ref ref-geo" title="地心：从地心看"><span class="zh">地</span><span class="en">G</span></i><span id="mi-dist-geo">—</span> / <i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="mi-dist-topo">—</span> km</dd>
+        <dt><span class="zh">视直径</span><span class="en">Angular size</span></dt><dd id="mi-diam">—</dd>
+        <dt><span class="zh">视半径</span><span class="en">Angular radius</span></dt><dd id="mi-rad">—</dd>
+        <dt><span class="zh">高度</span><span class="en">Altitude</span></dt><dd id="mi-alt">—</dd>
+        <dt><span class="zh">方位角</span><span class="en">Azimuth</span></dt><dd id="mi-az">—</dd>
+        <dt><span class="zh">赤经</span><span class="en">Right ascension</span></dt><dd id="mi-ra">—</dd>
+        <dt><span class="zh">赤纬</span><span class="en">Declination</span></dt><dd id="mi-dec">—</dd>
+        <dt><span class="zh">与太阳距角</span><span class="en">Elongation</span></dt><dd id="mi-elong">—</dd>
+        <dt><span class="zh">太阳高度</span><span class="en">Sun altitude</span></dt><dd id="mi-sunalt">—</dd>
+        <dt><span class="zh">地照</span><span class="en">Earthshine</span></dt><dd id="mi-earth">—</dd>
+        <dt><span class="zh">轨道速度</span><span class="en">Velocity</span></dt><dd id="mi-vel">—</dd>
+        <dt><span class="zh">光行时</span><span class="en">Light time</span></dt><dd id="mi-light">—</dd>
+        <dt class="sep"><span class="zh">月出</span><span class="en">Moonrise</span></dt><dd id="mi-rise">—</dd>
+        <dt><span class="zh">中天</span><span class="en">Transit</span></dt><dd id="mi-transit">—</dd>
+        <dt><span class="zh">中天高度</span><span class="en">Transit alt</span></dt><dd id="mi-transit-alt">—</dd>
+        <dt><span class="zh">月落</span><span class="en">Moonset</span></dt><dd id="mi-set">—</dd>
+        <dt><span class="zh">下次月出</span><span class="en">Next rise</span></dt><dd id="mi-nextrise">—</dd>
+      </dl>
+    </section>
+
+    <!-- 月相模拟与那一时刻的观测数据：与月球信息同栏，跟着读数一起看 -->
+    <div class="disk-strip" id="disk-strip">
+      <canvas id="phase-canvas" width="72" height="72"
+              title="月相模拟：与全月面同一套几何，亮面朝向由日下点方向决定。点一下保存 600×600 PNG"></canvas>
+      <div class="strip-body">
+        <div class="strip-title">
+          <b id="phase-name">月相</b>
+          <span id="phase-age">—</span>
+          <span id="phase-lunar">—</span>
+        </div>
+        <dl class="strip-grid" id="phase-facts">
+          <dt>照亮</dt><dd id="phase-illum">—</dd>
+          <dt>视直径</dt><dd id="phase-diameter">—</dd>
+          <dt>与太阳距角</dt><dd id="phase-elongation">—</dd>
+          <dt>高度 / 方位</dt><dd id="phase-horizon">—</dd>
+          <dt>余经度</dt><dd id="phase-colong">—</dd>
+        </dl>
+      </div>
+    </div>
+
+  </aside>
+
+  <div class="splitter" data-target="left"></div>
+
+  <!-- ── 中栏：三张图 ──────────────────────────────────────────── -->
+  <section class="col col-centre" id="col-centre">
+    <div class="views">
+
+      <figure class="view view-disk" data-view="disk">
+        <figcaption class="disk-head">
+          <span class="view-title">全月面 <span class="en">Full disk</span></span>
+
+          <!-- ── 月面地貌标注：名字与几何标注都画在全月面上，控件就放在这张图
+               的顶上。第一行是开关，右边的小箭头把下面这一整块（外观设置、
+               搜索、几何标注、分类开关）收起或展开。 ─────────────────── -->
+          <div class="label-bar" id="label-bar">
+            <button class="ghost" id="annotate" aria-pressed="false"
+                    title="把环形山、月海等已命名地貌投影到图上；模拟已知几何，不做图像识别">
+              月面地貌标注 <span class="en">Landforms</span>
+            </button>
+            <!-- 暗面 and 复位 stay out here: one decides whether the night side
+                 is labelled at all, the other throws away a whole afternoon of
+                 fiddling, and both are wanted without opening anything. -->
+            <label class="check inline" title="把夜面（终端线以西）的地貌也标出来">
+              <input type="checkbox" id="label-shadow">
+              <span>暗面</span>
+            </label>
+            <button class="ghost icon reset" id="label-reset"
+                    title="标注设置复位：开关、密度、字号、颜色与几何标注都回到默认"></button>
+            <button class="ghost caret" id="label-more" aria-expanded="false"
+                    title="展开搜索、几何标注与外观设置">▸</button>
+            <div class="annot-detail" id="annot-detail">
+            <div class="label-controls" id="label-controls">
+              <label class="check inline">名称
+                <select id="label-language">
+                  <option value="zh" selected>中文</option>
+                  <option value="en">English</option>
+                  <option value="both">中英</option>
+                </select>
+              </label>
+              <label class="check inline" title="拖到左边少而大，右边多而小；数字是标签上限与最小可见半径">
+                密度
+                <input type="range" id="label-density" min="0" max="1" step="0.01" value="0.5">
+                <b id="density-value">30</b>
+              </label>
+              <label class="check inline"
+                     title="按预览窗口（屏幕）大小算，与渲染分辨率无关；留空为窗口短边的 2.1%">字号 px
+                <input type="number" id="label-font" min="6" max="64" step="1" placeholder="自动">
+              </label>
+              <label class="check inline" title="勾选：标签按地貌分类着色；不勾：全部用下边这一个文字颜色">
+                <input type="checkbox" id="label-colour" checked>
+                <span>彩色</span>
+              </label>
+              <label class="check inline">文字
+                <input type="color" id="text-color" value="#eef2ff">
+              </label>
+              <label class="check inline" title="描边让文字在亮高地与暗坑底上都读得出来">描边
+                <input type="color" id="text-stroke" value="#0c0e14">
+                <input type="number" id="text-stroke-width" min="0" max="6" step="0.5" value="2">
+              </label>
+              <label class="check inline">
+                <input type="checkbox" id="text-bold">
+                <span>粗体</span>
+              </label>
+              <label class="check inline" title="环形地貌的轮廓线：线宽、线型与颜色；开着「彩色」时线条用分类自己的颜色">
+                线条
+                <input type="color" id="outline-color" value="#b4d6ff">
+                <input type="number" id="outline-width" min="0.2" max="4" step="0.1" value="1">
+                <select id="outline-style">
+                  <option value="solid" selected>实线</option>
+                  <option value="dash">虚线</option>
+                  <option value="dot">点线</option>
+                  <option value="none">不画</option>
+                </select>
+              </label>
+            </div>
+
+          <!-- 左边是搜索与几何标注（几何开关就在搜索框下方），右边是分类开关。 -->
+          <div class="find-bar">
+            <div class="find-left">
+              <label class="find-label">地貌搜索 <span class="en">Find a landform</span>
+                <input type="text" id="feature-search" list="feature-options" autocomplete="off"
+                       placeholder="支持中英文">
+                <datalist id="feature-options"></datalist>
+              </label>
+              <!-- 几何标注：只画在全月面上。它们不需要地名库，页面自己按正射投影算
+                   得出来——这些恰好是模拟确切知道的东西。 -->
+              <div class="mark-bar" id="mark-bar">
+                <label class="mark-chip" data-on="false" title="明暗界线：太阳高度为 0 的那条曲线，阴影带从它开始">
+                  <input type="checkbox" id="mark-terminator">
+                  <span>阴影带</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="南北极（±90°）。极点在背面时画在它相对的位置上，并注明「背面」">
+                  <input type="checkbox" id="mark-poles">
+                  <span>南北极</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="月面视边缘的整圆（外缘轮廓）">
+                  <input type="checkbox" id="mark-limb">
+                  <span>外缘圆</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="月面赤道（纬度 0°）">
+                  <input type="checkbox" id="mark-equator">
+                  <span>赤道</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="中央经纬度零点（0°/0°）与天平动点：天平动点就是圆盘中心，天平动使它偏离零点">
+                  <input type="checkbox" id="mark-libration">
+                  <span>天平动点</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="日下点：太阳直下点">
+                  <input type="checkbox" id="mark-subsolar">
+                  <span>日下点</span>
+                </label>
+                <label class="mark-chip" data-on="false" title="近地侧边界：距月面中心点 90° 的大圆，也就是天平动为零时的月面边缘。它与当前视边缘之间露出的，正是此刻因天平动而可见的背面地貌">
+                  <input type="checkbox" id="mark-nearside">
+                  <span>近地侧边界</span>
+                </label>
+                <!-- 标尺：这一条不只是"显示与否"，它自己就是画面上的一个对象，
+                     可以拖动、可以拉长。右上角的叉号关掉它之后，这个按钮会跟着变灰。 -->
+                <label class="mark-chip" data-on="false" title="比例尺：拖它移动位置，拖两端改长度（长度对应的距离写在尺子上）；选中时右上角出现叉号，可把它关掉">
+                  <input type="checkbox" id="mark-ruler">
+                  <span>标尺</span>
+                </label>
+              </div>
+            </div>
+            <!-- 分类开关由 app.js 按 FEATURE_CLASSES 生成，颜色就是图上用的颜色 -->
+            <div class="class-bar" id="label-classes"></div>
+            <button class="ghost mini" id="classes-all"
+                    title="全部显示 / 全部不显示">全选</button>
+          </div>
+            </div>
+          </div>
+        </figcaption>
+        <div class="view-body" id="body-disk">
+          <div class="canvas-stack" id="disk-stack">
+            <canvas id="disk"></canvas>
+          </div>
+          <canvas id="overlay"></canvas>
+          <canvas id="labels-disk" class="labels"></canvas>
+          <div class="busy" id="disk-busy">渲染中…</div>
+
+          <!-- 图窗左上角：预览用的渲染分辨率。既可从下拉里挑给定档位，也可
+               直接键入任意像素数（上限由服务端给出）。 -->
+          <div class="view-tools" id="preview-tools">
+            <label class="check inline"
+                   title="瞄准用的整月面预览分辨率（px）；改时间或地点都要重渲染，所以越高越慢。下拉里挑一档，或选「自定义」直接填。">
+              <span>预览</span>
+              <select id="preview-preset">
+                <option value="480">480</option>
+                <option value="600">600</option>
+                <option value="800">800</option>
+                <option value="1000" selected>1000</option>
+                <option value="1200">1200</option>
+                <option value="1500">1500</option>
+                <option value="2000">2000</option>
+                <option value="3000">3000</option>
+                <option value="4000">4000</option>
+                <option value="5000">5000</option>
+                <option value="custom">自定义…</option>
+              </select>
+              <input type="text" id="preview-px" inputmode="numeric" value="1000" size="5">
+              <span>px</span>
+            </label>
+            <!-- 每像素采样：n×n 条光线平均成一个像素。全月面预览以前写死 1，
+                 于是只剩近景能开抗锯齿；边缘与明暗界线在这里一样糊。 -->
+            <label class="check inline"
+                   title="每像素采样：n×n 条光线平均成一个像素，月面边缘和明暗界线更干净，代价是 n² 倍渲染时间">
+              <span>采样</span>
+              <select id="preview-samples">
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+                <option value="3">3×</option>
+                <option value="4">4×</option>
+              </select>
+            </label>
+            <!-- 边缘平滑：亚像素级，专门对付圆盘边缘的锯齿与采样颗粒，并且对
+                 预览和保存的文件是同一个值、同一次绘制，所以存下来的那张和看到的
+                 那张是同一张（保存栏里不再需要第二个开关）。
+                 分级是量出来的：0.5 px 起才
+                 有可见效果，0.8 px 是与 4× 采样参考最接近的一点（边缘带 RMS
+                 40.2→27.9/255），再往上锯齿继续变小但边缘开始变软（1.8 px 时锯齿
+                 少 63%，过渡宽 0.97→3.6 px）。**它替不了采样**：同样一帧，2× 采样
+                 的边缘带 RMS 是 19.0/255，比任何模糊都好，所以真正想消掉锯齿要动
+                 左边那个「采样」。 -->
+            <label class="check inline"
+                   title="边缘平滑：按渲染像素做一次亚像素级高斯模糊。实测 0.5 px 起有效，0.8 px 最接近 4× 采样的边缘，1.8 px 锯齿基本消失但边缘明显变软。要真正消掉锯齿请用左边的「采样 2×/4×」，模糊做不到">
+              <span>平滑</span>
+              <select id="preview-blur">
+                <option value="0" selected>关</option>
+                <option value="0.5">0.5 px</option>
+                <option value="0.8">0.8 px</option>
+                <option value="1.2">1.2 px</option>
+                <option value="1.8">1.8 px</option>
+              </select>
+            </label>
+          </div>
+
+          <!-- 图窗右上角：缩放。 -->
+          <span class="zoom" data-zoom="disk">
+            <button data-zoom-out title="缩小">−</button>
+            <b data-zoom-label>100%</b>
+            <button data-zoom-in title="放大">+</button>
+            <button data-zoom-fit title="适应窗口">⤢</button>
+          </span>
+        </div>
+        <p class="view-foot" id="disk-info">
+          <span id="disk-info-size">—</span>
+          <span id="disk-info-earthshine"></span>
+          <span class="view-foot-hint">Shift 或中键拖动平移　·　滚轮缩放</span>
+        </p>
+
+        <!-- 保存整月面：整月面自己的分辨率、格式与是否带地照，与右下两张近景图无关。
+             排在状态行下面、月相栏上面。 -->
+        <div class="disk-save-bar" id="disk-save-bar">
+          <label class="check inline"
+                 title="保存整月面时按这个分辨率重渲染（px）；下拉里挑一档，或选「自定义」直接填。上限 10000，越大越慢。">
+            保存分辨率
+            <select id="disk-preset">
+              <option value="480">480</option>
+              <option value="600">600</option>
+              <option value="800">800</option>
+              <option value="900">900</option>
+              <option value="1000">1000</option>
+              <option value="1200">1200</option>
+              <option value="1400">1400</option>
+              <option value="1500">1500</option>
+              <option value="1600">1600</option>
+              <option value="1800">1800</option>
+              <option value="1920">1920</option>
+              <option value="2000">2000</option>
+              <option value="2160">2160</option>
+              <option value="2400" selected>2400</option>
+              <option value="3840">3840</option>
+              <option value="4000">4000</option>
+              <option value="5000">5000</option>
+              <option value="custom">自定义…</option>
+            </select>
+            <input type="text" id="disk-px" inputmode="numeric" value="2400" size="6">
+          </label>
+          <span class="unit" id="disk-scale"
+                title="这个分辨率下，一个像素对应月面上的多少公里">px</span>
+          <label class="check inline"
+                 title="保存时把月面地貌标注与已勾选的几何标注一并画进文件（按保存分辨率重排一次）">
+            <input type="checkbox" id="disk-annotated" checked>
+            <span>地貌</span>
+          </label>
+          <label class="check inline"
+                 title="勾选：连地照一起保存（阳光与地照差约十二个星等，各自单独曝光后叠加）；不勾：只保存阳光照亮的那一半。无论哪种都按该分量自己的范围曝光。">
+            <input type="checkbox" id="disk-earthshine" checked>
+            <span>地照</span>
+          </label>
+          <label class="check inline"
+                 title="关掉地照时，把画布重新对准被照亮那部分的亮度重心，背景仍是黑色。整月面渲染时弯月常常偏在一边，存的图就有一大半是空的。">
+            <input type="checkbox" id="disk-centre-lit">
+            <span>亮面居中</span>
+          </label>
+          <label class="check inline"
+                 title="地照增益：1.0 是物理正确值（地照亮度约为阳光的万一），调高是刻意的 HDR 合成。改完立即重渲染全月面。">
+            地照增益
+            <input type="text" id="disk-earthshine-gain" inputmode="decimal" value="20" size="4">
+          </label>
+          <label class="check inline">格式
+            <select id="disk-format">
+              <option value="png">PNG</option>
+              <option value="jpg" selected>JPG</option>
+              <option value="tif">TIF</option>
+            </select>
+          </label>
+          <!-- HDR is a JPEG thing (ISO 21496-1 gain map), so the switch only
+               appears when JPEG is the chosen format. -->
+          <label class="check inline" id="disk-hdr-label" hidden
+                 title="HDR：主图仍是这张 SDR 图，另存一条增益图；支持 HDR 的显示器会把高光推到更亮，普通显示器看到的就是 SDR 那张。只有 JPEG 能带">
+            <input type="checkbox" id="disk-hdr">
+            <span>HDR</span>
+          </label>
+          <label class="check inline" id="disk-hdr-stops-label" hidden
+                 title="增益图把这一帧的峰值抬到 SDR 白的多少倍：这是「HDR 亮多少」的全部含义，不是高光恢复量（月面本身几乎没有超过 SDR 白的高光）">
+            动态范围
+            <select id="disk-hdr-stops">
+              <option value="1">1 档 · 峰值 2×</option>
+              <option value="2">2 档 · 峰值 4×</option>
+              <option value="3" selected>3 档 · 峰值 8×</option>
+              <option value="4">4 档 · 峰值 16×</option>
+              <option value="5">5 档 · 峰值 32×</option>
+              <option value="6">6 档 · 峰值 64×（多数显示器到不了）</option>
+            </select>
+          </label>
+          <button class="gold" id="disk-save">保存图像 <span class="en">Save image</span></button>
+        </div>
+
+      </figure>
+
+      <div class="splitter v" data-target="disk"></div>
+
+      <figure class="view view-info" data-view="info">
+        <figcaption>
+          <!-- 这一栏只有一张"页"：实时特写。标题做成标签页的样子，和「几何模拟 /
+               后期成片」同一套：它们说的是同一件事——这里是一扇窗，不是一栏设置。
+               右上角那个按钮属于这扇窗（把选框退回上一次生成模拟时的那一套），所以
+               它和标签页同排、靠右，不和下面的输入框一起读。 -->
+          <span class="tabs" id="info-tabs">
+            <!-- 没有 data-tab：这一栏只有一张页，标签不是开关，按下去不该发生
+                 任何事——它的作用是把这一栏和「几何模拟 / 后期成片」归成一类。 -->
+            <button class="tab" aria-pressed="true">实时特写</button>
+          </span>
+          <button class="ghost" id="sel-sync-last" disabled
+                  title="把选框复位到上一次生成模拟时用的那一套设置（中心、大小、旋转角）">同步回当前视场</button>
+        </figcaption>
+        <div class="view-body info-body" id="body-info">
+          <!-- 实时特写：永远框住选框（那是这一帧要渲染的地面），所以没有倍率选项。
+               下面的输入框是选框的精确值，键盘也能摆位。 -->
+          <figure class="magnifier" id="magnifier">
+            <canvas id="magnify" title="跟着选框走，与鼠标位置无关"></canvas>
+            <figcaption id="magnify-info">先在月面上框选一块区域。</figcaption>
+          </figure>
+          <!-- 三个数并作一排：它们是同一个选框的三个坐标，分两排读反而像两组设置。
+               输入框短，是因为里面装的是经纬度与角度，不是自由文本。 -->
+          <div class="selection-inputs">
+            <label>中心经度 <span class="en">Lon</span>
+              <input type="number" id="sel-lon" step="0.001" placeholder="—">
+            </label>
+            <label>中心纬度 <span class="en">Lat</span>
+              <input type="number" id="sel-lat" step="0.001" placeholder="—">
+            </label>
+            <!-- 视场半径不在这里了：选框的大小由鼠标拖着画，或在下面「物理分辨率」里
+                 定，一个可以键入的半径只是同一件事的第三个说法。旋转角本来就该和
+                 经纬度并排，归零键跟着它自己那一格。 -->
+            <label>旋转角 <span class="en">Rot</span>
+              <span class="pick-row">
+                <input type="number" id="sel-rotation" value="0" step="0.5">
+                <button class="ghost icon reset" id="sel-reset-rot"
+                        title="旋转角归零"></button>
+              </span>
+            </label>
+          </div>
+        </div>
+      </figure>
+
+      <div class="splitter h" data-target="raw"></div>
+
+      <figure class="view view-stack" data-view="stack">
+        <figcaption>
+          <span class="tabs" id="result-tabs">
+            <button class="tab" data-tab="raw" aria-pressed="true">几何模拟</button>
+            <button class="tab" data-tab="proc" aria-pressed="false">后期成片</button>
+          </span>
+          <span class="zoom" data-zoom="raw">
+            <button data-zoom-out title="缩小">−</button>
+            <b data-zoom-label>100%</b>
+            <button data-zoom-in title="放大">+</button>
+            <button data-zoom-fit title="适应窗口">⤢</button>
+          </span>
+          <span class="zoom" data-zoom="proc" hidden>
+            <button data-zoom-out title="缩小">−</button>
+            <b data-zoom-label>100%</b>
+            <button data-zoom-in title="放大">+</button>
+            <button data-zoom-fit title="适应窗口">⤢</button>
+          </span>
+        </figcaption>
+        <div class="view-body" id="body-raw">
+          <canvas id="raw"></canvas>
+          <canvas id="labels-raw" class="labels"></canvas>
+          <!-- The render reports itself where the picture will appear: a bar in
+               the header made the reader look away from the frame they asked
+               for, and "生成中" is the only word it needs. -->
+          <div class="busy" id="raw-busy">
+            <span class="busy-inner">
+              <span class="busy-label">生成中</span>
+              <span class="progress" id="render-progress"><span id="render-progress-bar"></span></span>
+              <span class="busy-note" id="render-status">—</span>
+            </span>
+          </div>
+        </div>
+        <div class="view-body" id="body-proc" hidden>
+          <canvas id="result"></canvas>
+          <canvas id="labels-proc" class="labels"></canvas>
+          <div class="busy" id="result-busy">
+            <span class="busy-inner">
+              <span class="busy-label">生成中</span>
+              <!-- Its own bar and note: the two panes are shown one at a time,
+                   so a readout that lives in only one of them disappears when
+                   the reader switches tabs mid-render. -->
+              <span class="progress" id="render-progress-proc"><span id="render-progress-proc-bar"></span></span>
+              <span class="busy-note" id="render-status-copy">—</span>
+            </span>
+          </div>
+        </div>
+        <p class="view-foot" id="result-info">—</p>
+
+        <!-- 近景图的保存排：与全月面那一排同样的排法，只是尺寸跟着选框走 -->
+        <div class="disk-save-bar" id="region-save-bar">
+          <label class="check inline" title="按选框的长宽比保存；长边或短边由这里指定">
+            保存分辨率
+            <select id="out-ref">
+              <option value="long" selected>长边</option>
+              <option value="short">短边</option>
+            </select>
+          </label>
+          <select id="out-preset" title="保存的分辨率">
+            <option value="480">480</option>
+            <option value="600">600</option>
+            <option value="800">800</option>
+            <option value="900">900</option>
+            <option value="1000">1000</option>
+            <option value="1200" selected>1200</option>
+            <option value="1400">1400</option>
+            <option value="1500">1500</option>
+            <option value="1600">1600</option>
+            <option value="1800">1800</option>
+            <option value="1920">1920</option>
+            <option value="2000">2000</option>
+            <option value="2160">2160</option>
+            <option value="2400">2400</option>
+            <option value="3840">3840</option>
+            <option value="4000">4000</option>
+            <option value="5000">5000</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <input type="text" id="out-px" inputmode="numeric" value="1200" size="6">
+          <span class="unit">px</span>
+          <span class="unit" id="save-info"
+                title="保存文件里一个像素对应天上的多少角秒、月面上的多少公里"></span>
+          <label class="check inline" title="导出时把月面地貌标注一并画进文件">
+            <input type="checkbox" id="download-annotated" checked>
+            <span>地貌</span>
+          </label>
+          <label class="check inline"
+                 title="勾选：连地照一起保存；不勾：只保存阳光照亮的那一半。两种都按各自分量的范围单独曝光。">
+            <input type="checkbox" id="region-earthshine" checked>
+            <span>地照</span>
+          </label>
+          <label class="check inline"
+                 title="地照增益：1.0 是物理正确值；与「模拟设置」里那个是同一个数。">
+            地照增益
+            <input type="text" id="region-earthshine-gain" inputmode="decimal" value="20" size="4">
+          </label>
+          <label class="check inline">格式
+            <select id="save-format">
+              <option value="png">PNG</option>
+              <option value="jpg" selected>JPG</option>
+              <option value="tif">TIF</option>
+            </select>
+          </label>
+          <a class="as-link gold" id="download" download="moon.jpg"
+             aria-disabled="true" title="先生成模拟，才有图可存">保存图像</a>
+        </div>
+      </figure>
+
+    </div>
+  </section>
+
+  <div class="splitter" data-target="right"></div>
+
+  <!-- ── 右栏：两列参数 ────────────────────────────────────────── -->
+  <aside class="col col-right" id="col-right">
+
+    <div class="col-actions">
+      <button class="gold" id="refresh">更新月面 <span class="en">Refresh</span></button>
+      <button class="primary" id="generate">生成模拟 <span class="en">Generate</span></button>
+      <label class="check inline">
+        <input type="checkbox" id="auto-refresh" checked>
+        <span>自动刷新</span>
+      </label>
+      <a class="app-version" id="app-version" href="https://github.com/10deg/tsukikage"
+         target="_blank" rel="noopener"
+         title="当前版本 —— 点击打开 GitHub 仓库">—</a>
+      <!-- 状态行跟着版本号，在右上角：它说的是"现在在做什么"，放在画面顶上比放在
+           左栏底下更容易看见。宽度锁死在一行内，长了截断，不换行、不出滚动条。 -->
+      <p class="hint status-line" id="status">就绪</p>
+    </div>
+
+    <div class="panes">
+
+      <div class="pane pane-a">
+        <section class="group">
+          <h2>模拟设置 <span class="en">Simulation</span>
+            <button class="ghost icon reset" id="output-reset"
+            title="把模拟设置里的每一项恢复为默认值"></button>
+          </h2>
+          <div class="grid2">
+            <label>物理分辨率 km/px <span class="en">km per px</span>
+              <span class="pick-row">
+                <select id="out-kmpx-preset" title="同步全月面，或直接挑一档">
+                  <option value="disk" selected>同步全月面</option>
+                  <option value="0.03">0.03 km/px · 30 m</option>
+                  <option value="0.06">0.06 km/px · 60 m</option>
+                  <option value="0.118">0.118 km/px · LOLA 上限</option>
+                  <option value="0.25">0.25 km/px · 250 m</option>
+                  <option value="0.5">0.5 km/px</option>
+                  <option value="1">1 km/px</option>
+                  <option value="2">2 km/px</option>
+                  <option value="3">3 km/px</option>
+                  <option value="5">5 km/px</option>
+                  <option value="8">8 km/px</option>
+                  <option value="12">12 km/px</option>
+                  <option value="20">20 km/px</option>
+                  <option value="custom">自定义…</option>
+                </select>
+                <input type="number" id="out-kmpx" step="0.01" min="0" hidden>
+              </span>
+            </label>
+            <label>采样 ″/px <span class="en">Arcsec/px</span>
+              <input type="number" id="out-scale" step="0.01" min="0"
+                     list="scale-presets">
+              <datalist id="scale-presets">
+                <option value="0.1">0.1″/px（约 0.19 km）</option>
+                <option value="0.2">0.2″/px（约 0.37 km）</option>
+                <option value="0.5">0.5″/px（约 0.93 km）</option>
+                <option value="1">1″/px（约 1.9 km）</option>
+                <option value="2">2″/px（约 3.7 km）</option>
+                <option value="5">5″/px（约 9.3 km）</option>
+              </datalist>
+            </label>
+          </div>
+          <div class="grid2">
+            <label title="lambert 快而平；lommel_seeliger 边缘更亮、最贴近目视；lunar_lambert 折中（默认）；hapke 含冲效应、最真实">光度模型
+              <select id="photometric-model">
+                <option value="lambert">Lambert</option>
+                <option value="lommel_seeliger">Lommel–Seeliger</option>
+                <option value="lunar_lambert" selected>Lunar-Lambert</option>
+                <option value="hapke">Hapke</option>
+              </select>
+            </label>
+            <label title="1.0 是物理正确值（地照亮度约为阳光的万一）；调高是刻意的 HDR 合成，像照片里的多重曝光">地照增益
+              <input type="number" id="earthshine-gain" value="20" step="0.1" min="0" max="100">
+            </label>
+          </div>
+          <!-- 地照的两个星等不再写在这里：它们描述的是画出来的那一帧，
+               所以跟在全月面窗口下面的信息行里（#disk-info）。 -->
+          <!-- 其余光线选项一律收进「高级设置」：默认只看光度模型与地照增益 -->
+          <details class="fold" id="light-advanced">
+            <summary>高级设置 <span class="en">Advanced</span></summary>
+            <div class="grid2">
+              <label title="实测：整月面与终端线近景（含 0.021 km/px）下 1 与 4 的像素差均 ≤1 灰阶；4 点已收敛，8 点耗时 +60% 而无可测收益。默认 1 即可，保留此旋钮备大画幅高保真出片">日面采样
+                <input type="number" id="sun-samples" min="1" max="8" step="1" value="1">
+              </label>
+              <label title="微观地形阴影：月壤在远小于一个像素的尺度上起伏，凸起会挡住凹处——终端线附近因此变暗、出现颗粒感，而正对太阳的地方不受影响。15–25° 是月壤的常见值；0 关闭（默认）。用的是单参数近似，mu0 与 mu 都小于 0.3 的强遮挡几何下最不可靠">粗糙度
+                <input type="number" id="roughness" value="0" step="1" min="0" max="45">
+              </label>
+              <label title="天空补光：阳光照亮周围的月面，再散射回阴影里。每一点实际能看见多少天空由地形算出来——坑底与山脊背光面因此比平地暗，这不再是全局常数。1.0 时平坦地面的补光约为阳光的 6%。0 关闭（默认）；只在终端线附近有代价，满月时几乎为零">环境补光
+                <input type="number" id="sky-ambient" value="0" step="0.1" min="0" max="20">
+              </label>
+              <label title="地球几何反照率，决定地照有多亮。留空用星历默认 0.367；文献值在 0.30–0.43 之间">地球反照率
+                <input type="number" id="earth-geometric-albedo" placeholder="0.367" step="0.01" max="1">
+              </label>
+              <label title="地球视面是 2° 的延展光源，采样数决定地照明暗界线有多软；13 点已足够">地照采样
+                <input type="number" id="earth-samples" value="13" step="1" min="1" max="64">
+              </label>
+              <label title="地照相对阳光的光谱权重，只比值有意义（渲染时按均值归一化）。0.87,0.96,1.17 略偏蓝，是地球散射光的常见表述；留空用这个默认">地照色调
+                <input type="text" id="earthshine-tint" placeholder="0.87,0.96,1.17" size="14">
+              </label>
+              <label>每像素采样 <span class="en">Samples/px</span>
+                <select id="out-samples">
+                  <option value="1">1</option>
+                  <option value="2" selected>2</option>
+                  <option value="3">3</option>
+                </select>
+              </label>
+            </div>
+          </details>
+        </section>
+
+        <!-- 望远镜与相机合成一栏，用标签页分开：两套参数描述的是同一台仪器。
+             这一栏没有 h2：三个标签页就是这一栏的名字，上面再加一行"望远镜 /
+             相机"只是把它说过的话再说一遍，还占掉一行高度。 -->
+        <section class="group" id="train-panel">
+          <span class="tabs" id="train-tabs">
+            <button class="tab" data-train="telescope" aria-pressed="true">望远镜</button>
+            <button class="tab" data-train="camera" aria-pressed="false">相机</button>
+            <button class="tab" data-train="eyepiece" aria-pressed="false">目镜</button>
+          </span>
+
+          <div class="train-pane" id="train-telescope">
+            <label class="check">
+              <input type="checkbox" id="manual-train">
+              <span>使用下列参数 <span class="en">use these</span></span>
+            </label>
+            <div class="grid2">
+              <label>口径 mm <span class="en">Aperture</span>
+                <input type="number" id="aperture" value="203.2" step="1">
+              </label>
+              <label>焦比 f/ <span class="en">Focal ratio</span>
+                <input type="number" id="focal-ratio" value="10" step="0.1">
+              </label>
+              <label>焦距 mm <span class="en">Focal length</span>
+                <input type="number" id="focal-length" placeholder="—" step="1">
+              </label>
+              <label>增倍镜 × <span class="en">Barlow</span>
+                <input type="number" id="barlow" value="1" step="0.1">
+              </label>
+              <label title="SCT 移动主镜合焦、加天顶镜或延长筒时，实际焦距会变；这里填的是倍率，1 表示标称焦距">
+                后截距补偿 × <span class="en">Back focus</span>
+                <input type="number" id="back-focus" value="1" step="0.01" min="0.2" max="5">
+              </label>
+              <label>遮挡比 <span class="en">Obstruction</span>
+                <input type="number" id="obstruction" value="0.34" step="0.01">
+              </label>
+            </div>
+          </div>
+
+          <div class="train-pane" id="train-camera" hidden>
+            <div class="grid2">
+              <label>长边 px <span class="en">Width</span>
+                <input type="number" id="sensor-w" value="3008" step="1">
+              </label>
+              <label>宽边 px <span class="en">Height</span>
+                <input type="number" id="sensor-h" value="3008" step="1">
+              </label>
+              <label>像元 µm <span class="en">Pixel size</span>
+                <input type="number" id="pixel-um" value="3.76" step="0.01">
+              </label>
+              <label>类型 <span class="en">Sensor</span>
+                <select id="sensor-color">
+                  <option value="color" selected>彩色</option>
+                  <option value="mono">黑白</option>
+                </select>
+              </label>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="sel-locked">
+              <span>锁定选框大小 <span class="en">lock box size</span></span>
+            </label>
+          </div>
+
+          <!-- 目镜：在后期成片上盖一层"从目镜里看"的效果。它不改渲染，只在
+               合成/保存时按参数画：视场圆外的暗晕、边角的桶形畸变。 -->
+          <div class="train-pane" id="train-eyepiece" hidden>
+            <label class="check">
+              <input type="checkbox" id="eyepiece-on">
+              <!-- 那句"视场直径取画幅短边"从行里挪进了悬停提示：它是这条开关的
+                   定义，读一次就够，而它占的那几个字让这一行比上下两行都长。 -->
+              <span title="视场直径取画幅短边。">目镜视场遮罩 <span class="en">eyepiece mask</span></span>
+            </label>
+            <div class="grid2">
+              <label title="暗晕的径向轮廓：1 线性下降，越大越「中间亮、边上暗」，0.3 则接近一块均匀的暗角">
+                暗晕强度
+                <input type="number" id="eyepiece-falloff" value="1.6" min="0.2" max="4" step="0.1">
+              </label>
+              <label title="视场边缘的暗晕宽度（占半径的比例）：0 是硬边，0.4 是从七成半径就开始压暗">
+                暗晕宽度
+                <input type="number" id="eyepiece-vignette" value="0.22" min="0" max="0.8" step="0.01">
+              </label>
+              <label title="桶形畸变：正值把画面往外拉（广角目镜的枕形/桶形），0 是直线">
+                畸变强度
+                <input type="number" id="eyepiece-distortion" value="0" min="-0.3" max="0.3" step="0.01">
+              </label>
+              <label title="视场圆外的黑度：1 全黑（视场光阑），0 只压暗不遮死">
+                遮罩强度
+                <input type="number" id="eyepiece-mask" value="1" min="0" max="1" step="0.05">
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- 后期处理从标签页里提出来，自己成一栏，紧跟在望远镜/相机/目镜下面：
+             调完仪器参数接着就是调片子，中间不该隔着一个标签。 -->
+        <section class="group proc-panel" id="proc-panel">
+          <h2>后期处理 <span class="en">Post-processing</span></h2>
+          <div id="proc-controls">
+          <!-- 视宁度：横条给的是"随手拖着看"的粗调，右边的数字框给的是"我知道
+               要 0.85″"的精调，两者是同一个数，互相跟着走。 -->
+          <div class="slider-row wide">
+            <span class="slider-label" title="视宁度：这一帧里实际存在的模糊宽度（半高全宽，角秒）。0 是没有任何大气模糊，只剩衍射与像元。横条拖着看，右边的框里可以直接填数。">视宁度</span>
+            <input type="range" id="seeing" min="0" max="4" step="0.05" value="1">
+            <input type="number" id="seeing-num" class="num-inline"
+                   min="0" max="4" step="0.05" value="1.00">
+            <span class="unit">″</span>
+          </div>
+
+          <div class="slider-row wide">
+            <span class="slider-label">模糊强度</span>
+            <input type="range" id="blur-strength" min="0" max="1.5" step="0.01" value="1">
+            <output id="blur-strength-out">1.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label" title="望远镜衍射环：口径与遮挡决定的环状点扩散函数，高反差边缘外侧会出现一圈重影。0 关闭。">衍射环</span>
+            <input type="range" id="diffraction" min="0" max="1" step="0.01" value="0">
+            <output id="diffraction-out">关</output>
+          </div>
+          <!-- 锐化半径的单位是**像素**，不是"视宁度的几倍"：蒙版有多宽是这张图
+               自己的性质，读者要判断的也是"那圈光晕有几个像素宽"。 -->
+          <div class="slider-row wide">
+            <span class="slider-label" title="锐化半径：反锐化蒙版的宽度，按这张图自己的像素算。比模糊窄只提亮核心，比模糊宽就不再是锐化而是改大尺度明暗；通常与视宁度斑差不多宽。">锐化半径</span>
+            <input type="range" id="sharpen-radius" min="0" max="8" step="0.1" value="1.2">
+            <output id="sharpen-radius-out">1.2</output>
+            <span class="unit">px</span>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">锐化强度</span>
+            <input type="range" id="sharpen-strength" min="0" max="3" step="0.05" value="1">
+            <output id="sharpen-strength-out">1.00</output>
+          </div>
+          <!-- 饱和度就是饱和度：旁边那个"彩色"开关说的是相机，它已经在相机的
+               那一页里了，放在这里读起来像饱和度的第二个开关。 -->
+          <div class="slider-row wide">
+            <span class="slider-label">饱和度</span>
+            <input type="range" id="saturation" min="0" max="1" step="0.01" value="1">
+            <output id="saturation-out">1.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">增益</span>
+            <input type="range" id="gain" min="0" max="3" step="0.01" value="1">
+            <output id="gain-out">1.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">偏移</span>
+            <input type="range" id="offset" min="-0.5" max="0.5" step="0.01" value="0">
+            <output id="offset-out">0.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">伽马</span>
+            <input type="range" id="gamma" min="0.2" max="3" step="0.02" value="1">
+            <output id="gamma-out">1.00</output>
+          </div>
+
+          <div class="slider-row wide">
+            <span class="slider-label">泊松噪声</span>
+            <input type="range" id="noise-poisson" min="0" max="1" step="0.01" value="0">
+            <output id="noise-poisson-out">关</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">高斯噪声</span>
+            <input type="range" id="noise-gaussian" min="0" max="1" step="0.01" value="0">
+            <output id="noise-gaussian-out">关</output>
+          </div>
+          <!-- 旋转与镜像都是"整帧的方向"，所以它们跟在噪声后面、挨着动作那一行：
+               前面那一串改的是明暗与细节，这两个改的是这张图朝哪边。 -->
+          <div class="slider-row wide">
+            <span class="slider-label">旋转</span>
+            <input type="range" id="image-rotation" min="-180" max="180" step="0.5" value="0">
+            <input type="number" id="image-rotation-num" class="num-inline"
+                   min="-180" max="180" step="0.5" value="0.0">
+            <span class="unit">°</span>
+          </div>
+
+          <div class="row proc-actions">
+            <!-- 镜像：两个直角三角形说的是"图往哪边翻"，"⇋ / ⇅"说的是"有个东西
+                 可以拨"——左右翻转用 ◀▶，上下翻转用 ▲▼。镜像两个字占的宽度和上面
+                 那些参数名一样，所以整列读下来是一条线。 -->
+            <span class="slider-label">镜像</span>
+            <button class="ghost icon mirror" id="mirror-h" aria-pressed="false"
+                    title="左右镜像：整帧沿竖直轴翻转">◀▶</button>
+            <button class="ghost icon mirror" id="mirror-v" aria-pressed="false"
+                    title="上下镜像：整帧沿水平轴翻转">▲▼</button>
+            <!-- 复位键跟着它复位的那一页：紧挨着「更新图像」，而不是整栏的标题上 -->
+            <button class="ghost icon reset" id="proc-reset"
+                    title="把后期处理里的每一项恢复为默认值"></button>
+            <button class="outline" id="refresh-image-proc">更新图像 <span class="en">Refresh image</span></button>
+          </div>
+          <!-- 进度条自己一行，在最下面：它说的是"这一栏正在算"，而挤在按钮中间时
+               它只能在按钮之间抢那点宽度，短得看不出进度。 -->
+          <div class="progress proc-progress" id="proc-progress" hidden
+               title="后期处理正在进行"><span id="proc-progress-bar"></span></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- 两栏参数之间的分隔条：拖它改变「模拟设置」那一栏的宽度（--w-pane-a），
+           右边那一栏跟着变。 -->
+      <div class="splitter" data-target="panes"></div>
+
+      <div class="pane pane-b">
+
+        <!-- 后期处理：每一行都占满整栏宽度，滑条的长度就是可用的调整精度 -->
+        <section class="group proc-panel" id="proc-panel-side">
+          <span class="tabs" id="proc-tabs">
+            <button class="tab" data-proc="events" aria-pressed="true">事件预报</button>
+            <button class="tab" data-proc="animation" aria-pressed="false">生成动画</button>
+          </span>
+
+          <!-- 事件预报：一次只看一类事件（开关不可多选），下面列出算出来的时间。
+               地平线以下的时刻灰显，双击把客户端时间设到那一刻。 -->
+          <div class="train-pane" id="proc-events">
+            <div class="event-when">
+              <label class="when-label" for="events-start">开始 <span class="en">From</span></label>
+              <input type="datetime-local" id="events-start">
+              <button class="ghost mini" id="events-start-sync"
+                      title="把「开始」设为全月面当前模拟的那个时刻">同步所选时间</button>
+            </div>
+            <div class="event-when">
+              <label class="when-label" for="events-end">结束 <span class="en">To</span></label>
+              <input type="datetime-local" id="events-end">
+              <button class="ghost mini" id="events-end-sync"
+                      title="把「结束」设为全月面当前模拟的那个时刻">同步所选时间</button>
+            </div>
+            <span class="mark-bar" id="event-kinds"></span>
+            <div class="event-list" id="event-list"></div>
+          </div>
+
+          <!-- 生成动画：把一段时间里的月面渲染成一串帧，编成一个 MP4。渲染在后台跑，
+               页面轮询进度；「终止」走的是和单张渲染同一个 /api/cancel。 -->
+          <div class="train-pane" id="proc-animation" hidden>
+            <div class="event-when">
+              <label class="when-label" for="anim-start">开始 <span class="en">From</span></label>
+              <input type="datetime-local" id="anim-start">
+              <button class="ghost mini" id="anim-start-sync"
+                      title="把「开始」设为全月面当前模拟的那个时刻">同步所选时间</button>
+            </div>
+            <!-- 开始那一排只管开始，结束那一排只管结束：两排各自贴着它改的那个时刻，
+                 按哪一头动哪一头。 -->
+            <div class="row time-nudge" id="anim-nudge">
+              <button class="ghost mini" id="anim-nudge-back-day" data-nudge="-1d"
+                      data-range="anim-start" title="开始时间往前一天">-1d</button>
+              <button class="ghost mini" id="anim-nudge-back-hour" data-nudge="-1h"
+                      data-range="anim-start" title="开始时间往前一小时">-1h</button>
+              <button class="ghost mini" id="anim-nudge-back-quarter" data-nudge="-15m"
+                      data-range="anim-start" title="开始时间往前 15 分钟">-15m</button>
+              <button class="ghost mini" id="anim-nudge-back-minute" data-nudge="-1m"
+                      data-range="anim-start" title="开始时间往前一分钟">-1m</button>
+              <button class="ghost mini" id="anim-nudge-fwd-minute" data-nudge="+1m"
+                      data-range="anim-start" title="开始时间往后一分钟">+1m</button>
+              <button class="ghost mini" id="anim-nudge-fwd-quarter" data-nudge="+15m"
+                      data-range="anim-start" title="开始时间往后 15 分钟">+15m</button>
+              <button class="ghost mini" id="anim-nudge-fwd-hour" data-nudge="+1h"
+                      data-range="anim-start" title="开始时间往后一小时">+1h</button>
+              <button class="ghost mini" id="anim-nudge-fwd-day" data-nudge="+1d"
+                      data-range="anim-start" title="开始时间往后一天">+1d</button>
+            </div>
+            <div class="event-when">
+              <label class="when-label" for="anim-end">结束 <span class="en">To</span></label>
+              <input type="datetime-local" id="anim-end">
+              <button class="ghost mini" id="anim-end-sync"
+                      title="把「结束」设为全月面当前模拟的那个时刻">同步所选时间</button>
+            </div>
+            <div class="row time-nudge" id="anim-nudge-end">
+              <button class="ghost mini" id="anim-end-nudge-back-day" data-nudge="-1d"
+                      data-range="anim-end" title="结束时间往前一天">-1d</button>
+              <button class="ghost mini" id="anim-end-nudge-back-hour" data-nudge="-1h"
+                      data-range="anim-end" title="结束时间往前一小时">-1h</button>
+              <button class="ghost mini" id="anim-end-nudge-back-quarter" data-nudge="-15m"
+                      data-range="anim-end" title="结束时间往前 15 分钟">-15m</button>
+              <button class="ghost mini" id="anim-end-nudge-back-minute" data-nudge="-1m"
+                      data-range="anim-end" title="结束时间往前一分钟">-1m</button>
+              <button class="ghost mini" id="anim-end-nudge-fwd-minute" data-nudge="+1m"
+                      data-range="anim-end" title="结束时间往后一分钟">+1m</button>
+              <button class="ghost mini" id="anim-end-nudge-fwd-quarter" data-nudge="+15m"
+                      data-range="anim-end" title="结束时间往后 15 分钟">+15m</button>
+              <button class="ghost mini" id="anim-end-nudge-fwd-hour" data-nudge="+1h"
+                      data-range="anim-end" title="结束时间往后一小时">+1h</button>
+              <button class="ghost mini" id="anim-end-nudge-fwd-day" data-nudge="+1d"
+                      data-range="anim-end" title="结束时间往后一天">+1d</button>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">时间步长</span>
+              <input type="number" id="anim-step" value="10" step="1" min="0.01">
+              <select id="anim-step-unit" class="unit" title="时间步长的单位">
+                <option value="1">秒</option>
+                <option value="60" selected>分</option>
+                <option value="3600">时</option>
+                <option value="86400">天</option>
+              </select>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">帧率</span>
+              <input type="number" id="anim-fps" value="12" step="1" min="1" max="60">
+              <span class="unit">fps</span>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">物理分辨率</span>
+              <!-- 渲染分辨的是"算多细"，与文件多大是两件事：选了具体 km/px 时，帧按
+                   能分辨的尺寸渲染，再缩放到下面那个分辨率。 -->
+              <select id="anim-kmpx-preset"
+                      title="渲染时每个像素覆盖多少地面：原生＝按输出分辨率渲染，不缩放">
+                <option value="native" selected>原生（按输出）</option>
+                <option value="custom">自定义…</option>
+              </select>
+              <input type="number" id="anim-kmpx" step="0.01" min="0" hidden>
+              <span class="unit">km/px</span>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">分辨率</span>
+              <!-- 档位表由 app.js 从 #disk-preset 复制过来：一张表，两个选择器。
+                   长边/短边与「几何模拟」保存排里那一个是同一件事：选框不是正方形
+                   时，一个数字必须说清楚它指的是哪一边。 -->
+              <select id="anim-ref" title="下面这个数字说的是长边还是短边">
+                <option value="long" selected>长边</option>
+                <option value="short">短边</option>
+              </select>
+              <select id="anim-preset"></select>
+              <input type="text" id="anim-px" inputmode="numeric" value="1000" size="6" hidden>
+              <span class="unit">px</span>
+            </div>
+            <p class="hint" id="anim-scale-note"></p>
+            <!-- 采样与极小尺度平滑：前者把月面边缘与明暗界线上的锯齿平均掉，后者
+                 在成片上再抹一层亚像素的高斯。最细的物理分辨率下，阴影顶端会露出
+                 地形栅格的纹理，这两个旋钮就是为它准备的。 -->
+            <div class="row anim-quality">
+              <label class="check inline" title="每像素采样：n×n 条光线平均成一个像素。边缘与明暗界线更干净，代价是 n² 倍渲染时间">
+                采样
+                <select id="anim-samples">
+                  <option value="1">1×</option>
+                  <option value="2" selected>2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                </select>
+              </label>
+              <label class="check inline" title="极小尺度平滑：对每一帧做一次亚像素级高斯模糊，用来压掉地形栅格印在阴影上的纹理（实测 0.5 px 就能把最细地形下 0.16–0.30 km 那一带的混叠功率砍掉 74%）。它进文件，也只在 1 px 上下">
+                平滑
+                <select id="anim-smooth">
+                  <option value="0" selected>关</option>
+                  <option value="0.5">0.5 px</option>
+                  <option value="0.8">0.8 px</option>
+                  <option value="1.2">1.2 px</option>
+                  <option value="1.8">1.8 px</option>
+                </select>
+              </label>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">范围</span>
+              <!-- 默认就是"当前选框"：动画最常拍的是手里框住的那块地面，而不是整月面。 -->
+              <select id="anim-scope" title="动画是整月面的自转与相变，还是当前选框里的近景">
+                <option value="disk">全月面</option>
+                <option value="region" selected>当前选框</option>
+              </select>
+            </div>
+            <div class="row">
+              <label class="check inline">
+                <input type="checkbox" id="anim-earthshine" checked>
+                <span>地照</span>
+              </label>
+              <label class="check inline">地照增益
+                <input type="text" id="anim-earthshine-gain" inputmode="decimal" value="20" size="4">
+              </label>
+            </div>
+            <div class="row">
+              <label class="check inline"
+                     title="把「后期处理」那一栏（视宁度、模糊、衍射环、锐化、色彩、旋转、噪声）应用到每一帧。后期处理链的终点是显示图，所以它与 HDR 互斥">
+                <input type="checkbox" id="anim-process">
+                <span>应用后期处理</span>
+              </label>
+            </div>
+            <div class="row">
+              <label class="check inline"
+                     title="10 bit HEVC + PQ（HDR10）：帧按线性光写入，支持 HDR 的播放器把高光推到显示器能到的亮度；不支持时看到的仍是普通画面">
+                <input type="checkbox" id="anim-hdr">
+                <span>HDR</span>
+              </label>
+              <label class="check inline">动态范围
+                <select id="anim-hdr-stops">
+                  <option value="1">1 档 · 峰值 2×</option>
+                  <option value="2">2 档 · 峰值 4×</option>
+                  <option value="3" selected>3 档 · 峰值 8×</option>
+                  <option value="4">4 档 · 峰值 16×</option>
+                  <option value="5">5 档 · 峰值 32×</option>
+                  <option value="6">6 档 · 峰值 64×</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <label class="check inline" title="在每一帧的角落写上这一帧的时刻，格式 2026-10-16 14:35 UTC+8h">
+                <input type="checkbox" id="anim-timestamp">
+                <span>含时间戳</span>
+              </label>
+              <label class="check inline" title="时间戳画在画面的哪一个角">
+                位置
+                <select id="anim-timestamp-corner">
+                  <option value="left-top" selected>左上</option>
+                  <option value="right-top">右上</option>
+                  <option value="left-bottom">左下</option>
+                  <option value="right-bottom">右下</option>
+                </select>
+              </label>
+              <label class="check inline" title="时间戳离画面边界多少个像素">
+                边距
+                <input type="number" id="anim-timestamp-margin" value="16" min="0" max="400" step="1">
+                <span class="unit">px</span>
+              </label>
+            </div>
+            <div class="row">
+              <button class="primary" id="anim-run">生成动画 <span class="en">Render MP4</span></button>
+              <button class="ghost" id="anim-cancel">终止</button>
+            </div>
+            <div class="progress" id="anim-progress" hidden><span id="anim-progress-bar"></span></div>
+            <!-- 跨度与帧数：开始、结束与步长一改它就重算，不需要先按下生成。
+                 它说的是"这一次会拍出多长的一段"，是按下按钮之前唯一还想知道的事。 -->
+            <p class="hint" id="anim-span"></p>
+            <p class="hint" id="anim-status" hidden></p>
+          </div>
+        </section>
+      </div>
+
+    </div>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

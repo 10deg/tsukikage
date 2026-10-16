@@ -1,0 +1,95 @@
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---- SPICE kernels and rasters ---------------------------------------------
+# Most of kernels/ is a download: the long ephemerides (3.2 GB with DE441), the
+# SVS topography/colour rasters (1 GB / 940 MB) and the 8.5 GB USGS global DEM.
+# The *default* kernel set is small enough to travel with the code, so a clone
+# can compute without fetching anything; kernels/README.md says where each file
+# comes from and what belongs here.
+kernels/*
+!kernels/README.md
+
+# The default `mode='recent'` set (51 MB), shipped so that position, phase,
+# rise/set, libration and visibility work straight after a clone.
+!kernels/naif0012.tls
+!kernels/de440s.bsp
+!kernels/pck00010.tpc
+!kernels/gm_de440.tpc
+!kernels/moon_pa_de440_200625.bpc
+!kernels/moon_de440_220930.tf
+!kernels/earth_latest_high_prec.bpc
+# Not loaded by default -- see kernels/README.md -- but small and from the same
+# NAIF family, so it travels with the rest.
+!kernels/pck00011.tpc
+
+# A half-downloaded DEM is not a DEM.
+kernels/*.part
+
+# ---- derived data ----------------------------------------------------------
+# Terrain pyramids baked from the SVS rasters (~350 MB).  Regenerable with
+# `python -m moonlib terrain --bake`, so never version controlled.
+.cache/
+
+# ---- local artefacts -------------------------------------------------------
+.DS_Store
+*.swp
+out/
+*.png
+*.pdf
+
+# ---- README illustrations --------------------------------------------------
+# The `*.png` rule above is for what running the thing produces -- renders,
+# screenshots, sample output.  An image the README itself shows is repository
+# content, not an artefact, so this one directory is let through.
+!assets/*.png
+
+# ---- not shipped -----------------------------------------------------------
+# Design notes: the repository is the code, the docs are the working record.
+docs/
+
+# Local setup notes and this machine's GitHub workflow.  Kept in the working
+# copy -- the README carries the four commands a clone actually needs -- but
+# not published.  (`git rm --cached SETUP.md` is what took it out; the file
+# itself is untouched.)
+SETUP.md
+
+# Hand-checked sample outputs, scratch CSVs and the labeler's own test corpus.
+# Nothing here is needed to build, run or test.
+out/
+MoonLabeler-test/
+*.mp4
+*.exr
+
+# The test suite lives in the working copy only.  Nothing in src/, web/ or
+# tools/ imports it -- the library, the CLI and the page run without it -- and
+# two of the tools write their records into tests/data/, which stays valid for
+# this checkout.  Anchored, so a `tests/` somewhere else would not be caught.
+/tests/
+
+# The whole legacy/ snapshot belongs to the refactor, not to the shipped
+# library: ``legacy/moonlib.py`` is the pre-refactor implementation and its
+# target CSV is a byte-for-byte duplicate of the one the library actually reads
+# (``src/moonlib/data/libration_targets.csv``).  Only
+# ``tools/make_legacy_baseline.py`` looks at it, and that tool writes into the
+# unpublished ``tests/`` as well -- so for anyone downloading the library to use
+# it, the directory has no role at all.
+/legacy/
+
+# Probe scripts, one-off measurements and their intermediate output, kept while
+# a question was open and superseded once the answer was baked into src/.  They
+# are how a number was arrived at, not something the library imports, so the
+# working copy keeps them and the repository does not.
+/scratch/

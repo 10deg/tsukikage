@@ -1,0 +1,248 @@
+/* Static check that the page's three files agree with each other.
+ *
+ * Cheap, and it catches the class of mistake that otherwise only shows up as a
+ * control that silently does nothing: an id the script reaches for that the
+ * markup does not define, an output span that no input drives, or a class with
+ * no rule behind it.
+ *
+ *   node web/test_dom.js
+ */
+'use strict';
+const { createRunner, readStatic } = require('./harness');
+
+const html = readStatic('index.html');
+const css = readStatic('style.css');
+const jsRaw = readStatic('app.js');
+/* Strip comments before looking for calls: prose mentions of a function name
+   are not calls, and "acos(rho)" inside an explanatory comment is not code. */
+const js = jsRaw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+
+/* Every way the script names an element: $('x'), num('x'), busy('x'), and the
+   string arrays that drive the sliders. */
+const referenced = new Set();
+for (const re of [/\$\('([^']+)'\)/g, /\bnum\('([^']+)'\)/g, /\bbusy\('([^']+)'/g]) {
+  for (const m of js.matchAll(re)) referenced.add(m[1]);
+}
+for (const m of js.matchAll(/\[\s*'([a-z-]+)',\s*\d\]/g)) {
+  referenced.add(m[1]);
+  referenced.add(m[1] + '-out');
+}
+for (const m of js.matchAll(/'([a-z-]+-out)'/g)) referenced.add(m[1]);
+
+/* This file's checks are mechanical and numerous, so it prints only failures
+   and the summary; the other two harnesses print every check. */
+const { check, finish } = createRunner({ verbose: false });
+
+/* First, is this even the file it claims to be?  A misplaced write once left
+   the JavaScript sitting in index.html, and every id check then failed for a
+   reason that had nothing to do with ids. */
+check('index.html really is HTML',
+  html.trimStart().startsWith('<!DOCTYPE html>') && html.trimEnd().endsWith('</html>'));
+check('style.css really is CSS', css.includes('{') && !css.includes('function '));
+check('app.js really is JavaScript', !jsRaw.trimStart().startsWith('<!DOCTYPE'));
+check('the page loads the script it was written against',
+  html.includes('<script src="/static/app.js">'));
+
+const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+
+/* The wiring lists -- `for (const id of ['a', 'b']) { $(id)... }` -- reach for
+   their elements through a variable, so the check above cannot see them.  One
+   of those lists kept naming `earthshine` after its checkbox was removed, and
+   the `null.addEventListener` that followed stopped `init()` before the first
+   render.  Same class of mistake, same check. */
+{
+  const listed = new Set();
+  for (const m of js.matchAll(/for \(const id of \[([^\]]+)\]\)/g)) {
+    for (const name of m[1].matchAll(/'([a-z][\w-]*)'/g)) listed.add(name[1]);
+  }
+  const unknown = [...listed].filter((id) => !htmlIds.has(id));
+  check('every id in a wiring list exists in the markup',
+    unknown.length === 0, unknown.join(', '));
+}
+
+const missing = [...referenced].filter((id) => !htmlIds.has(id));
+check('every id the script uses exists in the markup', missing.length === 0, missing.join(', '));
+
+/* And no id is defined twice: `getElementById` would hand back the first one
+   and the second copy would be a control that silently does nothing.  A
+   duplicated light control (日面采样 / 粗糙度 / 环境补光, left behind when
+   they moved into 高级设置) is exactly how this was found. */
+const idCounts = new Map();
+for (const m of html.matchAll(/\bid="([^"]+)"/g)) {
+  idCounts.set(m[1], (idCounts.get(m[1]) || 0) + 1);
+}
+const duplicated = [...idCounts].filter(([, count]) => count > 1).map(([id]) => id);
+check('no id appears twice in the markup', duplicated.length === 0, duplicated.join(', '));
+
+/* Each range input that has an output must have a matching *-out span, and the
+   other way round, or a slider would show a number that never updates. */
+const ranges = [...html.matchAll(/<input[^>]*type="range"[^>]*id="([^"]+)"/g)].map((m) => m[1]);
+const orphanRanges = ranges.filter((id) => !htmlIds.has(id + '-out') && !js.includes(`'${id}'`));
+check('every slider is wired', orphanRanges.length === 0, orphanRanges.join(', '));
+
+/* Only real <output> elements, not any id that happens to end in "-out". */
+const outputs = [...html.matchAll(/<output[^>]*\bid="([^"]+)"/g)].map((m) => m[1]);
+const orphanOutputs = outputs.filter((id) => !js.includes(`'${id.slice(0, -4)}'`));
+check('every <output> is driven by an input', orphanOutputs.length === 0, orphanOutputs.join(', '));
+
+/* Classes with no rule are dead weight, unless they are pure JS hooks. */
+const jsHooks = new Set(['on', 'busy', 'status']);
+const htmlClasses = new Set(
+  [...html.matchAll(/\bclass="([^"]+)"/g)].flatMap((m) => m[1].split(/\s+/)).filter(Boolean)
+);
+const cssClasses = new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]));
+const styled = new Set([...cssClasses].filter((c) => htmlClasses.has(c)));
+const unstyled = [...htmlClasses].filter((c) => !styled.has(c) && !jsHooks.has(c));
+check('every class has a rule', unstyled.length === 0, unstyled.join(', '));
+
+/* The other direction: a rule for a class nothing ever wears.
+ *
+ * This is the half that was missing, and it is the half that rots.  A class the
+ * markup dropped looks exactly like a class the script adds at run time, so the
+ * test that a class name is *somewhere* is too weak; what makes a rule dead is
+ * that no element can have the class.  The script's string literals are the
+ * closest cheap approximation of "what it can put on an element": a class it
+ * builds with string concatenation will still appear as a fragment there.
+ *
+ * Two rules were dead when this was added -- `.actions .spacer`, and a whole
+ * `.actions` block whose live sibling is `.col-actions` -- and neither was
+ * visible without it. */
+const jsStrings = [...js.matchAll(/'([^'\n]*)'|"([^"\n]*)"/g)]
+  .map((m) => (m[1] === undefined ? m[2] : m[1])).join(' ');
+const jsMentions = new Set(jsStrings.match(/[A-Za-z][\w-]*/g) || []);
+const deadRules = [...cssClasses]
+  .filter((c) => !htmlClasses.has(c) && !jsMentions.has(c) && !jsHooks.has(c))
+  .sort();
+check('no rule for a class nothing wears', deadRules.length === 0, deadRules.join(', '));
+
+/* The script must not reference a helper it never defines. */
+const defined = new Set([
+  ...[...js.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]),
+  ...[...js.matchAll(/const\s+([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]),
+  ...[...js.matchAll(/let\s+([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]),
+]);
+const called = new Set([...js.matchAll(/\b([a-z][\w$]*)\s*\(/g)].map((m) => m[1]));
+/* Arrow-function parameters look like calls to nothing. */
+for (const m of js.matchAll(/\(([^)]*)\)\s*=>/g)) {
+  for (const part of m[1].split(',')) {
+    // Nested parentheses leave a leading '(' on the first parameter.
+    const name = part.trim().replace(/^[^A-Za-z_$]+/, '').replace(/[^\w$].*$/, '');
+    if (/^[a-z][\w$]*$/.test(name)) defined.add(name);
+  }
+}
+const builtins = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'typeof', 'fetch',
+  'Number', 'String', 'Boolean', 'Math', 'JSON', 'Date', 'Object', 'Array', 'Set',
+  'Map', 'Promise', 'require', 'parseInt', 'parseFloat', 'isNaN', 'setTimeout',
+  'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame',
+  'console', 'Image', 'Uint8Array',
+  // CSS functions appear as `name(...)` inside strings.
+  'rgba', 'rgb', 'hsla', 'hsl', 'blur',
+  // Browser globals the harness has no stub for.
+  'getComputedStyle', 'ResizeObserver', 'requestAnimationFrame',
+  // Browser globals the save path uses; `callback` is a parameter name the
+  // regex reads as a call because it is invoked.
+  'atob', 'btoa', 'decodeURIComponent', 'encodeURIComponent', 'Blob',
+  'URL', 'DataView', 'ArrayBuffer', 'Uint8Array', 'callback',
+]);
+const undefinedCalls = [...called].filter(
+  (name) => !defined.has(name) && !builtins.has(name) && !js.includes(`.${name}(`)
+);
+check('no call to an undefined local function', undefinedCalls.length === 0, undefinedCalls.join(', '));
+
+/* Both canvases the script grabs must exist. */
+check('both canvases present', htmlIds.has('disk') && htmlIds.has('result'));
+check('a download link exists', htmlIds.has('download'));
+
+/* The processing controls must go to /api/process, which works on the server's
+   cached frame; only the geometry controls may trigger a re-render. */
+const processEditors = ['blur-strength', 'sharpen-radius', 'sharpen-strength',
+                        'saturation', 'gain', 'offset', 'gamma', 'seeing',
+                        'seeing-num'];
+const reprocessIds = (js.match(/reprocess/g) || []).length;
+check('sliders are routed through reprocess()', reprocessIds >= 3, reprocessIds + ' mentions');
+check('/api/process is used', js.includes("'/api/process'"));
+for (const id of processEditors) {
+  if (!htmlIds.has(id)) check('processing control ' + id + ' exists', false);
+}
+check('every processing control exists', processEditors.every((i) => htmlIds.has(i)));
+check('the selection has its own overlay canvas', htmlIds.has('overlay'));
+// 彩色 beside 饱和度 is gone: it was a second copy of the camera's own 类型
+// menu, and next to a slider it read as that slider's switch.
+check('the colour switch is gone rather than moved',
+  !htmlIds.has('colour') && !htmlIds.has('frame-gain'));
+check('chips were removed', !html.includes('class="chip'));
+
+/* Names the reader asked for by name, and that a tidy-up would rename by
+   accident: the third tab and its button are both 生成动画, the HDR switch is
+   "HDR" rather than "带 HDR", and the time nudges are labelled -1M/-1m/+1d. */
+check('the animation pane and its button are both 生成动画',
+  html.includes('data-proc="animation" aria-pressed="false">生成动画<') &&
+  html.includes('id="anim-run">生成动画 '));
+check('the HDR switches are labelled HDR, not 带 HDR',
+  !html.includes('带 HDR') && (html.match(/<span>HDR<\/span>/g) || []).length === 2);
+check('every nudge button is labelled with its own step',
+  (() => {
+    const nudges = [...html.matchAll(/data-nudge="([^"]+)"[\s\S]{0,160}?>([^<\n]*)</g)]
+      .map((m) => [m[1], m[2].trim()]);
+    // 8 for the observer's instant and 16 for the animation: that pane carries
+    // a row under 开始 *and* one under 结束.  事件预报 has none any more -- its
+    // two ends are typed, and a whole row of decade/month steps above them was
+    // eight buttons to move a window nobody moves that way.
+    return nudges.length === 24 && nudges.every(([step, text]) => step === text);
+  })());
+check('and every range nudge says which range it moves',
+  (() => {
+    const rows = [...html.matchAll(/data-nudge="[^"]*"[\s\S]{0,160}?data-range="([\w-]+)"/g)]
+      .map((m) => m[1]);
+    const counts = rows.reduce((all, one) => {
+      all[one] = (all[one] || 0) + 1;
+      return all;
+    }, {});
+    // The animation's two rows are *not* one range: the row under 开始 moves
+    // the start and the row under 结束 moves the end.
+    return !counts.events && counts['anim-start'] === 8 && counts['anim-end'] === 8;
+  })());
+/* Two rows of nudges, each with the steps that row is about: the observer's
+   instant (w/d/h/m) and a range in the animation (d/h/15m/m). */
+check('and each row offers the steps it was asked for',
+  ['-1w', '-1d', '-1h', '-1m', '+1m', '+1h', '+1d', '+1w']
+    .every((step) => html.includes(`data-nudge="${step}"`)) &&
+  ['-15m', '+15m'].every((step) => html.includes(`data-nudge="${step}"`)));
+
+/* Every field the readout reaches for must be optional-safe: the two endpoints
+   do not have to carry identical payloads, and a missing one must degrade the
+   caption rather than throw. */
+{
+  const body = js.slice(js.indexOf('function describeResult('));
+  const fn = body.slice(0, body.indexOf('\n}\n') + 3);
+  const optional = [...fn.matchAll(/\bif\s*\(\s*(\w+)\s*\)/g)].map((m) => m[1]);
+  check('describeResult guards its optional fields',
+    optional.includes('tr') && optional.includes('r'), optional.join(','));
+  check('and guards the image shape',
+    fn.includes('info.image && info.image.shape'));
+}
+
+/* The build number doubles as the way to the repository, so the markup has to
+ * carry the link: the script only fills in the text. */
+{
+  const anchor = html.match(/<a\b[^>]*id="app-version"[^>]*>/);
+  check('the version readout is a link to the repository',
+    !!anchor && anchor[0].includes('github.com/10deg/tsukikage'),
+    anchor ? anchor[0] : 'no <a id="app-version">');
+  check('and it opens in a new tab without handing over the opener',
+    !!anchor && anchor[0].includes('target="_blank"')
+      && anchor[0].includes('rel="noopener"'));
+}
+
+/* The phase name is the easter egg's handle: it needs the rule that says it is
+ * clickable, and the overlay needs to stay out of the way of the pointer. */
+{
+  const fall = css.slice(css.indexOf('.moonfall'));
+  check('#phase-name is marked clickable', /#phase-name\s*\{[^}]*cursor:\s*pointer/.test(css));
+  check('the snow does not eat the clicks underneath',
+    /\.moonfall\s*\{[^}]*pointer-events:\s*none/.test(css));
+  check('and it is taken out of the flow', fall.includes('position: fixed'));
+}
+
+finish('all checks passed');
