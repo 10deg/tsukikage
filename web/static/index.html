@@ -1018,9 +1018,9 @@
               <span class="unit">px</span>
             </div>
             <p class="hint" id="anim-scale-note"></p>
-            <!-- 采样与极小尺度平滑：前者把月面边缘与明暗界线上的锯齿平均掉，后者
-                 在成片上再抹一层亚像素的高斯。最细的物理分辨率下，阴影顶端会露出
-                 地形栅格的纹理，这两个旋钮就是为它准备的。 -->
+            <!-- 每像素采样：n×n 条光线平均成一个像素，把月面边缘与明暗界线上的
+                 锯齿平均掉。最细的物理分辨率下，阴影顶端会露出地形栅格的纹理，
+                 这个旋钮就是为它准备的。 -->
             <div class="row anim-quality">
               <label class="check inline" title="每像素采样：n×n 条光线平均成一个像素。边缘与明暗界线更干净，代价是 n² 倍渲染时间">
                 <span class="slider-label">采样</span>
@@ -1029,16 +1029,6 @@
                   <option value="2" selected>2×</option>
                   <option value="3">3×</option>
                   <option value="4">4×</option>
-                </select>
-              </label>
-              <label class="check inline" title="极小尺度平滑：对每一帧做一次亚像素级高斯模糊，用来压掉地形栅格印在阴影上的纹理（实测 0.5 px 就能把最细地形下 0.16–0.30 km 那一带的混叠功率砍掉 74%）。它进文件，也只在 1 px 上下">
-                平滑
-                <select id="anim-smooth">
-                  <option value="0" selected>关</option>
-                  <option value="0.5">0.5 px</option>
-                  <option value="0.8">0.8 px</option>
-                  <option value="1.2">1.2 px</option>
-                  <option value="1.8">1.8 px</option>
                 </select>
               </label>
             </div>

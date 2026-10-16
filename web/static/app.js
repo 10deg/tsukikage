@@ -4608,7 +4608,7 @@ const SETTING_FIELDS = [
   'disk-hdr', 'disk-hdr-stops',
   'anim-start', 'anim-end', 'anim-step', 'anim-step-unit', 'anim-fps',
   'anim-px', 'anim-ref', 'anim-scope', 'anim-earthshine', 'anim-earthshine-gain',
-  'anim-samples', 'anim-smooth', 'anim-timestamp', 'anim-timestamp-corner',
+  'anim-samples', 'anim-timestamp', 'anim-timestamp-corner',
   'anim-timestamp-margin',
   'anim-hdr', 'anim-hdr-stops',
   'out-kmpx-preset', 'out-preset',
@@ -5870,11 +5870,10 @@ function animationRequest() {
     // after 后期处理, which is an angular operation and belongs at the render's
     // own scale).
     scale_to: [output.width, output.height],
-    // 极小尺度平滑: a sub-pixel blur of each finished frame, in the frame's own
-    // pixels.  It is a property of the picture rather than of the render -- the
-    // same control, and the same values, as the full disk's 边缘平滑 -- so the
-    // server applies it where the frames are written.
-    smooth_px: Number(($('anim-smooth') || {}).value) || 0,
+    // No `smooth_px`: the panel's 极小尺度平滑 control is gone.  The server
+    // still accepts the field and defaults it to 0, and the library still
+    // implements the sub-pixel blur, so the capability stays available to
+    // anything that asks for it directly -- the page just no longer offers it.
     timestamp: $('anim-timestamp').checked ? {
       corner: $('anim-timestamp-corner').value,
       margin_px: num('anim-timestamp-margin') === null ? 16 : num('anim-timestamp-margin'),
@@ -6982,8 +6981,7 @@ function init() {
   // 生成动画's own fields: everything that changes the frame's size, its shape
   // or the length of the run says so straight away, before anything is pressed.
   for (const id of ['anim-start', 'anim-end', 'anim-step', 'anim-step-unit',
-                    'anim-fps', 'anim-ref', 'anim-scope', 'anim-samples',
-                    'anim-smooth']) {
+                    'anim-fps', 'anim-ref', 'anim-scope', 'anim-samples']) {
     const field = $(id);
     if (!field) continue;
     field.addEventListener('input', refreshAnimationPlan);

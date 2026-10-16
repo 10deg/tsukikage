@@ -88,6 +88,10 @@ MoonLabeler-test/
 # it, the directory has no role at all.
 /legacy/
 
+# Working notes for coding agents.  The file stays in the checkout so the tool
+# reading it still finds it; it is not part of the library anyone downloads.
+AGENTS.md
+
 # Probe scripts, one-off measurements and their intermediate output, kept while
 # a question was open and superseded once the answer was baked into src/.  They
 # are how a number was arrived at, not something the library imports, so the
