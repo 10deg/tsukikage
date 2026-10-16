@@ -1045,8 +1045,15 @@ button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
 /* 采样 is the first control in the panel's column, so its menu has to line up
    with the menus above and below it.  Its label takes the same 5.4 em gutter
    and the same 7 px gap the `.param-row`s use, which lands the menu on the same
-   x as every other control; 平滑 then follows it along the row. */
-#proc-animation .anim-quality .check.inline { gap: 7px; }
+   x as every other control; 平滑 then follows it along the row.
+ *
+ * `flex: 0 0 auto` is what keeps the two pairs apart.  Left to shrink, the
+ * labels give way at the menu rather than at the row -- `select` inherits
+ * `min-width: 0` from the base rule, so a squeezed label collapses its menu
+ * instead of wrapping, and that menu then runs into 平滑.  Fixed widths mean a
+ * narrow panel wraps the row, which is the honest failure rather than two
+ * controls on top of each other. */
+#proc-animation .anim-quality .check.inline { flex: 0 0 auto; gap: 7px; }
 #proc-animation .anim-quality .slider-label { flex: 0 0 5.4em; }
 #proc-animation #anim-timestamp-margin { width: 4.4em; text-align: right; }
 #proc-animation #anim-px { width: 5.5em; text-align: right; padding: 1px 5px; }
