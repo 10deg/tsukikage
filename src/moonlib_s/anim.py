@@ -576,6 +576,45 @@ def _linear_frame(item: Any, stops: float = 3.0) -> Any:
     return total * scale * (2.0 ** float(stops))
 
 
+def finish_frame(
+    item: Any,
+    *,
+    hdr: bool = False,
+    stops: float = 3.0,
+    scale_to: Optional[Any] = None,
+    smooth_px: float = 0.0,
+    timestamp: Optional[Dict[str, Any]] = None,
+    annotate: Optional[Callable[[Any, Any], Any]] = None,
+) -> Any:
+    """One frame, all the way to the pixels that go into the file.
+
+    The order is the order the operations mean: the frame as rendered, then the
+    size the file wants (which is where area-averaging happens), then 极小尺度平滑,
+    then the caption.  A stamp drawn before the resize would be resized with the
+    picture and land a different number of pixels from the edge on every output
+    size -- and its margin is stated in the file's own pixels.
+
+    Shared by :func:`write_animation` and the page's 单帧预览, so a preview is
+    the animation's first frame and not a second implementation of it: the same
+    size, the same processing, the same stamp.
+    """
+    frame = _linear_frame(item, stops) if hdr else _display_frame(item)
+    if scale_to is not None:
+        frame = resize_frame(frame, scale_to)
+    if smooth_px:
+        frame = smooth_frame(frame, smooth_px)
+    if annotate is not None:
+        frame = annotate(item, frame)
+    if timestamp:
+        frame = stamp_frame(
+            frame,
+            stamp_text(_frame_instant(item), timestamp.get("utc_offset_hours", 0.0)),
+            corner=str(timestamp.get("corner") or "left-top"),
+            margin_px=int(timestamp.get("margin_px", 16)),
+        )
+    return frame
+
+
 def write_animation(
     path: Any,
     frames: Any,
@@ -650,30 +689,10 @@ def write_animation(
         )
 
     def convert(item: Any) -> Any:
-        """One item, all the way to the pixels that go into the file.
-
-        The order is the order the operations mean: the frame as rendered, then
-        the size the file wants (which is where area-averaging happens), then
-        极小尺度平滑, then the caption.  A stamp drawn before the resize would be
-        resized with the picture and land a different number of pixels from the
-        edge on every output size -- and its margin is stated in the file's own
-        pixels.
-        """
-        frame = _linear_frame(item, stops) if hdr else _display_frame(item)
-        if scale_to is not None:
-            frame = resize_frame(frame, scale_to)
-        if smooth_px:
-            frame = smooth_frame(frame, smooth_px)
-        if annotate is not None:
-            frame = annotate(item, frame)
-        if timestamp:
-            frame = stamp_frame(
-                frame,
-                stamp_text(_frame_instant(item), timestamp.get("utc_offset_hours", 0.0)),
-                corner=str(timestamp.get("corner") or "left-top"),
-                margin_px=int(timestamp.get("margin_px", 16)),
-            )
-        return frame
+        return finish_frame(
+            item, hdr=hdr, stops=stops, scale_to=scale_to, smooth_px=smooth_px,
+            timestamp=timestamp, annotate=annotate,
+        )
 
     stream: Any = (convert(item) for item in frames)
     return write_mp4(path, stream, fps=fps, hdr=hdr, ffmpeg=ffmpeg)

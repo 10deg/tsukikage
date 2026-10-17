@@ -1121,6 +1121,9 @@ const LIMITS = {
   //: Frames one animation may hold; the server refuses more, so the span line
   //: says so before the button is pressed.
   animation_max_frames: 4000,
+  //: What /api/health said about the elevation products (see dataSources.js
+  //: section below).  Null until the first reply.
+  data_sources: null,
 };
 
 /** The plate scale the terrain data can actually support, in arcseconds. */
@@ -4742,6 +4745,244 @@ function syncKmPxPresets() {
   }
 }
 
+/* ── 数据源 / data source ────────────────────────────────────────────── */
+
+/** "59.2 m/px（512 ppd）": one string for a product's resolution. */
+function dataSourceText(source) {
+  const metres = source.metres_per_px || source.km_per_px * 1000;
+  const ppd = source.pixels_per_degree ? ` · ${source.pixels_per_degree} ppd` : '';
+  return `${metres.toFixed(metres < 100 ? 1 : 0)} m/px${ppd}`;
+}
+
+/** The paragraph under the menu: what the current choice is, and what it costs
+ *  if it is not on this machine yet.
+ *
+ *  A menu that only names products leaves the reader guessing which one the
+ *  picture is made of; this line is where the answer goes, and it is also where
+ *  an undownloaded source says how to get it. */
+function updateDataSourceNote() {
+  const select = $('data-source');
+  const note = $('data-source-note');
+  if (!select || !note) return;
+  const payload = LIMITS.data_sources;
+  const value = select.value;
+  if (value && value.startsWith('online:')) {
+    const entry = (payload && payload.online || [])
+      .find((item) => `online:${item.id}` === value);
+    note.textContent = entry ? `${entry.note} 下载：${entry.fetch}` : '';
+    return;
+  }
+  const source = (payload && payload.sources || []).find((item) => item.id === value);
+  if (!source) { note.textContent = ''; return; }
+  // Where the two pictures come from, said plainly: a finer product sharpens
+  // close-ups immediately, while the full disk keeps its existing pyramid (at
+  // the 10000 px ceiling it is already sampling a 474 m level, so a finer
+  // product would change nothing there).
+  const pyramid = payload && payload.pyramid ? `；整月面仍用 ${payload.pyramid}` : '';
+  note.textContent = `${dataSourceText(source)} · 近景与分辨率上限 ` +
+    `${source.km_per_px.toFixed(4)} km/px${pyramid}`;
+}
+
+/** Build the 数据源 menu from what the server can actually draw.
+ *
+ *  Two groups, and the difference between them is the point: 本地 entries are
+ *  files this machine parsed as a global raster, so their resolution is
+ *  *measured*; 在线 entries are products the project knows how to fetch but
+ *  does not have.  The second group is disabled rather than hidden -- seeing
+ *  "SLDEM2015 · 59 m（未下载）" beside the fetch command is what turns an
+ *  abstract recommendation into a next step.
+ */
+function renderDataSources(payload) {
+  const select = $('data-source');
+  if (!select || !payload) return;
+  const sources = payload.sources || [];
+  const selected = payload.selected || (sources[0] && sources[0].id) || '';
+  // A menu with no products is a menu that explains itself instead: an empty
+  // <select> beside "数据源" reads as a broken control, not as a missing file.
+  select.textContent = '';
+  if (!sources.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '（没有找到全球高程栅格）';
+    option.disabled = true;
+    select.appendChild(option);
+    select.disabled = true;
+    updateDataSourceNote();
+    return;
+  }
+  select.disabled = false;
+  const local = document.createElement('optgroup');
+  local.label = '本地';
+  for (const source of sources) {
+    const option = document.createElement('option');
+    option.value = source.id;
+    option.textContent = `${source.name} · ${dataSourceText(source)}`;
+    option.title = `${source.id}\n${(source.bytes / 1e9).toFixed(1)} GB`;
+    local.appendChild(option);
+  }
+  select.appendChild(local);
+  if (payload.online && payload.online.length) {
+    const group = document.createElement('optgroup');
+    group.label = '在线（需下载）';
+    for (const entry of payload.online) {
+      const option = document.createElement('option');
+      option.value = `online:${entry.id}`;
+      option.disabled = true;
+      option.textContent = entry.available
+        ? `${entry.label} · ${dataSourceText(entry)}（已在本机）`
+        : `${entry.label} · ${dataSourceText(entry)}（未下载）`;
+      option.title = `${entry.note}\n下载：${entry.fetch}`;
+      group.appendChild(option);
+    }
+    select.appendChild(group);
+  }
+  select.value = selected;
+  updateDataSourceNote();
+  renderPatchProducts(payload.online || []);
+}
+
+/** The 区域高清补片 menu: the online products, and what a patch would cost. */
+function renderPatchProducts(online) {
+  const select = $('patch-product');
+  if (!select) return;
+  select.textContent = '';
+  for (const entry of online) {
+    const option = document.createElement('option');
+    option.value = entry.id;
+    option.textContent = `${entry.label} · ${entry.metres_per_px} m`;
+    option.title = entry.note;
+    select.appendChild(option);
+  }
+  if (!online.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '（没有可下载的在线产品）';
+    option.disabled = true;
+    select.appendChild(option);
+  }
+  select.disabled = !online.length;
+}
+
+/** 下载此区域: fetch a patch of the online product covering the selection.
+ *
+ *  The whole point is that the download follows the *selection*: a close-up of
+ *  one crater needs a few degrees, not a 34 GB global product.  The server
+ *  measures the frame's real footprint (a limb view is foreshortened) and adds
+ *  the same margin the window cutter uses, so what arrives is exactly what the
+ *  renderer will ask for.
+ */
+async function downloadPatch() {
+  const product = $('patch-product') ? $('patch-product').value : '';
+  if (!product) return;
+  const selection = selectionPayload();
+  if (!selection) {
+    setStatus('先在地图上框选一块区域，再下载这一块的高清数据。', 'error');
+    return;
+  }
+  const button = $('patch-download');
+  const note = $('patch-note');
+  if (button) button.disabled = true;
+  if (note) note.textContent = '正在测量选框覆盖的地面…';
+  setStatus('区域补片：正在计算范围…', 'busy');
+  try {
+    const job = await post('/api/patch', {
+      product,
+      when: whenPayload(),
+      selection,
+      output: { width: 600, height: 600 },
+    });
+    if (note) {
+      note.textContent = `已排入队列：约 ${job.megabytes} MB，` +
+        `经度 ${job.bounds[0].toFixed(2)}–${job.bounds[1].toFixed(2)}°、` +
+        `纬度 ${job.bounds[2].toFixed(2)}–${job.bounds[3].toFixed(2)}°`;
+    }
+    let state = null;
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      state = await getJson(`/api/patch/${job.id}`);
+      if (note) {
+        const pct = Math.round((state.progress || 0) * 100);
+        note.textContent = `${state.message || ''}（${pct}%）`;
+      }
+      if (state.state !== 'running') break;
+    }
+    if (state.state === 'done') {
+      if (note) {
+        note.textContent = `补片就绪：${state.message}，` +
+          `${(state.bytes / 1e6).toFixed(1)} MB。近景会自动改用它。`;
+      }
+      setStatus('区域补片：就绪，重新渲染近景…', 'ok');
+      // Redraw the close-up against the new patch.  A failure here must not
+      // overwrite the message that says the download succeeded.
+      try {
+        const px = previewPixels();
+        await renderRegion(px, px, 1, null);
+      } catch (error) {
+        setStatus('补片已就绪，但近景重渲染失败：' + String(error.message || error),
+                  'error');
+      }
+    } else {
+      if (note) note.textContent = state.error || '下载失败';
+      setStatus('区域补片下载失败', 'error');
+    }
+  } catch (error) {
+    if (note) note.textContent = String(error.message || error);
+    setStatus('区域补片下载失败：' + String(error.message || error), 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/** Switch the product every later frame is drawn from.
+ *
+ *  The reply carries the new floor, and the floor is what decides which
+ *  物理分辨率 rows are live: 118 m can honour 0.118 km/px and nothing finer, so
+ *  the 0.06 row only lights up once a 59 m source is the one in use. */
+async function chooseDataSource(value) {
+  const select = $('data-source');
+  if (!select || !value || value.startsWith('online:')) {
+    // An online row is a note about how to get a product, not a choice: put the
+    // menu back where it was so it keeps naming what the frame is made of.
+    renderDataSources(LIMITS.data_sources || { sources: [] });
+    return;
+  }
+  select.disabled = true;
+  setStatus('切换数据源…', 'busy');
+  try {
+    const payload = await post('/api/source', { id: value });
+    LIMITS.terrain_km_per_px =
+      Number(payload.floor_km_per_px) || LIMITS.terrain_km_per_px;
+    const previous = LIMITS.data_sources || { sources: [], online: [] };
+    LIMITS.data_sources = {
+      ...previous,
+      sources: payload.sources || [],
+      selected: payload.selected || null,
+      floor_km_per_px: payload.floor_km_per_px,
+      pyramid: payload.pyramid || previous.pyramid,
+    };
+    renderDataSources(LIMITS.data_sources);
+    syncKmPxPresets();
+    syncCopiedPresets('out-kmpx-preset', 'anim-kmpx-preset');
+    $('out-kmpx').min = String(LIMITS.terrain_km_per_px);
+    $('out-kmpx').title =
+      `最细 ${LIMITS.terrain_km_per_px.toFixed(4)} km/px（当前数据源的分辨率）`;
+    $('out-scale').min = String(minArcsecPerPixel().toFixed(4));
+    setStatus(`数据源：近景可画到 ${(payload.floor_km_per_px * 1000).toFixed(1)} m/px`,
+              'ok');
+    // The full disk is *not* redrawn: it is made from its own pyramid, which
+    // this switch deliberately leaves alone.  What moves is the close-up
+    // window's terrain and the floor under 物理分辨率, so the numbers that read
+    // those are refreshed and nothing else is.
+    refreshAnimationPlan();
+    updateDataSourceNote();
+  } catch (error) {
+    setStatus('切换数据源失败：' + String(error.message || error), 'error');
+    updateDataSourceNote();
+  } finally {
+    select.disabled = false;
+  }
+}
+
 /** 物理分辨率 starts synced to the full disk's own scale, and stays there until
  *  the reader picks another preset or types a number. */
 function syncKmPxToDisk() {
@@ -4814,6 +5055,7 @@ const SETTING_FIELDS = [
   'preview-px', 'disk-px', 'disk-format', 'disk-annotated', 'disk-earthshine',
   'disk-earthshine-gain',
   'photometric-model', 'sun-samples', 'sky-ambient', 'roughness',
+  'data-source',
   'earthshine-gain', 'earth-geometric-albedo', 'earth-samples',
   'earthshine-tint',
   'out-px', 'out-ref', 'out-scale', 'out-kmpx', 'out-samples',
@@ -4961,6 +5203,13 @@ function applySettings(values) {
   syncResolutionPicker('disk-px', 'disk-preset');
   syncResolutionPicker('out-px', 'out-preset');
   syncResolutionPicker('anim-px', 'anim-preset');
+  // The data source is a server-side choice wearing a <select>'s clothes: the
+  // file records the product, and putting it back means asking the server, not
+  // just writing the value.
+  if (values['data-source'] && $('data-source').value !== values['data-source']) {
+    $('data-source').value = values['data-source'];
+    chooseDataSource(values['data-source']);
+  }
   updateDiskScale();
   // A stored file may turn HDR on and set the format to JPEG at once, so the
   // switch has to follow the format it was loaded with.  The zone may also be
@@ -5696,11 +5945,17 @@ async function loadLimits() {
         LIMITS.animation_max_frames = Number(payload.limits.animation_max_frames);
         updateAnimSpan();
       }
+      if (payload.data_sources) {
+        LIMITS.data_sources = payload.data_sources;
+        renderDataSources(payload.data_sources);
+      }
       $('out-kmpx').min = String(LIMITS.terrain_km_per_px);
       $('out-kmpx').title = `最细 ${LIMITS.terrain_km_per_px.toFixed(3)} km/px（本地 LOLA 的分辨率）`;
       $('out-scale').min = String(minArcsecPerPixel().toFixed(4));
-      // The menu's own rows have to agree with that floor.
+      // The menu's own rows have to agree with that floor -- and so does the
+      // animation's copy of them.
       syncKmPxPresets();
+      syncCopiedPresets('out-kmpx-preset', 'anim-kmpx-preset');
       // The two disk resolutions are type-or-pick fields, not spinners: the
       // published cap goes in the title (and is clamped on read) rather than on
       // a `max` attribute a text input has no use for.
@@ -5932,6 +6187,26 @@ async function getJson(path) {
  * One table, two pickers: a second copy in the markup is the thing that drifts
  * the first time a step is added or the ceiling moves.
  */
+/** Re-point a *copied* ladder at its source menu without rebuilding it.
+ *
+ *  `copyPresetOptions` runs once, at startup, so without this the animation's
+ *  物理分辨率 menu would keep the disabled rows of whatever data source the page
+ *  happened to have then -- the very rows a source switch is supposed to light
+ *  up.  Matching on value keeps the target's own leading rows (原生, 自定义)
+ *  untouched.
+ */
+function syncCopiedPresets(sourceId, targetId) {
+  const source = $(sourceId), target = $(targetId);
+  if (!source || !target) return;
+  const byValue = new Map([...source.options].map((option) => [option.value, option]));
+  for (const option of [...target.options]) {
+    const match = byValue.get(option.value);
+    if (!match) continue;
+    option.disabled = !!match.disabled;
+    option.textContent = match.textContent;
+  }
+}
+
 function copyPresetOptions(sourceId, targetId, keep) {
   const source = $(sourceId), target = $(targetId);
   if (!source || !target) return;
@@ -6405,6 +6680,66 @@ async function startAnimation() {
     setAnimationProgress(null, '');
     setAnimationStatus('动画启动失败：' + String(error.message || error), 'error');
     setStatus('动画启动失败', 'error');
+  }
+}
+
+/** A file name for the preview: the instant it shows, to the minute.
+ *
+ *  The same frame rendered twice an hour apart must not become two files with
+ *  the same name, and the instant is the one thing about it that cannot be read
+ *  off the picture once the stamp is turned off.
+ */
+function animationPreviewName(whenUtc) {
+  const stamp = String(whenUtc || '').replace(/[^0-9]/g, '').slice(0, 12);
+  return `moon-anim-preview-${stamp || 'frame1'}.png`;
+}
+
+/** 单帧预览: the run's first frame, finished as the file's frames are, saved.
+ *
+ *  It goes to /api/animation with `preview` set rather than to a second route,
+ *  so the preview is made of the same parameters the run will use -- including
+ *  the ones that would be an error for a run (an empty selection, a zero step),
+ *  which are therefore errors here too, before anything is rendered.
+ */
+async function previewAnimationFrame() {
+  const body = { ...animationRequest(), preview: true };
+  if (!body.start || !body.end) {
+    setAnimationStatus('先填开始与结束时间。', 'error');
+    return;
+  }
+  if (!(body.step_seconds > 0)) {
+    setAnimationStatus('时间步长要大于 0。', 'error');
+    return;
+  }
+  if ($('anim-scope').value === 'region' && !body.region) {
+    setAnimationStatus('先在月面上框选一块区域，再选「当前选框」。', 'error');
+    return;
+  }
+  const button = $('anim-preview');
+  if (button) button.disabled = true;
+  setAnimationStatus('正在渲染第一帧…', 'busy');
+  setStatus('动画预览：正在渲染第一帧…', 'busy');
+  try {
+    const payload = await post('/api/animation', body);
+    const preview = payload.preview;
+    if (!preview || !preview.image) throw new Error('服务器没有返回预览图');
+    const image = $('anim-preview-image');
+    if (image) image.src = preview.image;
+    const box = $('anim-preview-box');
+    if (box) box.hidden = false;
+    const note = $('anim-preview-note');
+    if (note) {
+      note.textContent = `${preview.width}×${preview.height} px · ${preview.when_utc}` +
+        ` · ${Number(preview.seconds || 0).toFixed(1)} s`;
+    }
+    downloadUrl(preview.image, animationPreviewName(preview.when_utc));
+    setAnimationStatus(`首帧已保存（${preview.width}×${preview.height} px）`, 'ok');
+    setStatus('动画预览：首帧已保存');
+  } catch (error) {
+    setAnimationStatus('首帧预览失败：' + String(error.message || error), 'error');
+    setStatus('动画预览失败', 'error');
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -7381,6 +7716,15 @@ function init() {
     if (state.animationRunning) finishAnimation(); else startAnimation();
   });
   $('anim-cancel').addEventListener('click', () => { cancelAnimation(); });
+  // 单帧预览: one frame, finished like the file's, handed over as a picture.
+  $('anim-preview').addEventListener('click', () => { previewAnimationFrame(); });
+  // 数据源: which product the frames are made of.  It moves the finest scale the
+  // page can offer, so the 物理分辨率 rows are re-decided with the switch.
+  $('data-source').addEventListener('change', () => {
+    chooseDataSource($('data-source').value);
+  });
+  // 区域高清补片: download only the ground the selection covers.
+  $('patch-download').addEventListener('click', () => { downloadPatch(); });
   // 时间微调：八个步长按钮加中间的「同步设备时间」，都在观测信息里。最粗的一档
   // 是一周：月相一个月走一圈，"把同一相位往前挪一周"比"挪一个月"更接近读者
   // 真正想做的事（后者几乎总是让月相回到原样）。

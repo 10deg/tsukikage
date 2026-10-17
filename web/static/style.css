@@ -1179,6 +1179,34 @@ details.fold > summary {
 details.fold[open] > summary { color: var(--ink); }
 details.fold .grid2 { margin-top: 5px; }
 
+/* 数据源 sits above the advanced knobs and may be wider than a .grid2 cell:
+   the label is a sentence ("LOLA GDR 512 ppd · 59 m") and truncating it removes
+   the only part that made the choice possible. */
+details.fold > label.wide-field {
+  display: block;
+  margin: 6px 0 2px;
+}
+details.fold > label.wide-field > select { width: 100%; max-width: none; }
+details.fold > .hint { margin: 0 0 6px; }
+
+/* 单帧预览: the first frame at file size, as a picture in the pane.  It is a
+   thumbnail of the *file*, so it is allowed to be small -- what it is for is
+   "is this the shot I want", which is answered by the composition and by where
+   the stamp landed, not by 1:1 pixels. */
+.anim-preview {
+  margin: 6px 0 2px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--viewport);
+  overflow: hidden;
+}
+.anim-preview img { display: block; width: 100%; height: auto; }
+.anim-preview figcaption { padding: 3px 5px; margin: 0; }
+/* The row's buttons sit side by side; `.mini` normally floats (it is a corner
+   switch), so this one takes its place in the line instead. */
+#anim-preview { float: none; }
+
 /* The instrument panes: label above field, one rhythm down the column. */
 .train-pane .grid2 > label {
   display: block;

@@ -87,6 +87,7 @@ __all__ = [
     "TerrainSources",
     "found_sources",
     "find_sources",
+    "find_covering_region",
     "RasterPyramid",
     "MoonTerrain",
     "open_terrain",
@@ -116,6 +117,11 @@ ENV_TERRAIN_DIR = "MOONLIB_TERRAIN_DIR"
 #: and it saves them from having to invent a directory and rename anything.
 ENV_DEM = "MOONLIB_DEM"
 ENV_ALBEDO = "MOONLIB_ALBEDO"
+
+#: One global raster may be *chosen* rather than discovered, so the page can
+#: offer a 数据源 menu.  ``None`` means "discover": the finest raster that is
+#: already baked for the pyramid, and the finest on disk for windows.
+_PREFERRED_DEM: Optional[Path] = None
 
 #: A directory qualifies as a terrain directory when it holds this file.
 TOPOGRAPHY_PROBE = "ldem_64.tif"
@@ -219,6 +225,43 @@ def _terrain_search_roots(explicit: Optional[Path]) -> List[Path]:
     return unique
 
 
+def _baked_dem_names(cache: Optional[Path] = None) -> List[str]:
+    """File names of the DEMs that already have a pyramid in the cache."""
+    names: List[str] = []
+    root = terrain_cache_root(cache)
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return names
+    for entry in entries:
+        if not (entry / "manifest.json").is_file():
+            continue
+        # The cache key is ``<dem stem>-<fingerprint>``; the fingerprint has no
+        # dashes, so the last one separates the two even when the file name
+        # does.  A stale key is harmless here: open_terrain() re-bakes on a
+        # fingerprint mismatch, and this list only decides the *default*.
+        names.append(entry.name.rsplit("-", 1)[0])
+    return names
+
+
+def _prefer_baked(
+    found: Sequence[Tuple[Path, float]], cache: Optional[Path] = None
+) -> Tuple[Path, float]:
+    """The finest candidate that is already baked, else the finest candidate.
+
+    Baking a 34 GB product into an 11 GB pyramid is an hour of work, so "a finer
+    raster appeared in the directory" must not be the same event as "the app now
+    spends an hour before its first frame".  Existing pyramids win; choosing a
+    different product is an explicit act (`set_preferred_dem`, the page's
+    数据源 menu, or ``open_terrain(dem=...)``).
+    """
+    baked = set(_baked_dem_names(cache))
+    for path, km in found:
+        if path.stem in baked:
+            return path, km
+    return found[0]
+
+
 def _dem_rank(path: Path) -> Tuple[int, int]:
     """Sort key preferring the highest-resolution ``ldem_<ppd>`` file."""
     stem = path.stem
@@ -274,7 +317,7 @@ def find_sources(
         # the best topography available -- sat unread beside it.
         found = global_dem_sources(search_dir)
         if found:
-            dem_path = found[0][0]
+            dem_path = _prefer_baked(found)[0]
         else:
             dem_path = None
             candidates: List[Path] = []
@@ -500,6 +543,29 @@ class _StrippedTiff:
         return struct.unpack(self._endian + "%d%s" % (count, _TFMT[kind]), data)
 
     # -- public ----------------------------------------------------------
+    def row_window(self, index: int, first: int, last: int) -> np.ndarray:
+        """Samples ``first..last`` of one scanline, without touching the rest.
+
+        A window cut out of a global raster needs a few thousand samples per
+        row out of a hundred and eighty thousand; ``row()`` copies the whole
+        line and the caller then throws 95% of it away.  On the 34 GB 512 px/deg
+        product that difference is 6 s against 1 s for one close-up, and a page
+        full of close-ups turns into minutes of nothing but memory traffic.
+        """
+        first = max(0, int(first))
+        last = min(int(last), self.width)
+        if last <= first:
+            return np.empty(0, dtype=self.dtype)
+        strip = index // self.rows_per_strip
+        start = (self.offsets[strip]
+                 + (index % self.rows_per_strip) * self.row_bytes
+                 + first * self.samples * (self.bits // 8))
+        stop = start + (last - first) * self.samples * (self.bits // 8)
+        values = np.frombuffer(self._raw[start:stop], dtype=self.dtype)
+        if self.samples > 1:
+            return values.reshape(last - first, self.samples)
+        return values
+
     def row(self, index: int) -> np.ndarray:
         """Return scanline *index* as an array of shape ``(width, samples)``."""
         if not 0 <= index < self.height:
@@ -2100,12 +2166,15 @@ def found_sources(**kwargs: Any) -> Optional[TerrainSources]:
 # regional high-resolution windows
 # ---------------------------------------------------------------------------
 def find_region_files(root: Optional[Path] = None) -> List[Path]:
-    """Regional DEM windows available under ``<kernels>/regions``."""
+    """Regional DEM windows: ``<kernels>/regions`` and the download cache."""
     candidates: List[Path] = []
     if root is not None:
         candidates.append(Path(root).expanduser())
     for base in _terrain_search_roots(None):
         candidates.append(base / "regions")
+    # Patches fetched from an online product at run time go to the cache, which
+    # is the one directory the application is guaranteed to be able to write.
+    candidates.append(resolve_cache_dir() / "regions")
     found: List[Path] = []
     for directory in candidates:
         if directory.is_dir():
@@ -2179,6 +2248,47 @@ def load_region_dem(source: Any) -> RasterPyramid:
     )
 
 
+def find_covering_region(
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    *,
+    root: Optional[Path] = None,
+) -> Optional[Tuple[Path, float]]:
+    """Finest regional patch whose bounds contain the box, or ``None``.
+
+    A close-up is exactly the case these patches exist for: a 2-degree window of
+    a 59 m product is a few megabytes, while the global raster behind it is tens
+    of gigabytes.  Returning the *finest* covering patch (rather than the first)
+    is what makes a downloaded SLDEM patch win over a coarser regional one
+    already on disk.
+    """
+    best: Optional[Tuple[Path, float]] = None
+    for path in find_region_files(root):
+        sidecar = path.with_suffix(".json")
+        try:
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            west, east, south, north = (float(v) for v in meta["bounds"])
+            height, width = (int(v) for v in meta["shape"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if width < 2 or height < 2:
+            continue
+        # Longitudes arrive in both conventions: a footprint is measured in
+        # -180..180 and a downloaded patch is cut from a 0-360 product.  Compare
+        # them on the circle rather than by magnitude.
+        patch_span = (east - west) % 360.0
+        box_span = (lon_max - lon_min) % 360.0
+        inside_lon = ((lon_min - west) % 360.0 + box_span) <= patch_span + 1e-9
+        if not (inside_lon and south <= lat_min and lat_max <= north):
+            continue
+        km = math.radians((east - west) / width) * MOON_REFERENCE_RADIUS_KM
+        if best is None or km < best[1]:
+            best = (path, km)
+    return best
+
+
 def open_region(
     source: Any,
     *,
@@ -2211,6 +2321,7 @@ def open_region(
 #: of the file name.  Detecting from the TIFF sample format covers the rest.
 _KNOWN_DEM_SCALES = (
     ("LDEM_118m", 0.5 / 1000.0),      # USGS global LOLA: int16, half-metres
+    ("ldem_512", 0.5 / 1000.0),       # PDS LOLA GDR stitched by tools/fetch_lola_512.py
     ("SLDEM2015", 1.0),               # PDS SLDEM tiles: float32, kilometres
 )
 
@@ -2286,29 +2397,42 @@ def _dem_scale(reader: "_StrippedTiff", path: Path) -> float:
     )
 
 
-def global_dem_sources(
+def set_preferred_dem(path: Optional[Any]) -> Optional[Path]:
+    """Choose one global raster for every later lookup, or go back to discovery.
+
+    ``None`` restores discovery.  The page uses this for its
+    数据源 menu: switching is a decision about *which product* the numbers on
+    screen describe, so it has to reach the bake, the close-up windows and the
+    reported floor, not just the caption.  A path that is not one of the
+    discoverable global rasters is refused rather than silently ignored -- that
+    is the difference between a menu that switched and one that looked like it
+    did.
+    """
+    global _PREFERRED_DEM
+    if path is None:
+        _PREFERRED_DEM = None
+        return None
+    chosen = Path(path).expanduser()
+    if not chosen.is_file():
+        raise TerrainDataError(f"Topography raster not found: {chosen}")
+    _PREFERRED_DEM = chosen
+    return chosen
+
+
+def preferred_dem() -> Optional[Path]:
+    """The raster chosen with :func:`set_preferred_dem`, if any."""
+    return _PREFERRED_DEM
+
+
+def discover_dem_sources(
     search_dir: Optional[Path] = None,
 ) -> List[Tuple[Path, float]]:
-    """Global elevation rasters present locally, finest first.
+    """Every global elevation raster on disk, finest first, preference ignored.
 
-    Returns ``(path, km_per_pixel)`` pairs.  This is the offline substitute for
-    knowing which product is on disk: :func:`open_region_at` and
-    :func:`open_terrain` both take the finest entry they can find.
-
-    Any single-band, equirectangular raster counts, and its pixel size is read
-    from its own width -- so a product whose name says nothing about resolution
-    (USGS ships the 256 px/deg DEM as ``Lunar_LRO_LOLA_Global_LDEM_118m_...``)
-    is ranked on what it holds rather than on what it is called.
+    The menu in the page needs the whole list -- that is what a menu is -- while
+    the lookups need the one that has been chosen out of it.  Splitting the two
+    is what keeps `set_preferred_dem` from hiding the other products.
     """
-    named = os.environ.get(ENV_DEM)
-    if named:
-        # A raster named by environment *is* the answer: the reader asked for
-        # this file, so the finest scale the page offers, the windows the
-        # renderer cuts and the pixels it draws all have to come from it rather
-        # than from whatever else happens to be in the directory beside it.
-        chosen = _measure_global_raster(Path(named).expanduser())
-        if chosen:
-            return chosen
     found: List[Tuple[Path, float]] = []
     for base in _terrain_search_roots(search_dir):
         if not base.is_dir():
@@ -2331,8 +2455,49 @@ def global_dem_sources(
     return found
 
 
-def _measure_global_raster(path: Path) -> List[Tuple[Path, float]]:
-    """``[(path, km_per_pixel)]`` for one raster, or ``[]`` if it is unusable."""
+def global_dem_sources(
+    search_dir: Optional[Path] = None,
+) -> List[Tuple[Path, float]]:
+    """Global elevation rasters in use, finest first.
+
+    Returns ``(path, km_per_pixel)`` pairs.  This is the offline substitute for
+    knowing which product is on disk: :func:`open_region_at` and
+    :func:`open_terrain` both take the finest entry they can find.
+
+    Any single-band, equirectangular raster counts, and its pixel size is read
+    from its own width -- so a product whose name says nothing about resolution
+    (USGS ships the 256 px/deg DEM as ``Lunar_LRO_LOLA_Global_LDEM_118m_...``)
+    is ranked on what it holds rather than on what it is called.
+
+    A raster chosen with :func:`set_preferred_dem` is the only entry returned:
+    the renderer, the reported floor and the close-up windows then all describe
+    the product the reader picked.
+    """
+    if _PREFERRED_DEM is not None:
+        measured = _measure_global_raster(_PREFERRED_DEM, whole_sphere=True)
+        if measured:
+            return measured
+    named = os.environ.get(ENV_DEM)
+    if named:
+        # A raster named by environment *is* the answer: the reader asked for
+        # this file, so the finest scale the page offers, the windows the
+        # renderer cuts and the pixels it draws all have to come from it rather
+        # than from whatever else happens to be in the directory beside it.
+        chosen = _measure_global_raster(Path(named).expanduser())
+        if chosen:
+            return chosen
+    return discover_dem_sources(search_dir)
+
+
+def _measure_global_raster(
+    path: Path, *, whole_sphere: bool = False
+) -> List[Tuple[Path, float]]:
+    """``[(path, km_per_pixel)]`` for one raster, or ``[]`` if it is unusable.
+
+    *whole_sphere* additionally requires the equirectangular 2:1 shape, which is
+    what makes a file a *global* product rather than a regional patch that
+    happens to be single-band.
+    """
     if not path.is_file():
         return []
     try:
@@ -2341,6 +2506,8 @@ def _measure_global_raster(path: Path) -> List[Tuple[Path, float]]:
         return []
     try:
         if reader.samples != 1 or reader.width < 2 or reader.height < 2:
+            return []
+        if whole_sphere and (reader.width < 360 or reader.height * 2 != reader.width):
             return []
         km = math.radians(360.0 / reader.width) * MOON_REFERENCE_RADIUS_KM
     finally:
@@ -2397,15 +2564,17 @@ def extract_region(
             )
         step = max(1, int(stride))
         rows = list(range(row0, row1, step))
-        columns = slice(col0, col1, step)
         block = np.empty((len(rows), len(range(col0, col1, step))), dtype=np.float32)
         nodata = None if reader.nodata is None else reader.nodata * scale
         for offset, row_index in enumerate(rows):
-            line = np.asarray(reader.row(row_index), dtype=np.float32)
+            line = np.asarray(reader.row_window(row_index, col0, col1),
+                              dtype=np.float32)
             line = line if line.ndim == 1 else line[:, 0]
             if nodata is not None:
                 line = _fill_nodata(line, nodata)
-            block[offset] = line[columns]
+            # The window starts at col0 now, so the stride is applied to the
+            # window rather than to a whole row that was copied and discarded.
+            block[offset] = line[::step] if step > 1 else line
         # The bounds keep the source's degrees: the decimated grid covers the
         # same box, it just has fewer samples across it, so RasterPyramid
         # derives the coarser pixel spacing from the reduced width by itself.

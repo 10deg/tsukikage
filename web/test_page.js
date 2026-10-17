@@ -238,8 +238,16 @@ function makeElement(id, spec) {
       // A real <select> adopts an appended <option>, and a menu the page builds
       // at run time has to be visible to `select.options` or every check of it
       // reads an empty list.
+      // A real <select>.options includes the options inside its <optgroups>:
+      // the page groups 数据源 into 本地/在线, and a stub that only counted
+      // direct children would call that menu empty.
       if (this.tagName === 'SELECT' && child.tagName === 'OPTION') {
         this.options.push(child);
+      }
+      if (this.tagName === 'SELECT' && child.tagName === 'OPTGROUP') {
+        for (const option of child.children) {
+          if (option.tagName === 'OPTION') this.options.push(option);
+        }
       }
       return child;
     },
@@ -411,8 +419,14 @@ function planFor(body) {
 function respond(url, body) {
   if (url === '/api/health') {
     return { ok: true, limits: { preview_px: 5000, output_px: 8192, disk_px: 10000,
-                                 min_px: 64, terrain_km_per_px: 0.118,
-                                 label_outline_px: 9 } };
+                                 min_px: 64, terrain_km_per_px: 0.11845058759433393,
+                                 label_outline_px: 9 },
+             data_sources: SOURCES };
+  }
+  if (url === '/api/source') {
+    const picked = SOURCES.sources.find((item) => item.id === body.id) || SOURCES.sources[1];
+    return { selected: picked.id, sources: SOURCES.sources,
+             floor_km_per_px: picked.km_per_px, pyramid: 'LDEM_118m.tif' };
   }
   if (url === '/api/features') {
     return { features: FEATURES, count: FEATURES.length,
@@ -496,7 +510,21 @@ function respond(url, body) {
              image, image_raw: body.raw ? image : undefined };
   }
   if (url === '/api/settings/save') return { saved: { name: 'x', bytes: 10 }, files: [] };
-  if (url === '/api/animation') return { id: '3', state: 'running', total: 8 };
+  if (url === '/api/patch') {
+    return { id: '1', product: body.product, name: 'patch',
+             bounds: [345.0, 356.0, 48.0, 55.0], megabytes: 140.9 };
+  }
+  if (/^\/api\/patch\/\d+$/.test(url)) {
+    return { id: '1', state: 'done', progress: 1, message: '4777×7375 px',
+             bytes: 140000000, bounds: [345, 356, 48, 55], error: null };
+  }
+  if (url === '/api/animation') {
+    if (body.preview) {
+      return { preview: { image: 'data:image/png;base64,preview', width: 96, height: 72,
+                          when_utc: '2026-05-25T15:30:00+00:00', seconds: 0.4 } };
+    }
+    return { id: '3', state: 'running', total: 8 };
+  }
   if (url.startsWith('/api/animation/')) {
     return { id: '3', state: 'done', frames: 8, total: 8, progress: 1,
              seconds: 0.67, fps: 12, url: '/api/animation/3/file' };
@@ -507,6 +535,23 @@ function respond(url, body) {
   }
   return { error: 'no route ' + url };
 }
+
+/* What /api/health says about elevation products: two local rasters at 59 m and
+   118 m, plus one online product that is not on this machine. */
+const SOURCES = {
+  sources: [
+    { id: '/kernels/ldem_512.tif', name: 'ldem_512.tif', km_per_px: 0.0592252938,
+      metres_per_px: 59.2, pixels_per_degree: 512, bytes: 34e9, mtime: 1 },
+    { id: '/kernels/LDEM_118m.tif', name: 'LDEM_118m.tif', km_per_px: 0.11845058759433393,
+      metres_per_px: 118.5, pixels_per_degree: 256, bytes: 8.5e9, mtime: 1 },
+  ],
+  selected: '/kernels/LDEM_118m.tif',
+  floor_km_per_px: 0.11845058759433393,
+  online: [
+    { id: 'sldem2015-512', label: 'SLDEM2015 512 ppd', pixels_per_degree: 512,
+      metres_per_px: 59.2, available: false, note: '需要拼接', fetch: '见文档' },
+  ],
+};
 
 const fetchCalls = [];
 async function fetchStub(url, options) {
@@ -1396,6 +1441,28 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       !/\d{2}:\d{2}/.test(document.getElementById('anim-status').textContent),
       `${document.getElementById('anim-progress-bar').style.width} / ` +
       document.getElementById('anim-status').textContent);
+    /* 单帧预览: the same request with `preview`, answered by one finished frame,
+       saved as a picture -- so the reader can see the opener without waiting
+       out the run. */
+    const previewBefore = fetchCalls.filter((c) => c.url === '/api/animation').length;
+    fire('anim-preview', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const previewCall = fetchCalls.filter((c) => c.url === '/api/animation').pop();
+    check('单帧预览 asks the animation route for one frame',
+      fetchCalls.filter((c) => c.url === '/api/animation').length === previewBefore + 1 &&
+      previewCall.body.preview === true &&
+      !!previewCall.body.start && !!previewCall.body.end,
+      JSON.stringify({ preview: previewCall.body.preview }));
+    check('the frame it comes back with is shown in the pane',
+      document.getElementById('anim-preview-box').hidden === false &&
+      /^data:image\/png/.test(document.getElementById('anim-preview-image').src),
+      `${document.getElementById('anim-preview-box').hidden} / ` +
+      document.getElementById('anim-preview-image').src);
+    check('and captioned with its size and instant',
+      /96×72/.test(document.getElementById('anim-preview-note').textContent) &&
+      /2026-05-25/.test(document.getElementById('anim-preview-note').textContent),
+      document.getElementById('anim-preview-note').textContent);
+
     const cancels = fetchCalls.filter((c) => c.url === '/api/cancel').length;
     fire('anim-cancel', 'click');
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -2084,6 +2151,73 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('out-kmpx-preset', 'disk');
     fire('out-kmpx-preset', 'change');
     T.LIMITS.terrain_km_per_px = saved;
+  }
+
+  console.log('');
+  console.log('区域高清补片：只下选框盖住的那一块');
+  {
+    const select = document.getElementById('patch-product');
+    check('the patch menu lists the online products',
+      [...select.options].some((o) => /SLDEM2015/.test(o.textContent)),
+      [...select.options].map((o) => o.textContent).join(' | '));
+    set('patch-product', 'sldem2015-512');
+    const before = fetchCalls.filter((c) => c.url === '/api/patch').length;
+    fire('patch-download', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const call = fetchCalls.filter((c) => c.url === '/api/patch').pop();
+    check('下载此区域 posts the selection, not the whole Moon',
+      fetchCalls.filter((c) => c.url === '/api/patch').length === before + 1 &&
+      call.body.product === 'sldem2015-512' &&
+      !!call.body.selection && !!call.body.when,
+      JSON.stringify({ product: call.body.product,
+                       selection: call.body.selection && Object.keys(call.body.selection) }));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    check('and the pane reports where the patch landed',
+      /就绪|MB/.test(document.getElementById('patch-note').textContent),
+      document.getElementById('patch-note').textContent);
+  }
+
+  console.log('');
+  console.log('数据源：选了更细的产品，物理分辨率才放开更细的档位');
+  {
+    const select = document.getElementById('data-source');
+    const options = [...select.options];
+    const fine = () => [...document.getElementById('out-kmpx-preset').options]
+      .find((option) => option.value === '0.06');
+    check('the menu lists every local product',
+      options.some((o) => /ldem_512/.test(o.textContent)) &&
+      options.some((o) => /LDEM_118m/.test(o.textContent)),
+      options.map((o) => o.textContent).join(' | '));
+    check('and names the one the frames are made of',
+      select.value === '/kernels/LDEM_118m.tif', select.value);
+    check('the online product is listed and cannot be picked',
+      options.some((o) => /SLDEM2015/.test(o.textContent) && o.disabled === true),
+      options.filter((o) => /SLDEM2015/.test(o.textContent))
+        .map((o) => `${o.textContent}:${o.disabled}`).join(' | '));
+    check('at 118 m the 60 m row is greyed out',
+      !!fine() && fine().disabled === true, !!(fine() && fine().disabled));
+
+    set('data-source', '/kernels/ldem_512.tif');
+    fire('data-source', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const call = fetchCalls.filter((c) => c.url === '/api/source').pop();
+    check('picking one asks the server to switch',
+      !!call && call.body.id === '/kernels/ldem_512.tif', JSON.stringify(call && call.body));
+    check('the floor follows the new product',
+      Math.abs(T.LIMITS.terrain_km_per_px - 0.0592252938) < 1e-9,
+      T.LIMITS.terrain_km_per_px);
+    check('and the 60 m row lights up', fine().disabled === false, fine().disabled);
+    check('the note says what is now in use, and what the disk still uses',
+      /59\.2 m\/px/.test(document.getElementById('data-source-note').textContent) &&
+      /整月面仍用 LDEM_118m\.tif/.test(document.getElementById('data-source-note').textContent),
+      document.getElementById('data-source-note').textContent);
+
+    set('data-source', '/kernels/LDEM_118m.tif');
+    fire('data-source', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    check('switching back greys the finer rows again',
+      fine().disabled === true && Math.abs(T.LIMITS.terrain_km_per_px - 0.11845058759433393) < 1e-9,
+      `${fine().disabled} / ${T.LIMITS.terrain_km_per_px}`);
   }
 
   console.log('');

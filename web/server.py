@@ -106,6 +106,46 @@ MIN_PX = 64
 #: raster is on disk; when one is, :func:`terrain_km_per_px` measures it.
 TERRAIN_KM_PER_PX = 0.118
 
+#: Ground kilometres per degree on the 1737.4 km sphere: what turns a raster's
+#: width into pixels per degree, and back.
+_KM_PER_DEGREE = math.radians(1.0) * 1737.4
+
+#: Elevation products the page can name but this machine does not have.  The
+#: menu lists them so the reader can see what a source *would* buy and what it
+#: costs to fetch; selecting one is refused until it is on disk (its
+#: ``pixels_per_degree`` matches a local raster).  Both are 512 px/deg, the step
+#: that halves the close-up pixel from 118 m to 59 m.
+ONLINE_DEM_SOURCES = (
+    {
+        "id": "sldem2015-512",
+        "name": "SLDEM2015 512 ppd",
+        "label": "SLDEM2015 · 辉夜号立体填缝",
+        "pixels_per_degree": 512,
+        "metres_per_px": 59.2,
+        "note": "熔岩间 1–4 km 的轨道缝由辉夜号 TC 立体像对补测，"
+                "跨轨细节比纯 LOLA 更好。34 GB，需自行拼接成全球 TIFF。",
+        "fetch": "见 docs/07-高分辨率DEM调研.md §2",
+    },
+    {
+        "id": "lola-gdr-512",
+        "name": "LOLA GDR 512 ppd",
+        "label": "LOLA GDR · PDS 512 px/deg",
+        "pixels_per_degree": 512,
+        "metres_per_px": 59.2,
+        "note": "同一份 LOLA 数据的 512 格点版本，99.5% 的格点有实测点。",
+        "fetch": "./.venv/bin/python tools/fetch_lola_512.py",
+    },
+    {
+        "id": "lola-118m",
+        "name": "LOLA LDEM 118 m",
+        "label": "LOLA · USGS 256 px/deg 全球",
+        "pixels_per_degree": 256,
+        "metres_per_px": 118.5,
+        "note": "本仓库一直用的那一份（2014 年解算）。",
+        "fetch": "./.venv/bin/python tools/fetch_lola_global.py",
+    },
+)
+
 #: Animations are a sequence of renders, so they run as a background job and the
 #: page polls: a whole lunation at 1000 px is minutes, which no HTTP request can
 #: wait for.  The finished MP4 is kept under the cache directory, and only the
@@ -486,6 +526,61 @@ def parse_observer(when: Dict[str, Any]) -> moonlib_s.Observer:
 # ---------------------------------------------------------------------------
 # the two things the page can ask for
 # ---------------------------------------------------------------------------
+def _baked_dem_sources() -> Dict[str, float]:
+    """``{source path: dem detail}`` for every pyramid already on disk.
+
+    A pyramid costs gigabytes and, from a 34 GB product, the better part of an
+    hour.  Which ones exist is therefore part of "what this installation is
+    built around": the app keeps drawing from the product it already has a cache
+    for and only switches when the reader asks.
+    """
+    root = moonlib_s.terrain.terrain_cache_root()
+    found: Dict[str, float] = {}
+    for manifest in sorted(root.glob("*/manifest.json")):
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            source = payload["source"]["dem"]["path"]
+            detail = int(payload["request"]["dem_detail"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        found[str(Path(source))] = float(detail)
+    return found
+
+
+def _dem_source_file() -> Path:
+    """Where the chosen product is remembered between runs."""
+    return moonlib_s.cache_dir() / "dem_source.json"
+
+
+def _remembered_source() -> Optional[Path]:
+    """The product the reader picked last time, if it is still on disk."""
+    try:
+        chosen = Path(str(json.loads(
+            _dem_source_file().read_text(encoding="utf-8"))["id"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return chosen if any(path == chosen for path, _ in moonlib_s.discover_dem_sources()) else None
+
+
+def _pyramid_dem_source() -> Optional[Path]:
+    """The product the full-disk pyramid is built from.
+
+    The finest one that already has a pyramid, else the finest there is.  This
+    is deliberately *not* the reader's 数据源 choice: switching source must not
+    mean "the next start spends an hour baking 34 GB", and a close-up reads its
+    pixels straight from the chosen product anyway.  Baking a different source
+    stays an explicit act -- drop the file in and run the terrain bake.
+    """
+    sources = moonlib_s.discover_dem_sources()
+    if not sources:
+        return None
+    baked = _baked_dem_sources()
+    for path, _km in sources:
+        if str(path) in baked:
+            return path
+    return sources[0][0]
+
+
 class MoonService:
     """Holds the terrain and the view cache, so requests stay cheap."""
 
@@ -498,6 +593,14 @@ class MoonService:
         # meant for must not stop the next one.
         self._cancel_event = threading.Event()
         self._terrain = None
+        #: Which product the full-disk pyramid is drawn from, and (through the
+        #: library preference) the one close-up windows are cut from.  Starts at
+        #: the product this machine already has a pyramid for, so dropping a
+        #: finer raster into ``kernels/`` does not silently re-bake the world.
+        self._dem_source = _pyramid_dem_source()
+        # The 数据源 menu chooses what *windows and the reported floor* are made
+        # of; the pyramid above is a separate, slower decision.
+        moonlib_s.set_preferred_dem(_remembered_source() or self._dem_source)
         self._views: Dict[Tuple[str, float, float], Any] = {}
         self._terrain_seconds = 0.0
         self.settings = SettingsStore(settings_dir or DEFAULT_SETTINGS_DIR)
@@ -529,15 +632,106 @@ class MoonService:
         self._animations: Dict[str, Dict[str, Any]] = {}
         self._animation_seq = 0
         self._animation_lock = threading.Lock()
+        #: Region downloads (数据源 → 下载此区域).  Small, guarded by its own
+        #: lock, and keyed the same way the animations are.
+        self._patches: Dict[str, Dict[str, Any]] = {}
+        self._patch_seq = 0
+        self._patch_lock = threading.Lock()
         self._counter = 0
 
     def terrain(self):
         with self._lock:
             if self._terrain is None:
                 started = time.time()
-                self._terrain = moonlib_s.open_terrain()
+                self._terrain = moonlib_s.open_terrain(dem=self._dem_source)
                 self._terrain_seconds = time.time() - started
             return self._terrain
+
+    # -- 数据源 -----------------------------------------------------------
+    def data_sources(self) -> Dict[str, Any]:
+        """Every global DEM this install can draw, plus the ones it knows about.
+
+        Discovery, not a hard-coded list: the menu shows what actually parsed as
+        a global raster, so `ldem_512.tif` appearing after the download is the
+        same event as it appearing here.  ``selected`` is the product in use --
+        the one chosen last time, or the one this machine already has a pyramid
+        for.  ``online`` names the products that are *not* on this machine and
+        says how to get them; a page that offers a source it cannot draw is
+        worse than one that says "run this".
+        """
+        found = moonlib_s.discover_dem_sources()
+        chosen = moonlib_s.preferred_dem()
+        sources = []
+        for path, km in found:
+            stat = path.stat()
+            sources.append({
+                "id": str(path),
+                "name": path.name,
+                "km_per_px": float(km),
+                "metres_per_px": km * 1000.0,
+                "pixels_per_degree": int(round(_KM_PER_DEGREE / km)),
+                "bytes": int(stat.st_size),
+                "mtime": int(stat.st_mtime),
+            })
+        active = moonlib_s.global_dem_sources()
+        local_ppd = {item["pixels_per_degree"] for item in sources}
+        online = [
+            {**entry, "available": entry["pixels_per_degree"] in local_ppd}
+            for entry in ONLINE_DEM_SOURCES
+        ]
+        return {
+            "sources": sources,
+            "selected": str(chosen) if chosen is not None else None,
+            # What the page may offer as the finest scale: the resolution of the
+            # product in use, which is what a render would actually have.
+            "floor_km_per_px": float(active[0][1]) if active else None,
+            "online": online,
+        }
+
+    def set_data_source(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Switch the DEM every later frame is drawn from.
+
+        ``None``/``"auto"`` goes back to the finest raster on disk.  A path that
+        is not one of the discovered global rasters is refused: accepting it
+        would leave the page claiming a source it is not drawing.
+        """
+        wanted = request.get("id")
+        if wanted in (None, "", "auto"):
+            chosen = moonlib_s.set_preferred_dem(_pyramid_dem_source())
+        else:
+            available = {path.resolve() for path, _ in moonlib_s.discover_dem_sources()}
+            candidate = Path(str(wanted)).expanduser().resolve()
+            if candidate not in available:
+                raise moonlib_s.MoonlibError(
+                    f"数据源不在可用列表里：{candidate.name}"
+                )
+            chosen = moonlib_s.set_preferred_dem(candidate)
+        # The *pyramid* is deliberately left alone.  A full-disk frame at the
+        # page's 10000 px ceiling is 370 m/px and only ever samples the 474 m
+        # level, so rebuilding an 11 GB pyramid for a finer product would buy
+        # nothing and cost an hour; what a finer product does buy is close-up
+        # windows, which are cut straight from the source file and need no
+        # pyramid at all.  Choosing a source therefore changes what close-ups
+        # and the 物理分辨率 floor are made of, immediately.
+        with self._lock:
+            self._views.clear()
+        try:
+            _dem_source_file().parent.mkdir(parents=True, exist_ok=True)
+            _dem_source_file().write_text(
+                json.dumps({"id": str(chosen) if chosen is not None else None,
+                            "name": chosen.name if chosen is not None else None},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:  # pragma: no cover - a read-only cache is not fatal
+            pass
+        payload = self.data_sources()
+        return {"selected": str(chosen) if chosen is not None else None,
+                "sources": payload["sources"],
+                "floor_km_per_px": payload["floor_km_per_px"],
+                # What the full disk will keep drawing from: a statement about
+                # the picture on screen, which the source choice does not move.
+                "pyramid": Path(self._dem_source).name if self._dem_source else None}
 
     def catalogue(self) -> Tuple[Any, ...]:
         """Named landforms, read once: the gazetteer is 9 000 rows of CSV."""
@@ -1064,6 +1258,114 @@ class MoonService:
             "events": [event.to_dict() for event in found],
         }
 
+    # -- 区域补片 ---------------------------------------------------------
+    def patch_download(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch a high-resolution patch covering the current selection.
+
+        This is the answer to "the global product is 59 m at best, and I am
+        looking at one crater": a few hundred megabytes of the finer product,
+        clipped to the frame the reader is actually looking at, instead of tens
+        of gigabytes of the whole Moon.  The download runs in the background --
+        a two-degree patch of SLDEM2015 is a minute of HTTP ranges -- and the
+        page polls :meth:`patch_status`.
+        """
+        from moonlib_s import online
+
+        product = str(request.get("product") or "")
+        if product not in {item["id"] for item in online.catalogue()}:
+            raise moonlib_s.MoonlibError(
+                f"未知的在线数据源：{product!r}；可选 "
+                f"{', '.join(item['id'] for item in online.catalogue())}"
+            )
+        selection = request.get("selection") or {}
+        lon = _f(selection, "lon", 0.0)
+        lat = _f(selection, "lat", 51.0)
+        fov = _f(selection, "fov_radius_arcsec", 30.0)
+        if not (0.5 <= fov <= 3600.0):
+            raise moonlib_s.MoonlibError(
+                f"选框视场半径要在 0.5–3600″ 之间（收到 {fov}）。"
+            )
+        output = request.get("output") or {}
+        width = int(_f(output, "width", 600))
+        height = int(_f(output, "height", width))
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        view = self.view(when.get("at") or None, site)
+
+        footprint = moonlib_s.selection_footprint(
+            view, lon, lat, fov_radius_arcsec=fov, width=width, height=height,
+            rotation_deg=_f(selection, "rotation_deg", 0.0),
+            terrain=self.terrain(),
+        )
+        if footprint is None:  # pragma: no cover - the frame misses the disk
+            raise moonlib_s.MoonlibError("选框没有落在这张月面上。")
+        bounds = online.patch_bounds_for(
+            footprint["lon_min"], footprint["lon_max"],
+            footprint["lat_min"], footprint["lat_max"],
+            margin_deg=moonlib_s.moonview.WINDOW_MARGIN_DEG,
+        )
+        ppd = online.CATALOGUE[product]["pixels_per_degree"]
+        megabytes = (ppd ** 2 * (bounds[1] - bounds[0]) * (bounds[3] - bounds[2])
+                     * 4 / 1e6)
+        lon_tag = f"{'e' if lon >= 0 else 'w'}{abs(lon):.2f}".replace(".", "p")
+        lat_tag = f"{'n' if lat >= 0 else 's'}{abs(lat):.2f}".replace(".", "p")
+        name = f"{product}_{lon_tag}_{lat_tag}"
+        destination = moonlib_s.terrain.resolve_cache_dir() / "regions" / (name + ".npy")
+
+        with self._patch_lock:
+            self._patch_seq += 1
+            job_id = str(self._patch_seq)
+            self._patches[job_id] = {
+                "id": job_id,
+                "state": "running",
+                "product": product,
+                "name": name,
+                "progress": 0.0,
+                "message": "准备中",
+                "bounds": [round(v, 4) for v in bounds],
+                "bytes": None,
+                "error": None,
+            }
+            job = self._patches[job_id]
+        thread = threading.Thread(
+            target=self._run_patch, args=(job, product, bounds, destination, name),
+            daemon=True,
+        )
+        thread.start()
+        return {"id": job_id, "product": product, "name": name,
+                "bounds": job["bounds"], "megabytes": round(megabytes, 1)}
+
+    def _run_patch(self, job: Dict[str, Any], product: str, bounds: tuple,
+                   destination: Path, name: str) -> None:
+        from moonlib_s import online
+
+        def progress(fraction: float, message: str) -> None:
+            with self._patch_lock:
+                job["progress"] = float(fraction)
+                job["message"] = message
+
+        try:
+            sidecar = online.fetch_patch(
+                product, bounds[0], bounds[1], bounds[2], bounds[3],
+                destination, progress=progress, name=name,
+            )
+            with self._patch_lock:
+                job.update(state="done", progress=1.0,
+                           message=f"{sidecar['shape'][1]}×{sidecar['shape'][0]} px",
+                           bytes=int(destination.stat().st_size),
+                           path=str(destination), bounds=sidecar["bounds"])
+        except Exception as error:  # pragma: no cover - surfaced to the page
+            with self._patch_lock:
+                job.update(state="failed", error=str(error),
+                           message=f"下载失败：{error}")
+
+    def patch_status(self, job_id: str) -> Dict[str, Any]:
+        with self._patch_lock:
+            job = self._patches.get(job_id)
+            if job is None:
+                raise moonlib_s.MoonlibError(f"没有这个下载任务：{job_id}")
+            return dict(job)
+
     # -- animation --------------------------------------------------------
     def animation(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Start an MP4 animation in the background and hand back its id.
@@ -1157,6 +1459,16 @@ class MoonService:
         atmosphere = dict(request.get("atmosphere") or {})
         train = parse_train(request) if apply_processing else None
 
+        # 单帧预览: the same request, one frame out of it instead of a job.  It
+        # is answered here rather than by a second endpoint so the preview and
+        # the file go through one parse -- a preview that accepted parameters
+        # the run would reject (or the other way round) is worse than none.
+        if bool(request.get("preview")):
+            return self._animation_preview(
+                site, start, end, step, settings, region, train, atmosphere,
+                processing, smooth_px, timestamp, annotations, scale_to,
+            )
+
         # The cancel flag is made *here*, before the thread exists: 终止 pressed
         # the instant after 开始动画 has to reach this job, and a flag created
         # inside the worker would leave that press pointing at the frame before
@@ -1199,6 +1511,62 @@ class MoonService:
             self._render_lock.release()
             raise
         return {"id": job_id, "state": "running", "total": int(total)}
+
+    def _animation_preview(
+        self, site: Any, start: str, end: str, step: float, settings: Any,
+        region: Optional[Dict[str, Any]], train: Any, atmosphere: Dict[str, Any],
+        processing: Dict[str, Any], smooth_px: float,
+        timestamp: Optional[Dict[str, Any]], annotations: Dict[str, Any],
+        scale_to: Optional[Any],
+    ) -> Dict[str, Any]:
+        """The run's first frame, finished exactly the way the file's would be.
+
+        The whole range is handed to the generator and only the first frame is
+        taken, because that is what makes the preview the *video's* first frame:
+        with 当前选框 the run cuts one window covering every frame, so a preview
+        that asked for "just this instant" could sample a different window than
+        the file will.
+
+        HDR is not previewed as HDR -- a PNG cannot carry PQ -- so the reader
+        sees the SDR tone map the still viewer would show.
+        """
+        started = time.time()
+        frames = moonlib_s.animation_frames(
+            site, start, end, step, settings=settings, region=region,
+            terrain=self.terrain(), graceful=True,
+        )
+        with self._render_slot():
+            frame = next(iter(frames))
+        processor = (
+            _frame_processor(train, atmosphere or {}, processing or {}, "preview")
+            if train is not None else None
+        )
+        painter = (
+            _AnimationLabelPainter(self, annotations or {}, settings, region,
+                                   processing if train is not None else None)
+            if annotations and annotations.get("on") else None
+        )
+        pixels = processor(frame) if processor is not None else None
+        image = pixels if pixels is not None else frame.render.image
+        from moonlib_s.anim import finish_frame
+
+        finished = finish_frame(
+            _frame_carrier(frame, image),
+            scale_to=scale_to, smooth_px=smooth_px, timestamp=timestamp,
+            annotate=painter,
+        )
+        array = np.asarray(finished)
+        if array.dtype == np.uint8:
+            array = array.astype(np.float32) / 255.0
+        return {
+            "preview": {
+                "image": _data_url(encode_png(array)),
+                "width": int(array.shape[1]),
+                "height": int(array.shape[0]),
+                "when_utc": str(frame.when_utc),
+                "seconds": time.time() - started,
+            }
+        }
 
     def _animation_dir(self) -> Path:
         directory = moonlib_s.cache_dir() / "animations"
@@ -1273,24 +1641,20 @@ class MoonService:
                             job["message"] = frame.when_utc
                             job["progress"] = job["frames"] / max(1, job["total"])
                     pixels = processor(frame) if processor is not None else None
-                    if painter is not None:
-                        # The painter needs the frame's camera and instant even
-                        # after 后期处理 has replaced the pixels, so both travel
-                        # in a frame-shaped carrier the encoder understands.
-                        image = pixels if pixels is not None else frame.render.image
-                        yield SimpleNamespace(
-                            et=frame.et,
-                            when_utc=frame.when_utc,
-                            render=SimpleNamespace(
-                                image=image,
-                                view=frame.render.view,
-                                region=frame.render.region,
-                            ),
-                        )
-                    elif pixels is not None:
-                        yield pixels
-                    else:
+                    if pixels is None and painter is None:
+                        # Untouched frame: hand the encoder the real thing, so
+                        # HDR keeps its linear components and everything else
+                        # keeps the instant.
                         yield frame
+                        continue
+                    # Anything that replaced or drew into the pixels still has to
+                    # carry the frame's camera and instant: 后期处理 replaces the
+                    # image, the painter needs the view, and a timestamp needs
+                    # `when_utc` -- yielding a bare array here is what made
+                    # 「含时间戳」 fail whenever it was the only per-frame option
+                    # on.  The carrier is the shape `anim._display_frame` reads.
+                    image = pixels if pixels is not None else frame.render.image
+                    yield _frame_carrier(frame, image)
 
             info = moonlib_s.write_animation(path, counted(), fps=fps, hdr=hdr,
                                            stops=hdr_stops, scale_to=scale_to,
@@ -1630,6 +1994,24 @@ def _utc_iso(timestamp: float) -> str:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def _frame_carrier(frame: Any, image: Any) -> Any:
+    """Wrap post-processed pixels back into a frame-shaped object.
+
+    The encoder reads the instant, the camera and the pixels off the item; a
+    bare array has only the third, which is why 含时间戳 used to fail the moment
+    后期处理 replaced the image.  One constructor for both the run and the
+    preview, so the two cannot drift.
+    """
+    render = SimpleNamespace(image=image)
+    view = getattr(getattr(frame, "render", None), "view", None)
+    region = getattr(getattr(frame, "render", None), "region", None)
+    render.view = view
+    render.region = region
+    return SimpleNamespace(et=getattr(frame, "et", None),
+                           when_utc=getattr(frame, "when_utc", None),
+                           render=render)
 
 
 def _frame_processor(
@@ -2156,11 +2538,18 @@ class Handler(BaseHTTPRequestHandler):
             }.get(suffix, "application/octet-stream")
             return self._file(STATIC / name, kind)
         if path == "/api/health":
-            return self._json(200, {"ok": True, "limits": self.service.limits()})
+            return self._json(200, {
+                "ok": True,
+                "limits": self.service.limits(),
+                "data_sources": self.service.data_sources(),
+            })
         if path == "/api/features":
             return self._json(200, self.service.features())
         if path == "/api/settings":
             return self._json(200, self.service.settings.list())
+        match = re.fullmatch(r"/api/patch/(\d+)", path)
+        if match:
+            return self._json(200, self.service.patch_status(match.group(1)))
         match = re.fullmatch(r"/api/animation/(\d+)(/file)?", path)
         if match:
             job_id = match.group(1)
@@ -2235,6 +2624,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.events(request))
             if path == "/api/animation":
                 return self._json(200, self.service.animation(request))
+            if path == "/api/source":
+                return self._json(200, self.service.set_data_source(request))
+            if path == "/api/patch":
+                return self._json(200, self.service.patch_download(request))
             if path == "/api/hdr/jpeg":
                 return self._json(200, self.service.hdr_jpeg(request))
             if path == "/api/settings/save":

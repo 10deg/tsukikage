@@ -193,6 +193,20 @@ check('the landform search lives in the always-visible label bar',
 check('the geometric marks lay out four to a row',
   /\.disk-head \.mark-bar\s*\{[^}]*grid-template-columns:\s*repeat\(4/
     .test(css));
+/* 锐化半径 is an unsharp mask, and past 4 px it stops sharpening and starts
+   redrawing large-scale shading; the slider's own range says so. */
+check('锐化半径 stops at 4 px',
+  /id="sharpen-radius"[^>]*min="0"[^>]*max="4"/.test(html));
+/* 单帧预览 is a smaller button to the right of 终止: it answers "what does the
+   first frame look like" without waiting for the whole run. */
+check('单帧预览 comes right after 终止',
+  /id="anim-cancel">终止<\/button>[\s\S]{0,600}?id="anim-preview"/.test(html) &&
+  /class="ghost mini"\s+id="anim-preview"/.test(html));
+/* 数据源 is the one control in 高级设置 that decides what the rest can do, so it
+   sits above the knobs rather than beside them. */
+check('数据源 is the first field in the advanced block',
+  /<summary>高级设置[\s\S]{0,900}?id="data-source"/.test(html) &&
+  /id="data-source-note"/.test(html));
 /* 饱和度 may now be pushed above 1; the cap is 3 in the markup, and the
    library's own finish_image() was extended to honour it. */
 check('saturation can be boosted above 1',

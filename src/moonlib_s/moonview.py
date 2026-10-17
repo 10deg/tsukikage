@@ -90,6 +90,7 @@ __all__ = [
     "VISUAL_ASINH_SOFTENING",
     "moon_magnitude",
     "view_summary",
+    "selection_footprint",
 ]
 
 #: Mean apparent angular radius of the Sun, degrees.  Used for the penumbra.
@@ -213,6 +214,22 @@ _TINY = 1e-12
 #: texel cannot report a self-intersection, small enough to shorten a grazing
 #: shadow by only a kilometre or so.
 _SHADOW_BIAS_KM = 1.5e-3
+
+#: Tallest relief the moon offers, above the reference sphere: a shadow cannot
+#: reach further than this allows at a given sun elevation.
+_SHADOW_RELIEF_KM = 9.0
+#: How much a shadow ray may rise between two samples, as a floor (metres of
+#: height, i.e. metres of boundary quantisation divided by tan(elevation)) and
+#: as a fraction of the frame's own pixel size.
+_SHADOW_MIN_RISE_KM = 0.040
+_SHADOW_RISE_PER_PIXEL = 0.5
+#: ...and a ceiling, so a coarse frame cannot pick a step so long that a whole
+#: hill falls between two samples (2.4 km pixels at a grazing sun is the case:
+#: half a pixel there is a kilometre of height, and nothing is resolved).
+_SHADOW_MAX_RISE_KM = 0.150
+#: Hard ceiling on samples per ray, so a pathological elevation cannot turn one
+#: frame into an hour of marching.
+_MAX_SHADOW_SAMPLES = 512
 
 #: Rays traced per band.  This, not the frame size, is what bounds peak memory:
 #: a 8000x8000 frame at 2x2 samples is 256 million rays, which used to be
@@ -1273,33 +1290,52 @@ def _occlusion(
 
     here = points[subset]
     along = directions if directions.ndim == 1 else directions[subset]
-    del sin_elevation
-    # The first sample sits one shadow texel away; self-intersection from a
-    # bilinear sample of a sloping texel is handled by a height bias below
-    # rather than by pushing the first sample far away, which at a grazing sun
-    # would skip the near field entirely.
-    first = np.clip(np.full(subset.size, pixel_km), 1e-3, 0.4 * max_range_km)
-    growth = (max_range_km / first) ** (1.0 / (steps - 1))
+    # The shallowest ray decides the schedule: the rays are marched together, so
+    # a schedule that is dense enough for the mean and not for the minimum would
+    # quantise exactly the grazing shadows this exists to resolve.
+    if sin_elevation is not None:
+        sin_min = float(np.clip(np.min(np.abs(np.asarray(sin_elevation)[subset])),
+                                1e-4, 1.0))
+    else:  # pragma: no cover - every caller passes it
+        sin_min = 1.0
 
+    scale = float(np.clip(pixel_km, 1e-3, 0.4 * max_range_km))
+    # A shadow can only reach as far as the deepest relief allows: no terrain is
+    # taller than this above the sphere it stands on, so marching further only
+    # spends samples on empty space.  At a grazing sun this is the whole range;
+    # at a high one it is a few kilometres.
+    reach = float(min(max_range_km, _SHADOW_RELIEF_KM / max(sin_min, 1e-4)))
+    reach = max(reach, 2.0 * scale)
+    # How much a ray may *rise* between two samples.  The shadow boundary is
+    # quantised to the step length, which is `rise / sin(e)` along the ground --
+    # so this is the knob that decides whether a grazing shadow edge is a smooth
+    # curve or a staircase of kilometre-long facets.  Tying it to the frame's own
+    # pixel keeps a whole-disk frame from paying for close-up precision.
+    rise = min(max(_SHADOW_MIN_RISE_KM, _SHADOW_RISE_PER_PIXEL * scale),
+               _SHADOW_MAX_RISE_KM)
+    dt_cap = max(scale, rise / max(sin_min, 1e-4))
+    # A denser request (`steps`) is honoured rather than ignored.
+    if steps >= 2:
+        dt_cap = min(dt_cap, reach / float(steps - 1))
+
+    growth = 1.30
+    distances: List[float] = []
+    t = scale
+    while t < reach and len(distances) < _MAX_SHADOW_SAMPLES:
+        distances.append(t)
+        t += max(min(t * (growth - 1.0), dt_cap), scale * 0.25)
     reference = MOON_REFERENCE_RADIUS_KM
     # The pyramid level of every step depends only on the distance schedule, so
-    # it is resolved once instead of once per step: same numbers, one call to
-    # level_for_ground_scale per step instead of one inside the hot loop.
-    # first is an array with one value per point (all the same clipped pixel
-    # size), so the schedule itself is built from the scalar it was clipped to.
-    scale = float(np.clip(pixel_km, 1e-3, 0.4 * max_range_km))
-    step_growth = (max_range_km / scale) ** (1.0 / (steps - 1))
+    # it is resolved once instead of once per step.
     levels = [
-        terrain.dem.level_for_ground_scale(
-            max(scale * step_growth ** step * (step_growth - 1.0), pixel_km))
-        for step in range(steps)
+        terrain.dem.level_for_ground_scale(max(distance, pixel_km))
+        for distance in distances
     ]
     ceiling = _dem_ceiling_km(terrain.dem)
     remaining = np.ones(subset.size, dtype=bool)
-    for step in range(steps):
+    for step, distance in enumerate(distances):
         _check_cancelled(cancel)
-        t = first * np.power(growth, step)
-        sample_points = here + t[:, None] * along
+        sample_points = here + distance * along
         # One norm per step, shared by the ceiling test and the conversion:
         # np.linalg.norm walked the block a second time inside the conversion,
         # and at a few hundred steps per ray that was the shadow pass's largest
@@ -2289,6 +2325,7 @@ def render_region(
     # guess.  A guess sized from the frame's diagonal looks generous but can
     # still miss an elongated or steeply tilted frame, and the shortfall then
     # surfaces as a coverage error on a selection that is perfectly valid.
+    base_terrain = terrain
     probe_camera = _region_camera(view, lon_deg, lat_deg, None)
     probe_pixel_scale = (
         2.0 * math.tan(math.atan(0.5 * span_km / probe_camera["distance"]))
@@ -2360,7 +2397,14 @@ def render_region(
         ),
         terrain.dem.bounds,
     ):
-        terrain = open_terrain(progress=progress)
+        # Fall back to what the caller handed us before opening anything new: a
+        # regional window that turns out to be a degree short must not be
+        # replaced by a fresh *global* open, which -- when the page's 数据源 is a
+        # 34 GB product -- means an eleven-gigabyte bake in the middle of a
+        # render.  Only a caller that passed nothing opens the default pyramid.
+        terrain = terrain if not terrain.dem.is_regional else (
+            open_terrain(progress=progress) if base_terrain is None else base_terrain
+        )
     level = (
         int(options.pyramid_level)
         if options.pyramid_level is not None
@@ -2499,6 +2543,36 @@ def _rolled_basis(
     angle = math.radians(float(rotation_deg))
     cos_a, sin_a = math.cos(angle), math.sin(angle)
     return cos_a * right + sin_a * up, -sin_a * right + cos_a * up
+
+
+def selection_footprint(
+    view: MoonView,
+    lon_deg: float,
+    lat_deg: float,
+    *,
+    fov_radius_arcsec: float,
+    width: int,
+    height: int,
+    rotation_deg: float = 0.0,
+    terrain: Optional[MoonTerrain] = None,
+) -> Optional[Dict[str, float]]:
+    """The lon/lat box one close-up frame really covers.
+
+    Near the limb a frame is foreshortened, so its ground footprint is much
+    longer than the small-angle span: measuring it here, with the same
+    :func:`_region_coverage` the window cutter uses, is what makes "download the
+    area I am looking at" mean what the reader sees.
+    """
+    camera = _region_camera(view, lon_deg, lat_deg, terrain)
+    span = 2.0 * float(camera["distance"]) * math.tan(
+        math.radians(float(fov_radius_arcsec) / 3600.0))
+    right, up = _rolled_basis(camera["right"], camera["up"], rotation_deg)
+    pixel_scale = (2.0 * math.tan(0.5 * float(span) / float(camera["distance"]))
+                   / max(1, min(int(width), int(height))))
+    return _region_coverage(
+        camera["origin"], camera["forward"], right, up, pixel_scale,
+        int(width), int(height), None,
+    )
 
 
 def region_terrain(
@@ -2756,11 +2830,18 @@ def _auto_terrain(
 _MAX_WINDOW_PIXELS = 6144 * 6144
 
 
+#: Margin added around a frame's footprint when cutting a window, in degrees.
+#: Wide enough that a grazing-sun shadow ray still lands inside the window; the
+#: page and the region downloader both use it, so a patch is always at least as
+#: big as the window the renderer will ask for.
+WINDOW_MARGIN_DEG = 2.5
+
+
 def _terrain_for_footprint(
     footprint: Optional[Dict[str, float]],
     *,
     base: Optional[MoonTerrain] = None,
-    margin_deg: float = 2.5,
+    margin_deg: float = WINDOW_MARGIN_DEG,
 ) -> Optional[MoonTerrain]:
     """Cut a high-resolution window that covers a measured frame footprint.
 
@@ -2779,18 +2860,46 @@ def _terrain_for_footprint(
     different points, and at a grazing sun that shows up as shadows that jump
     from frame to frame.
     """
-    from .terrain import global_dem_sources, open_region_box, open_terrain
+    from .terrain import (
+        find_covering_region,
+        global_dem_sources,
+        open_region,
+        open_region_box,
+        open_terrain,
+    )
 
     if footprint is None:
         return None
     if base is not None and base.dem.is_regional:
         if _footprint_fits(footprint, base.dem.bounds):
             return None
+    if base is None:
+        base = open_terrain()
+
+    # A patch downloaded for this neighbourhood is the best answer there is:
+    # it exists because somebody asked for this ground at this scale, and it is
+    # small enough to read whole.  It wins over the global raster even when the
+    # two have the same pixel size -- a SLDEM2015 patch is the same 59 m as the
+    # LOLA GDR tile but its gaps are measured rather than interpolated.
+    # Only a small margin is *required* of a patch -- the frame itself plus a
+    # little room.  A patch is downloaded with the full margin, but demanding it
+    # here would throw away a usable patch over a tenth of a degree of frame
+    # measurement, and the shadow rays that the margin exists for are already
+    # inside the downloaded area.
+    patch_margin = min(float(margin_deg), 0.5)
+    patch = find_covering_region(
+        footprint["lon_min"] - patch_margin, footprint["lon_max"] + patch_margin,
+        footprint["lat_min"] - patch_margin, footprint["lat_max"] + patch_margin,
+    )
+    if patch is not None and patch[1] < base.dem.km_per_pixel(0) * 0.999:
+        try:
+            return open_region(patch[0], terrain=base)
+        except MoonlibError:  # pragma: no cover - unreadable patch, fall back
+            pass
+
     sources = global_dem_sources()
     if not sources:
         return None
-    if base is None:
-        base = open_terrain()
     chosen = sources[0]
     if chosen[1] >= base.dem.km_per_pixel(0) * 0.9:
         return None  # the baked pyramid is already as good as what is on disk

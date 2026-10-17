@@ -692,6 +692,26 @@
           <!-- 其余光线选项一律收进「高级设置」：默认只看光度模型与地照增益 -->
           <details class="fold" id="light-advanced">
             <summary>高级设置 <span class="en">Advanced</span></summary>
+            <!-- 数据源: which global DEM the frames are drawn from.  It decides
+                 the finest 物理分辨率 the page can offer, so it sits above the
+                 knobs that describe *how* to draw -- "out of what" comes first. -->
+            <label class="wide-field" title="渲染用的全球高程产品：决定画面能细到多少，以及物理分辨率菜单里哪些档位可用">
+              数据源 <span class="en">Data source</span>
+              <select id="data-source"></select>
+            </label>
+            <p class="hint" id="data-source-note"></p>
+            <!-- 区域高清补片: 只下当前选框这一小块。整月面的产品是几十 GB，
+                 而近景要的常常只是坑边几度——按选框去取，才可能拿到比本地
+                 更细或更好的数据。 -->
+            <label class="wide-field" title="按当前选框，从在线产品里只下载这一块区域的高程，作为近景的补片">
+              区域高清补片 <span class="en">Region patch</span>
+              <span class="pick-row">
+                <select id="patch-product"></select>
+                <button class="ghost mini" id="patch-download"
+                        title="按当前选框，只从在线产品里下载这一块区域的高程（后台任务，会显示进度）；下完后近景会自动改用这份补片">下载</button>
+              </span>
+            </label>
+            <p class="hint" id="patch-note"></p>
             <div class="grid2">
               <label title="实测：整月面与终端线近景（含 0.021 km/px）下 1 与 4 的像素差均 ≤1 灰阶；4 点已收敛，8 点耗时 +60% 而无可测收益。默认 1 即可，保留此旋钮备大画幅高保真出片">日面采样
                 <input type="number" id="sun-samples" min="1" max="8" step="1" value="1">
@@ -843,7 +863,7 @@
                自己的性质，读者要判断的也是"那圈光晕有几个像素宽"。 -->
           <div class="slider-row wide">
             <span class="slider-label" title="锐化半径：反锐化蒙版的宽度，按这张图自己的像素算。比模糊窄只提亮核心，比模糊宽就不再是锐化而是改大尺度明暗；通常与视宁度斑差不多宽。">锐化半径</span>
-            <input type="range" id="sharpen-radius" min="0" max="8" step="0.1" value="1.2">
+            <input type="range" id="sharpen-radius" min="0" max="4" step="0.1" value="1.2">
             <output id="sharpen-radius-out">1.2</output>
             <span class="unit">px</span>
           </div>
@@ -1149,7 +1169,16 @@
             <div class="row">
               <button class="primary" id="anim-run">生成动画 <span class="en">Render MP4</span></button>
               <button class="ghost" id="anim-cancel">终止</button>
+              <!-- 单帧预览: the first frame of the run, finished exactly as the
+                   file's frames are (processing, labels, stamp) and saved as a
+                   picture.  Cheaper than a run because it is one frame. -->
+              <button class="ghost mini" id="anim-preview"
+                      title="按当前参数只渲染第一帧，存成 PNG：先看清这一段的开头长什么样，再决定要不要等整段">单帧预览</button>
             </div>
+            <figure class="anim-preview" id="anim-preview-box" hidden>
+              <img id="anim-preview-image" alt="动画首帧预览">
+              <figcaption class="hint" id="anim-preview-note"></figcaption>
+            </figure>
             <div class="progress" id="anim-progress" hidden><span id="anim-progress-bar"></span></div>
             <!-- 跨度、帧数与每像素尺度：一行，放在最下面。尺度不该单独占一行——
                  它和「12 h，共 73 帧」都是"这一次会拍出什么"的答案。 -->
