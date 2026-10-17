@@ -3206,7 +3206,13 @@ async function saveDisk() {
         preview: { width, samples: 1, shadow_steps: 64 },
       });
       finishRenderProgress(progress, width * width, 1, `${width}×${width} px`);
-      source = { key, url: payload.image, image: await loadImage(payload.image) };
+      source = {
+        key, url: payload.image, image: await loadImage(payload.image),
+        // The geometry belongs to *this* render, not to whatever the preview
+        // was last aimed at: its disk_radius_fraction is what tells the
+        // centring how much of the frame the whole Moon covers.
+        geometry: payload.geometry || null,
+      };
       state.diskExport = source;
       // The gain map travels with the render it belongs to.  It is a statement
       // about the scene, so only the renderer can make it; the page's job is
@@ -3233,17 +3239,19 @@ async function saveDisk() {
   const name = `moon-disk${suffix}-${width}.${format.extension}`;
   // 以亮面为中心: only meaningful without earthshine (with it the whole disk is
   // lit and the centroid is the middle anyway), and only when the reader asks.
+  // The new centre is the whole disk outline pulled halfway towards the lit
+  // side's brightness centroid, and only sideways: see litCentre().
   let centred = null;
   let shift = null;
   if ($('disk-centre-lit').checked && !annotate) {
-    const centre = litCentre(source.image);
+    const fraction = source.geometry && source.geometry.disk_radius_fraction;
+    const centre = litCentre(source.image, fraction);
     if (centre) {
       const shiftX = Math.round(centre.x - source.image.width / 2);
-      const shiftY = Math.round(centre.y - source.image.height / 2);
-      if (shiftX || shiftY) {
-        centred = centreOnLit(source.image, shiftX, shiftY);
-        shift = { dx: shiftX, dy: shiftY };
-        setStatus(`已按亮面重心平移 ${-shiftX}, ${-shiftY} px`);
+      if (shiftX) {
+        centred = centreOnLit(source.image, shiftX, 0);
+        shift = { dx: shiftX, dy: 0 };
+        setStatus(`已按全月面轮廓与亮面重心平移 ${-shiftX} px（只做水平移动）`);
       }
     }
   }
@@ -3335,13 +3343,31 @@ function updateDiskHdrControls() {
   $('disk-hdr-stops-label').hidden = !on;
 }
 
-/** The lit part's brightness-weighted centre, in image pixels.
+/* How far the saved frame is moved from the whole-disk centre towards the lit
+ * centroid.  Half gives the two equal weight: the disk outline says where the
+ * whole Moon is (it is 94% of the frame, so it is most of what the picture
+ * contains), and the brightness distribution says where its light is.  Centring
+ * on the lit centroid alone pushed a crescent's disk almost out of the frame;
+ * centring on the disk alone left the crescent at the edge. */
+const LIT_CENTRE_MIX = 0.5;
+
+/* Brightness below this (0..255) is background, not moonlight.  Subtracting it
+ * keeps the black corners from voting on where the lit side is. */
+const LIT_CENTRE_NOISE = 4;
+
+/** The whole-disk centre and the brightness-weighted lit centre, in pixels.
  *
  * Returns null when there is nothing lit to speak of, which is the honest
  * answer for a frame that is black: centring on an arbitrary pixel would be
  * worse than leaving the picture alone.
+ *
+ * *diskRadiusFraction* is ``/api/disk``'s own radius as a fraction of the
+ * frame's shorter side.  The whole-disk renderer aims the Moon's centre at the
+ * centre of the frame, so that is the outline's centre; the fraction is only
+ * needed to know how much of the frame the disk covers.  The 0.47 fallback is
+ * the renderer's default (``disk_fraction`` 0.94), not a guess at this frame.
  */
-function litCentre(image) {
+function litCentre(image, diskRadiusFraction) {
   if (!image || !image.width) return null;
   const canvas = document.createElement('canvas');
   const probe = 256;                       // a quarter-megapixel is plenty
@@ -3355,23 +3381,77 @@ function litCentre(image) {
   } catch (error) {
     return null;                           // a tainted canvas, in theory only
   }
-  let sum = 0, sx = 0, sy = 0, peak = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    // Weight by brightness *above* the noise floor: a black background must not
-    // pull the centre towards the middle of the frame.
-    const value = (data[i] + data[i + 1] + data[i + 2]) / 3;
-    peak = Math.max(peak, value);
-    sum += value;
-    const pixel = i / 4;
-    sx += value * (pixel % probe);
-    sy += value * Math.floor(pixel / probe);
-  }
-  if (!sum || peak < 6) return null;
-  const scale = image.width / probe;
-  return { x: (sx / sum) * scale, y: (sy / sum) * scale, lit: sum / (probe * probe) };
+  const centre = litCentreFromPixels(data, probe, diskRadiusFraction);
+  if (!centre) return null;
+  const scaleX = image.width / probe;
+  const scaleY = image.height / probe;
+  return {
+    x: centre.x * scaleX,
+    y: centre.y * scaleY,
+    litX: centre.litX * scaleX,
+    litY: centre.litY * scaleY,
+    diskX: centre.diskX * scaleX,
+    diskY: centre.diskY * scaleY,
+    lit: centre.lit,
+  };
 }
 
-/** Move a picture so the lit part sits in the middle, on black.
+/** The arithmetic behind :func:`litCentre`, on a pre-sampled RGBA probe.
+ *
+ * Kept separate from the canvas plumbing so the Node harness can feed it a
+ * picture it knows the answer for.  Coordinates are probe pixels, with the
+ * frame's centre at ``probe / 2``.
+ *
+ * The lit centroid is weighted by brightness; the disk outline contributes its
+ * own centre.  The two get equal weight (``LIT_CENTRE_MIX``), so the frame is
+ * aimed halfway between where the whole Moon is and where its light is.  Only
+ * the horizontal component moves -- a phase offset is left/right, and following
+ * a slightly off-centre libration up or down only un-centres the whole Moon.
+ */
+function litCentreFromPixels(data, probe, diskRadiusFraction) {
+  const size = Math.max(1, Math.round(probe));
+  if (!data || data.length < size * size * 4) return null;
+  const asked = Number(diskRadiusFraction);
+  const radiusFraction = Number.isFinite(asked) && asked > 0
+    ? Math.max(0.05, Math.min(0.5, asked)) : 0.47;
+  const centre = size / 2;
+  const radius = radiusFraction * size;
+  let litSum = 0, litX = 0, litY = 0, peak = 0;
+  let diskCount = 0, diskX = 0, diskY = 0;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const px = x + 0.5, py = y + 0.5;
+      if ((px - centre) ** 2 + (py - centre) ** 2 <= radius * radius) {
+        diskCount += 1;
+        diskX += px;
+        diskY += py;
+      }
+      const i = 4 * (y * size + x);
+      const value = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      peak = Math.max(peak, value);
+      const weight = Math.max(0, value - LIT_CENTRE_NOISE) / 255;
+      litSum += weight;
+      litX += weight * px;
+      litY += weight * py;
+    }
+  }
+  if (!litSum || peak < 6) return null;
+  const diskCentreX = diskCount ? diskX / diskCount : centre;
+  const diskCentreY = diskCount ? diskY / diskCount : centre;
+  const litCentreX = litX / litSum;
+  const litCentreY = litY / litSum;
+  return {
+    x: diskCentreX + LIT_CENTRE_MIX * (litCentreX - diskCentreX),
+    y: diskCentreY,                      // horizontal displacement only
+    litX: litCentreX,
+    litY: litCentreY,
+    diskX: diskCentreX,
+    diskY: diskCentreY,
+    lit: litSum / (size * size),
+  };
+}
+
+/** Move a picture so its chosen centre sits in the middle, on black.
  *
  * The Moon is not always in the middle of its own frame: a crescent sits off to
  * one side of the disk the frame was aimed at, and a saved picture with two

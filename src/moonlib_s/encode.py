@@ -156,6 +156,30 @@ def _frame_size(size: Any) -> tuple:
     return width, height
 
 
+def _pad_to_even(frame: Any) -> np.ndarray:
+    """Pad a frame by at most one pixel so both sides are even.
+
+    ``yuv420p`` subsamples chroma by two in each direction, so H.264 and HEVC
+    both refuse an odd width or height -- libx264 says so as
+    ``height not divisible by 2 (1000x899)``, and by then the encoder has
+    already closed the pipe and the caller sees a broken-pipe error a few
+    frames in.  A close-up animation's size follows the selection's aspect, so
+    it lands on an odd number often; the renderer is right to make that size,
+    and the encoder is the layer that has to write it.
+
+    The extra row and column repeat the edge rather than adding a black bar:
+    one pixel of duplicated limb is invisible at any output size, and cropping
+    a column would be throwing away pixels the reader asked for.  Even frames
+    are returned untouched (the same array, so an ordinary run copies nothing).
+    """
+    values = np.asarray(frame)
+    height, width = int(values.shape[0]), int(values.shape[1])
+    extra_h, extra_w = height % 2, width % 2
+    if not extra_h and not extra_w:
+        return values
+    return np.pad(values, ((0, extra_h), (0, extra_w), (0, 0)), mode="edge")
+
+
 #: The largest Gaussian a frame smooth may use, in pixels.  Beyond this it is
 #: not "remove the terrain grid from the shadows" any more, it is blurring the
 #: picture, and the reader has 模糊强度 for that.
@@ -471,7 +495,10 @@ def write_mp4(
         Any iterable of frames.  It is consumed lazily and each frame is
         written to ffmpeg's stdin before the next is fetched, so a generator
         is the natural input for an animation that does not fit in memory.
-        Every frame must have the same ``(h, w)`` shape.
+        Every frame must have the same ``(h, w)`` shape.  A frame whose width
+        or height is odd is padded by one pixel on the right/bottom, because
+        ``yuv420p`` needs even dimensions; the returned ``width``/``height``
+        are the encoded ones.
     fps
         Output frame rate; frames are played back one per ``1/fps`` seconds.
     hdr
@@ -519,7 +546,9 @@ def write_mp4(
         ) from None
 
     convert = _hdr_rgb16 if hdr else frame_rgb8
-    blueprint = convert(first)
+    first = convert(first)
+    source_height, source_width = int(first.shape[0]), int(first.shape[1])
+    blueprint = _pad_to_even(first)
     height, width = int(blueprint.shape[0]), int(blueprint.shape[1])
     command = _command(str(executable), target, width, height, rate, bool(hdr), quality)
 
@@ -544,13 +573,13 @@ def write_mp4(
             encoded = 1
             for frame in iterator:
                 data = convert(frame)
-                if data.shape[0] != height or data.shape[1] != width:
+                if data.shape[0] != source_height or data.shape[1] != source_width:
                     raise MoonlibError(
                         "write_mp4: every frame must have the same shape; frame "
                         f"{encoded} is {data.shape[:2]} against "
-                        f"{(height, width)}."
+                        f"{(source_height, source_width)}."
                     )
-                stream.write(data.tobytes())
+                stream.write(_pad_to_even(data).tobytes())
                 encoded += 1
             stream.close()
         except BrokenPipeError as exc:

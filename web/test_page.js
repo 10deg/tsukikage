@@ -38,7 +38,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler',
   'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'lockedDiskPlan',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
-  'renderPixels', 'compassDirection', 'animationAnnotationsPayload'];
+  'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
+  'litCentreFromPixels'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -936,6 +937,52 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     `${componentCalls.length - before} calls, ` +
     JSON.stringify(componentCalls[componentCalls.length - 1].body.component));
   set('disk-earthshine', true);
+
+  console.log('');
+  console.log('the bright-face centring');
+  {
+    /* A picture whose answer is known without a browser: an 8×8 probe, the
+       right half lit at full brightness, the whole frame inside the disk. */
+    const probe = 8;
+    const pixels = (lit) => {
+      const data = new Uint8ClampedArray(probe * probe * 4);
+      for (let y = 0; y < probe; y += 1) {
+        for (let x = 0; x < probe; x += 1) {
+          const value = lit(x, y) ? 255 : 0;
+          const i = 4 * (y * probe + x);
+          data[i] = data[i + 1] = data[i + 2] = value;
+          data[i + 3] = 255;
+        }
+      }
+      return data;
+    };
+    const right = T.litCentreFromPixels(pixels((x) => x >= probe / 2), probe, 0.5);
+    check('the whole disk centre is the frame centre',
+      right && Math.abs(right.diskX - probe / 2) < 1e-9 &&
+      Math.abs(right.diskY - probe / 2) < 1e-9, JSON.stringify(right));
+    check('the lit centroid is the right half\'s own centre',
+      right && Math.abs(right.litX - 6) < 1e-9, JSON.stringify(right && right.litX));
+    check('the new centre is half way from the disk to the lit centroid',
+      right && Math.abs(right.x - 5) < 1e-9 &&
+      Math.abs((right.x - right.diskX) - 0.5 * (right.litX - right.diskX)) < 1e-9,
+      JSON.stringify(right));
+    check('and the bright side is not followed vertically',
+      right && Math.abs(right.y - probe / 2) < 1e-9, JSON.stringify(right && right.y));
+
+    const top = T.litCentreFromPixels(pixels((x, y) => y < probe / 2), probe, 0.5);
+    check('a top-lit frame moves sideways only, not up',
+      top && Math.abs(top.x - probe / 2) < 1e-9 &&
+      Math.abs(top.y - probe / 2) < 1e-9 && top.litY < 3,
+      JSON.stringify(top));
+
+    const full = T.litCentreFromPixels(pixels(() => true), probe, 0.5);
+    check('a uniformly lit disk stays where the whole disk is',
+      full && Math.abs(full.x - probe / 2) < 1e-9, JSON.stringify(full));
+
+    const black = T.litCentreFromPixels(new Uint8ClampedArray(probe * probe * 4),
+      probe, 0.5);
+    check('a black frame has no centre to guess at', black === null, String(black));
+  }
 
   console.log('');
   console.log('landform labels');
