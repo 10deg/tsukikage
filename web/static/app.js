@@ -4828,10 +4828,8 @@ function renderDataSources(payload) {
       const option = document.createElement('option');
       option.value = `online:${entry.id}`;
       option.disabled = true;
-      option.textContent = entry.available
-        ? `${entry.label} · ${dataSourceText(entry)}（已在本机）`
-        : `${entry.label} · ${dataSourceText(entry)}（未下载）`;
-      option.title = `${entry.note}\n下载：${entry.fetch}`;
+      option.textContent = `${entry.label} · ${dataSourceText(entry)}（按选框下载）`;
+      option.title = entry.note || '';
       group.appendChild(option);
     }
     select.appendChild(group);

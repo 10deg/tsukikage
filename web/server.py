@@ -110,42 +110,6 @@ TERRAIN_KM_PER_PX = 0.118
 #: width into pixels per degree, and back.
 _KM_PER_DEGREE = math.radians(1.0) * 1737.4
 
-#: Elevation products the page can name but this machine does not have.  The
-#: menu lists them so the reader can see what a source *would* buy and what it
-#: costs to fetch; selecting one is refused until it is on disk (its
-#: ``pixels_per_degree`` matches a local raster).  Both are 512 px/deg, the step
-#: that halves the close-up pixel from 118 m to 59 m.
-ONLINE_DEM_SOURCES = (
-    {
-        "id": "sldem2015-512",
-        "name": "SLDEM2015 512 ppd",
-        "label": "SLDEM2015 · 辉夜号立体填缝",
-        "pixels_per_degree": 512,
-        "metres_per_px": 59.2,
-        "note": "熔岩间 1–4 km 的轨道缝由辉夜号 TC 立体像对补测，"
-                "跨轨细节比纯 LOLA 更好。34 GB，需自行拼接成全球 TIFF。",
-        "fetch": "见 docs/07-高分辨率DEM调研.md §2",
-    },
-    {
-        "id": "lola-gdr-512",
-        "name": "LOLA GDR 512 ppd",
-        "label": "LOLA GDR · PDS 512 px/deg",
-        "pixels_per_degree": 512,
-        "metres_per_px": 59.2,
-        "note": "同一份 LOLA 数据的 512 格点版本，99.5% 的格点有实测点。",
-        "fetch": "./.venv/bin/python tools/fetch_lola_512.py",
-    },
-    {
-        "id": "lola-118m",
-        "name": "LOLA LDEM 118 m",
-        "label": "LOLA · USGS 256 px/deg 全球",
-        "pixels_per_degree": 256,
-        "metres_per_px": 118.5,
-        "note": "本仓库一直用的那一份（2014 年解算）。",
-        "fetch": "./.venv/bin/python tools/fetch_lola_global.py",
-    },
-)
-
 #: Animations are a sequence of renders, so they run as a background job and the
 #: page polls: a whole lunation at 1000 px is minutes, which no HTTP request can
 #: wait for.  The finished MP4 is kept under the cache directory, and only the
@@ -674,10 +638,17 @@ class MoonService:
                 "mtime": int(stat.st_mtime),
             })
         active = moonlib_s.global_dem_sources()
-        local_ppd = {item["pixels_per_degree"] for item in sources}
+        # The online group is the *patch* catalogue, not a second copy of the
+        # local one: these are the products a region download can fetch, and
+        # none of them is on disk as a global raster (that is why they are
+        # "online").  Claiming one is 已在本机 because a local source happens to
+        # have the same pixel size would be a lie about which data is being
+        # drawn.
+        from moonlib_s import online as online_products
+
         online = [
-            {**entry, "available": entry["pixels_per_degree"] in local_ppd}
-            for entry in ONLINE_DEM_SOURCES
+            {**entry, "available": False}
+            for entry in online_products.catalogue()
         ]
         return {
             "sources": sources,
