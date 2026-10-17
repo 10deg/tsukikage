@@ -770,7 +770,7 @@ console.log('');
      purpose when the save button is pressed rather than on every keystroke. */
   document.getElementById('preview-px').value = '99999';
   document.getElementById('disk-px').value = '99999';
-  check('the preview stays inside the aiming cap',
+  check('the preview stays inside its own cap',
     T.previewPixels() === T.LIMITS.preview_px, T.previewPixels());
   check('the full disk may go far higher',
     T.diskPixels() === T.LIMITS.disk_px && T.LIMITS.disk_px >= 10000, T.diskPixels());

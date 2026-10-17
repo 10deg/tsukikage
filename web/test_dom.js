@@ -179,6 +179,31 @@ check('chips were removed', !html.includes('class="chip'));
 check('the animation pane and its button are both 生成动画',
   html.includes('data-proc="animation" aria-pressed="false">生成动画<') &&
   html.includes('id="anim-run">生成动画 '));
+/* 时间步长 offers a ladder of common steps and still accepts any number: a
+   datalist is the only native control that is both. */
+check('时间步长 is a typable field with a list of common steps',
+  /id="anim-step"[^>]*list="anim-step-presets"/.test(html) &&
+  ['1', '5', '10', '15', '30', '60']
+    .every((value) => new RegExp(`<option value="${value}"></option>`).test(html)));
+/* 地貌搜索 is an always-visible entry point now: it sits in the label bar, and
+   the geometric marks take its old place four to a row. */
+check('the landform search lives in the always-visible label bar',
+  /<div class="label-bar"[\s\S]*?id="feature-search"[\s\S]*?<div class="annot-detail"/
+    .test(html));
+check('the geometric marks lay out four to a row',
+  /\.disk-head \.mark-bar\s*\{[^}]*grid-template-columns:\s*repeat\(4/
+    .test(css));
+/* 饱和度 may now be pushed above 1; the cap is 3 in the markup, and the
+   library's own finish_image() was extended to honour it. */
+check('saturation can be boosted above 1',
+  /id="saturation"[^>]*max="3"/.test(html));
+/* The reset glyph became the word Reset.  It has to stay within the height the
+   13 px icon needed: same line box, smaller type. */
+check('reset buttons are the word Reset, set small',
+  /button\.reset\s*\{[^}]*font-size:\s*9px/.test(css) &&
+  /button\.reset\s*\{[^}]*line-height:\s*17px/.test(css) &&
+  !/button\.reset\s*\{[^}]*width:\s*100%/.test(css));
+
 check('the HDR switches are labelled HDR, not 带 HDR',
   !html.includes('带 HDR') && (html.match(/<span>HDR<\/span>/g) || []).length === 2);
 check('every nudge button is labelled with its own step',

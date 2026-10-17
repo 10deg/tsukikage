@@ -806,8 +806,9 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
   flex-wrap: wrap;
   width: 100%;
 }
-/* Everything the switch folds away: the style controls, the search, the
-   geometric overlays and the class switches. */
+/* Everything the switch folds away: the style controls, the geometric
+   overlays and the class switches.  The search is *not* in here any more: it
+   is an always-visible entry point, in the label bar above. */
 .disk-head .annot-detail {
   display: flex;
   flex-direction: column;
@@ -851,22 +852,48 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
   font-size: 11px;
   color: var(--ink-dim);
 }
-/* The geometric switches belong to the search above them: no rule between. */
+/* The geometric switches start the fold now that the search lives above: no
+   rule between them and the picture. */
 .disk-head .mark-bar { padding-top: 4px; }
 .disk-head .find-bar {
   align-items: flex-start;
   padding-top: 5px;
   border-top: 1px solid var(--line);
 }
-/* The geometric switches are short names: they do not need the width the
-   search box above them takes, and holding that width pushed the class
-   switches off to the right for no reason. */
-.disk-head .find-left {
-  flex: 0 1 19em;
-  min-width: 0;
-}
-.disk-head .mark-bar { max-width: 19em; }
 .disk-head .class-bar { flex: 1 1 auto; min-width: 0; }
+/* 地貌搜索 in the label bar, at its right-hand end: the same label it was in
+   the fold, but no longer something to open, and pushed right with an auto
+   margin so the switch/reset cluster stays together on the left. */
+.label-bar .find-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 0 auto;
+  white-space: nowrap;
+}
+.label-bar .find-label input[type="text"] {
+  width: 12em;
+  margin-top: 0;
+  padding: 1px 6px;
+}
+/* Four geometric marks to a row.  The search no longer decides this column's
+   width, so a fixed basis sized for the longest name ("近地侧边界") keeps the
+   four columns even without touching the class chips beside them. */
+.disk-head .find-left { flex: 0 1 23em; }
+.disk-head .mark-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 6px;
+  width: 100%;
+  max-width: none;
+}
+.disk-head .mark-bar .mark-chip {
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  padding: 1px 4px;
+  font-size: 10px;
+}
 .label-bar input[type="number"] { width: 4.2em; text-align: center; }
 /* The label panel is a wall of small pills, so a full-height form control in
    the middle of it stands a head taller than everything around it (the 线条
@@ -881,6 +908,16 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
 }
 .label-bar select { width: auto; }
 .label-bar > button { flex: 0 0 auto; }
+/* 刷新字体 sits among the pills of the label bar, so it is the size of one:
+   same height as a checkbox label, not the size of the run buttons. */
+#label-refresh-font {
+  padding: 0 8px;
+  line-height: 18px;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+#label-refresh-font:hover { color: var(--accent); border-color: var(--accent); }
 /* The switch for the labels is the one button that starts this whole panel, so
    it carries the accent colour; pressed, the generic latch rule paints it. */
 #annotate { border-color: var(--accent); }
@@ -968,15 +1005,30 @@ input.num-inline {
   padding: 1px 4px;
   text-align: right;
 }
-/* A reset button: icon only, and the icon is an inline SVG. */
-button.reset { padding: 1px 5px; }
-button.reset svg { display: block; }
+/* A reset button: the word Reset, small enough to stay inside the height the
+   icon used to take.  The glyph was 13 px tall with the button's own 1 px of
+   padding; 8 px type on the same 17 px line box keeps that height exactly, so
+   a row of controls does not grow around it.  The width is the one thing that
+   may grow, and it is allowed to. */
+button.reset {
+  padding: 1px 6px;
+  font-size: 9px;
+  line-height: 17px;
+  letter-spacing: .02em;
+  min-width: 2.7em;
+  text-align: center;
+}
 button.reset:hover { color: var(--accent); border-color: var(--accent); }
 /* A reset that sits in a tab strip is not a tab: keep it clear of them. */
 .tabs button.reset { margin-left: 6px; vertical-align: middle; }
 .group h2 > button.reset { margin-left: 6px; vertical-align: middle; }
 
 button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
+/* The reset buttons carry `.icon` for the line box, not for the 13 px type:
+   the word is set at 9 px above, and this rule is here because `.icon` comes
+   later in the file and would otherwise win on font-size.  The line box stays
+   at 17 px, so the button is exactly as tall as it was with the 13 px icon. */
+button.icon.reset { font-size: 9px; line-height: 17px; }
 
 /* 事件预报 / 生成动画：开始与结束各占一行——「开始 | 时间 | 同步所选时间」在同一行里，
    时间框只拿剩下的宽度（旁边还有按钮，不需要占满整栏），按钮的高度跟着时间框走。
@@ -1029,8 +1081,10 @@ button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
 
 /* 生成动画 的几行是短数字与短菜单：控件按自己内容的宽度，不拉满整栏。 */
 #proc-animation .param-row input[type="number"],
+#proc-animation .param-row #anim-step,
 #proc-animation .param-row select { flex: 0 0 auto; }
-#proc-animation .param-row input[type="number"] {
+#proc-animation .param-row input[type="number"],
+#proc-animation .param-row #anim-step {
   width: 5em;
   text-align: right;
   padding: 1px 5px;
@@ -1048,7 +1102,7 @@ button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
    below rides straight up against these two menus -- the pane's rhythm is
    9 px (the margin every `.param-row` already ends with). */
 #proc-animation .anim-quality { gap: 10px; margin-bottom: 9px; }
-#proc-animation .anim-quality select { width: auto; }
+#proc-animation .anim-quality select { width: auto; min-width: 5.2em; }
 /* 采样 is the first control in the panel's column, so its menu has to line up
    with the menus above and below it.  Its label takes the same 5.4 em gutter
    and the same 7 px gap the `.param-row`s use, which lands the menu on the same
@@ -1062,6 +1116,14 @@ button.icon { padding: 1px 8px; font-size: 13px; line-height: 17px; }
 #proc-animation #anim-timestamp-margin { width: 4.4em; text-align: right; }
 #proc-animation #anim-px { width: 5.5em; text-align: right; padding: 1px 5px; }
 #proc-animation .progress { margin: 2px 0 4px; }
+/* 每像素尺度与跨度/帧数 share one line at the bottom of the pane: both answer
+   "what will this run produce", and the scale on a line of its own used to sit
+   halfway up the panel like a stray note. */
+#proc-animation .anim-plan { display: block; margin: 2px 0 6px; }
+#proc-animation .anim-plan > span { display: inline; }
+#proc-animation .anim-plan #anim-scale-note:not(:empty) + #anim-span:not(:empty)::before {
+  content: "，";
+}
 
 /* 后期处理从标签页里搬出来之后，它自己也成了一栏：标题下面给一点气口，和最上面
    那几栏的节奏一致。 */
@@ -1180,15 +1242,12 @@ details.fold .grid2 { margin-top: 5px; }
 .selection-inputs .pick-row button { flex: 0 0 auto; padding: 2px 5px; }
 .info-body .row { margin-top: 0; }
 
-/* 同步回当前视场 rides at the right-hand end of the tab row, where the thing it
-   acts on (the window) is named, rather than in the coordinate row where it read
-   as a fourth field.  A size smaller than the tab beside it and a few pixels
-   lower: the tab belongs flush with the top of its strip, this is a small action
-   in the corner and looked like it was stuck to the ceiling when it was neither.
- */
+/* 同步选框到此视场 rides at the right-hand end of the result tabs, immediately
+   left of the zoom cluster it acts through -- not in the 实时特写 window it used
+   to sit in, where it read as a fourth coordinate.  It takes the free space
+   before it, so the zoom cluster stays against the right edge. */
 #sel-sync-last {
   margin-left: auto;
-  margin-top: 3px;
   padding: 1px 8px;
   font-size: 10.5px;
   line-height: 15px;
@@ -1198,7 +1257,7 @@ details.fold .grid2 { margin-top: 5px; }
      was: not its position, its size. */
   white-space: nowrap;
 }
-/* 同步回当前视场 is an *action*, not a latch, so its two colours mean the two
+/* 同步选框到此视场 is an *action*, not a latch, so its two colours mean the two
    things an action can mean: amber is "there is something here to press", grey
    is "nothing to do".  Nothing to do happens twice -- the box is already the one
    the last render used, or there has not been a render yet -- and those are the
@@ -1467,7 +1526,7 @@ details.fold .grid2 { margin-top: 5px; }
   gap: 2px 8px;
   background: var(--viewport);
   /* The tabs never break in half (see .tab), so a pane dragged narrow has to
-     be able to put the row's other items -- 同步回当前视场, the zoom cluster --
+     be able to put the row's other items -- 同步选框到此视场, the zoom cluster --
      on a line of their own instead of cutting them off at the edge. */
   flex-wrap: wrap;
 }
@@ -1554,6 +1613,10 @@ button .en::before, button .en::after { content: ""; }
    because `.zoom` sets `display: flex`, which outranks the user agent's
    `[hidden] { display: none }` -- without it both boxes are on screen at once. */
 .view-stack .zoom[hidden] { display: none; }
+/* 同步选框 sits immediately left of the zoom cluster: the auto margin belongs
+   to the button, so the zoom stops claiming the row's free space itself. */
+.view-stack > figcaption #sel-sync-last { margin-left: auto; flex: 0 0 auto; }
+.view-stack > figcaption .zoom { margin-left: 0; }
 
 /* ── 观测信息有了余地（状态行搬去右上角之后） ────────────────────── */
 /* The nudge row used to sit right on top of the coordinate fields, because the

@@ -37,6 +37,7 @@ import traceback
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +47,10 @@ import numpy as np  # noqa: E402
 
 import moonlib_s  # noqa: E402
 from moonlib_s.annotations import CLASS_LABELS, FEATURE_CLASSES, feature_class  # noqa: E402
+from moonlib_s.annotations import (  # noqa: E402
+    disk_frame, plan_annotations, region_frame,
+)
+from moonlib_s.labelpaint import find_label_font, paint_annotation_plan  # noqa: E402
 from moonlib_s.models import MoonRenderSettings  # noqa: E402
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -1142,6 +1147,12 @@ class MoonService:
                 "「应用后期处理」与 HDR 不能同时开：后期处理链的终点是显示图，"
                 "没有线性帧可以写成 HDR。"
             )
+        annotations = _animation_annotations(request.get("annotations"))
+        if annotations.get("on") and bool(hdr.get("on")):
+            raise moonlib_s.MoonlibError(
+                "「地貌」与 HDR 不能同时开：标注是 sRGB 的图形，不是线性光，"
+                "写不进 HDR 视频。"
+            )
         processing = dict(request.get("processing") or {})
         atmosphere = dict(request.get("atmosphere") or {})
         train = parse_train(request) if apply_processing else None
@@ -1153,6 +1164,7 @@ class MoonService:
         # is decided by whoever asks, not by the order two threads wake up in.
         self._take_render_slot()
         cancel = threading.Event()
+        finish = threading.Event()
         try:
             with self._animation_lock:
                 self._cancel_event = cancel
@@ -1170,14 +1182,16 @@ class MoonService:
                     "seconds": 0.0,
                     "fps": float(fps),
                     "hdr": bool(hdr.get("on")),
+                    "finish": finish,
+                    "partial": False,
                 }
                 self._purge_animations()
             thread = threading.Thread(
                 target=self._run_animation,
                 args=(job_id, site, start, end, step, settings, fps,
                       bool(hdr.get("on")), float(_f(hdr, "stops", 3.0)),
-                      region, cancel, scale_to, train, atmosphere, processing,
-                      smooth_px, timestamp),
+                      region, cancel, finish, scale_to, train, atmosphere,
+                      processing, smooth_px, timestamp, annotations),
                 daemon=True,
             )
             thread.start()
@@ -1215,11 +1229,13 @@ class MoonService:
     def _run_animation(self, job_id: str, site: Any, start: str, end: str,
                        step: float, settings: Any, fps: float, hdr: bool,
                        hdr_stops: float, region: Optional[Dict[str, Any]],
-                       cancel: threading.Event, scale_to: Optional[Any] = None,
+                       cancel: threading.Event, finish: threading.Event,
+                       scale_to: Optional[Any] = None,
                        train: Any = None, atmosphere: Optional[Dict[str, Any]] = None,
                        processing: Optional[Dict[str, Any]] = None,
                        smooth_px: float = 0.0,
-                       timestamp: Optional[Dict[str, Any]] = None) -> None:
+                       timestamp: Optional[Dict[str, Any]] = None,
+                       annotations: Optional[Dict[str, Any]] = None) -> None:
         """Render every frame and encode them, off the request thread.
 
         Owns the render slot and the cancel flag that :meth:`animation` took
@@ -1229,12 +1245,23 @@ class MoonService:
         try:
             frames = moonlib_s.animation_frames(
                 site, start, end, step, settings=settings, region=region,
-                terrain=self.terrain(), cancel=cancel.is_set,
+                terrain=self.terrain(),
+                # 立即保存 and 终止 share the same generator, but only the hard
+                # flag may interrupt a frame: a partial file full of half-traced
+                # frames is worse than waiting one frame for the encoder.
+                cancel=lambda: bool(cancel.is_set() or finish.is_set()),
+                graceful=True,
+                render_cancel=cancel.is_set,
             )
 
             processor = (
                 _frame_processor(train, atmosphere or {}, processing or {}, job_id)
                 if train is not None else None
+            )
+            painter = (
+                _AnimationLabelPainter(self, annotations or {}, settings, region,
+                                       processing if train is not None else None)
+                if annotations and annotations.get("on") else None
             )
 
             def counted():
@@ -1245,16 +1272,51 @@ class MoonService:
                             job["frames"] += 1
                             job["message"] = frame.when_utc
                             job["progress"] = job["frames"] / max(1, job["total"])
-                    yield processor(frame) if processor is not None else frame
+                    pixels = processor(frame) if processor is not None else None
+                    if painter is not None:
+                        # The painter needs the frame's camera and instant even
+                        # after 后期处理 has replaced the pixels, so both travel
+                        # in a frame-shaped carrier the encoder understands.
+                        image = pixels if pixels is not None else frame.render.image
+                        yield SimpleNamespace(
+                            et=frame.et,
+                            when_utc=frame.when_utc,
+                            render=SimpleNamespace(
+                                image=image,
+                                view=frame.render.view,
+                                region=frame.render.region,
+                            ),
+                        )
+                    elif pixels is not None:
+                        yield pixels
+                    else:
+                        yield frame
 
             info = moonlib_s.write_animation(path, counted(), fps=fps, hdr=hdr,
                                            stops=hdr_stops, scale_to=scale_to,
-                                           smooth_px=smooth_px, timestamp=timestamp)
+                                           smooth_px=smooth_px, timestamp=timestamp,
+                                           annotate=painter)
+            if cancel.is_set():
+                # 终止 arrived while the encoder was finishing: the file it just
+                # wrote is not what the reader asked for.
+                try:
+                    path.unlink()
+                except OSError:  # pragma: no cover - already gone
+                    pass
+                with self._animation_lock:
+                    job = self._animations.get(job_id)
+                    if job is not None:
+                        job.update(state="cancelled", message="已终止")
+                return
             with self._animation_lock:
                 job = self._animations.get(job_id)
                 if job is not None:
+                    partial = (bool(finish.is_set())
+                               and int(job.get("frames", 0)) < int(job.get("total", 0)))
                     job.update(
-                        state="done", progress=1.0, message="完成",
+                        state="done", progress=1.0,
+                        message="已保存已生成的帧" if partial else "完成",
+                        partial=partial,
                         path=str(path), seconds=float(info.get("seconds", 0.0)),
                         bytes=int(path.stat().st_size) if path.is_file() else 0,
                     )
@@ -1288,7 +1350,32 @@ class MoonService:
             payload = dict(job)
         payload["url"] = f"/api/animation/{job_id}/file" if payload["state"] == "done" else None
         payload.pop("path", None)
+        # A threading.Event is not JSON, and the page has no use for it.
+        payload.pop("finish", None)
         return payload
+
+    def finish_animation(self, job_id: str) -> Dict[str, Any]:
+        """Stop after the frame being traced and encode what is already there.
+
+        This is 立即保存, not 终止: the cancel flag interrupts a frame and the
+        file is deleted, while this flag is read between frames and the encoder
+        keeps everything it was given.  It is safe to press before the first
+        frame lands -- the generator always lets at least one frame through.
+        """
+        with self._animation_lock:
+            job = self._animations.get(job_id)
+            if job is None:
+                raise moonlib_s.MoonlibError(f"没有这个动画任务：{job_id}")
+            if job["state"] != "running":
+                raise moonlib_s.MoonlibError(
+                    f"动画 {job_id} 已经结束（{job['state']}），不能立即保存。"
+                )
+            event = job.get("finish")
+            if event is None:  # pragma: no cover - older jobs before this field
+                raise moonlib_s.MoonlibError("这个动画任务不支持立即保存。")
+            event.set()
+            job["message"] = "正在保存已生成的帧"
+        return {"id": job_id, "state": "running", "saving": True}
 
     def animation_file(self, job_id: str) -> Path:
         with self._animation_lock:
@@ -1656,6 +1743,166 @@ def _animation_timestamp(value: Any) -> Optional[Dict[str, Any]]:
             "utc_offset_hours": float(offset)}
 
 
+#: The style keys the page sends for animation labels, and what a request that
+#: predates one of them gets.  The numbers are screen pixels at the page's 13 px
+#: reference font; :mod:`moonlib_s.labelpaint` scales them to each frame.
+_ANIMATION_LABEL_STYLE = {
+    "text_color": "#eef2ff",
+    "text_stroke": "#0c0e14",
+    "text_stroke_width": 2.0,
+    "marker_stroke": "#0c0e14",
+    "marker_stroke_width": 1.0,
+    "outline_color": "#b4d6ff",
+    "outline_width": 1.0,
+    "outline_style": "solid",
+}
+
+
+def _animation_annotations(value: Any) -> Dict[str, Any]:
+    """The 地貌 block of an animation request, defaults filled in.
+
+    The catalogue projection stays on the server -- it needs every frame's camera
+    and the gazetteer -- while the *look* is the page's, so this is the hand-off
+    point between the two.  An unknown class or an unsupported language is
+    refused here rather than halfway through a run, and a missing Pillow or font
+    fails the request before the render slot is taken.
+    """
+    if not value or not isinstance(value, dict) or not value.get("on"):
+        return {"on": False}
+    language = str(value.get("language") or DEFAULT_LANGUAGE)
+    if language not in moonlib_s.LANGUAGES:
+        raise moonlib_s.MoonlibError(
+            f"动画标注的语言只能是 {'/'.join(moonlib_s.LANGUAGES)}（收到 {language!r}）。"
+        )
+    classes = value.get("classes")
+    if classes is not None:
+        if not isinstance(classes, (list, tuple)):
+            raise moonlib_s.MoonlibError("动画标注的 classes 必须是分类 key 的列表。")
+        classes = [str(key) for key in classes]
+        unknown = sorted(set(classes) - set(FEATURE_CLASSES))
+        if unknown:
+            raise moonlib_s.MoonlibError(
+                f"动画标注收到未知分类 {unknown[0]!r}；可选：{', '.join(FEATURE_CLASSES)}。"
+            )
+    style = {}
+    for key, default in _ANIMATION_LABEL_STYLE.items():
+        raw = value.get(key, default)
+        style[key] = str(raw) if isinstance(default, str) else _f(value, key, float(default))
+    style["text_stroke_width"] = max(0.0, min(8.0, style["text_stroke_width"]))
+    style["marker_stroke_width"] = max(0.0, min(4.0, style["marker_stroke_width"]))
+    style["outline_width"] = max(0.0, min(6.0, style["outline_width"]))
+    style["outline_style"] = (
+        style["outline_style"] if style["outline_style"] in ("solid", "dash", "dot", "none")
+        else "solid"
+    )
+    palette = value.get("class_colors")
+    if not isinstance(palette, dict):
+        palette = {}
+    style["class_colors"] = {
+        str(key): str(colour) for key, colour in palette.items()
+        if str(key) in FEATURE_CLASSES and isinstance(colour, str)
+    }
+    style["uniform"] = bool(value.get("uniform"))
+    style["bold"] = bool(value.get("bold"))
+    try:
+        import PIL  # noqa: F401
+    except ImportError as error:  # pragma: no cover - install dependent
+        raise moonlib_s.MoonlibError(
+            "动画的「地貌」需要 Pillow；安装 `pip install 'moonlib-s[video]'` 后重试。"
+        ) from error
+    find_label_font(bool(style["bold"]))
+    return {
+        "on": True,
+        "lock": bool(value.get("lock")),
+        "language": language,
+        "classes": classes,
+        "only_illuminated": bool(value.get("only_illuminated", True)),
+        "labels": max(0, int(_f(value, "labels", DEFAULT_LABELS))),
+        "min_radius_px": max(0.0, _f(value, "min_radius_px", DEFAULT_MIN_RADIUS_PX)),
+        "outline_min_radius_px": max(
+            0.0, _f(value, "outline_min_radius_px", DEFAULT_OUTLINE_RADIUS_PX)
+        ),
+        "font_px": max(6.0, min(400.0, _f(value, "font_px", DEFAULT_LABEL_FONT_PX))),
+        "style": style,
+    }
+
+
+class _AnimationLabelPainter:
+    """Draw one animation frame's landform names, using that frame's camera.
+
+    An unlocked run lays every frame out for its own instant: the terminator
+    moves, features cross the limb, and the names have to follow.  A locked run
+    keeps the first layout for the whole file -- the right answer for a short
+    clip where names that jump between frames read as a defect.
+    """
+
+    def __init__(self, service: Any, spec: Dict[str, Any], settings: Any,
+                 region: Optional[Dict[str, Any]],
+                 processing: Optional[Dict[str, Any]]) -> None:
+        self._service = service
+        self._spec = spec
+        self._settings = settings
+        self._region = region
+        self._rotation = float((processing or {}).get("rotation_deg") or 0.0)
+        self._mirror = str((processing or {}).get("mirror") or "none")
+        self._options = {
+            "max_labels": spec["labels"],
+            "min_radius_px": spec["min_radius_px"],
+            "outline_min_radius_px": spec["outline_min_radius_px"],
+            "font_px": spec["font_px"],
+            "language": spec["language"],
+            "classes": spec["classes"],
+            "only_illuminated": spec["only_illuminated"],
+        }
+        self._frozen = None
+
+    def _plan(self, item: Any, width: int, height: int) -> Any:
+        view = getattr(getattr(item, "render", None), "view", None)
+        if view is None:
+            raise moonlib_s.MoonlibError("动画的「地貌」需要每一帧的相机，但这一帧没有。")
+        if self._region is not None:
+            rendered = getattr(item.render, "region", None)
+            if rendered is None:
+                raise moonlib_s.MoonlibError("动画的「地貌」在近景帧上找不到选框信息。")
+            projection = region_frame(
+                view,
+                rendered.lon_deg,
+                rendered.lat_deg,
+                rendered.span_km,
+                int(width),
+                int(height),
+                rotation_deg=float(self._region.get("rotation_deg") or 0.0),
+                terrain=self._service.terrain(),
+            )
+        else:
+            projection = disk_frame(
+                view, int(width), int(height),
+                disk_fraction=float(self._settings.disk_fraction),
+            )
+        return plan_annotations(
+            projection, self._service.catalogue(), terrain=self._service.terrain(),
+            **self._options,
+        )
+
+    def __call__(self, item: Any, frame: Any) -> Any:
+        shape = np.asarray(frame).shape
+        if len(shape) < 2:
+            return frame
+        height, width = int(shape[0]), int(shape[1])
+        plan = self._frozen
+        if plan is None or int(plan.frame.width) != width or int(plan.frame.height) != height:
+            plan = self._plan(item, width, height)
+            if self._spec.get("lock"):
+                self._frozen = plan
+        return paint_annotation_plan(
+            frame, plan,
+            style=self._spec["style"],
+            rotation_deg=self._rotation,
+            mirror=self._mirror,
+        )
+
+
+
 def _sharpen_radius(processing: Dict[str, Any],
                     arcsec_per_pixel: Optional[float]) -> Dict[str, Any]:
     """锐化半径, as the unsharp mask's width.
@@ -1962,6 +2209,10 @@ class Handler(BaseHTTPRequestHandler):
                 # this between bands, which is the difference between a button
                 # that stops the work and one that only stops watching it.
                 return self._json(200, self.service.cancel())
+            finished = re.fullmatch(r"/api/animation/(\d+)/finish", path)
+            if finished:
+                # 立即保存: stop after the current frame and encode the rest.
+                return self._json(200, self.service.finish_animation(finished.group(1)))
             if path == "/api/process":
                 image, info = self.service.process(request)
                 body = {"info": info, "image": _data_url(encode_png(image))}

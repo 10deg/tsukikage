@@ -149,24 +149,37 @@
           <span class="view-title">全月面 <span class="en">Full disk</span></span>
 
           <!-- ── 月面地貌标注：名字与几何标注都画在全月面上，控件就放在这张图
-               的顶上。第一行是开关，右边的小箭头把下面这一整块（外观设置、
-               搜索、几何标注、分类开关）收起或展开。 ─────────────────── -->
+               的顶上。第一行是开关、搜索，右边的小箭头把下面这一整块（外观设置、
+               几何标注、分类开关）收起或展开；搜索不收起。 ─────────────── -->
           <div class="label-bar" id="label-bar">
             <button class="ghost" id="annotate" aria-pressed="false"
                     title="把环形山、月海等已命名地貌投影到图上；模拟已知几何，不做图像识别">
               月面地貌标注 <span class="en">Landforms</span>
             </button>
-            <!-- 暗面 and 复位 stay out here: one decides whether the night side
-                 is labelled at all, the other throws away a whole afternoon of
-                 fiddling, and both are wanted without opening anything. -->
+            <!-- 暗面, 刷新字体 and 复位 stay out here: one decides whether the
+                 night side is labelled at all, one retypes without moving
+                 anything, the other throws away a whole afternoon of fiddling,
+                 and all three are wanted without opening anything. -->
             <label class="check inline" title="把夜面（终端线以西）的地貌也标出来">
               <input type="checkbox" id="label-shadow">
               <span>暗面</span>
             </label>
+            <!-- 刷新字体不属于可折叠的外观设置：它是"放大看"时最常按的那一下，
+                 而且它不改变布局，只把字号按当前视口重新算一遍。 -->
+            <button class="ghost" id="label-refresh-font"
+                    title="只刷新自适应字号：已有标注的位置、显示/不显示与避让方案都不动（手动拖过的也不动），适合放大观看后让文字重新适配">刷新字体</button>
             <button class="ghost icon reset" id="label-reset"
                     title="标注设置复位：开关、密度、字号、颜色与几何标注都回到默认"></button>
             <button class="ghost caret" id="label-more" aria-expanded="false"
-                    title="展开搜索、几何标注与外观设置">▸</button>
+                    title="展开几何标注与外观设置">▸</button>
+            <!-- 地貌搜索住在这一行的最右，和「月面地貌标注」开关同级：它不是一个
+                 可以收起来的外观选项，而是一直要用的入口。下面的几何标注因此
+                 向上补位，图标行不再被搜索框压窄。 -->
+            <label class="find-label">地貌搜索 <span class="en">Find a landform</span>
+              <input type="text" id="feature-search" list="feature-options" autocomplete="off"
+                     placeholder="支持中英文">
+              <datalist id="feature-options"></datalist>
+            </label>
             <div class="annot-detail" id="annot-detail">
             <div class="label-controls" id="label-controls">
               <label class="check inline">名称
@@ -185,14 +198,6 @@
                      title="按预览窗口（屏幕）大小算，与渲染分辨率无关；留空为窗口短边的 2.1%">字号 px
                 <input type="number" id="label-font" min="6" max="64" step="1" placeholder="自动">
               </label>
-              <!-- 锁定：避让算法是按字号算的，改字号就会重排 —— 那是"帮我排一版"的
-                   正确答案，却是"把字调大一点"的错误答案。锁定后只改字的大小，
-                   框的位置与避让方案不动。 -->
-              <label class="check inline"
-                     title="锁定当前标注的位置与避让方案：改字号（或缩放窗口）只改变字形大小，标注不再重排；改分类、语言、密度、明暗或换一帧时会按新条件重排一次，并把这个新布局重新锁定">
-                <input type="checkbox" id="label-lock">
-                <span>锁定布局</span>
-              </label>
               <label class="check inline" title="勾选：标签按地貌分类着色；不勾：全部用下边这一个文字颜色">
                 <input type="checkbox" id="label-colour" checked>
                 <span>彩色</span>
@@ -203,6 +208,13 @@
               <label class="check inline" title="描边让文字在亮高地与暗坑底上都读得出来">描边
                 <input type="color" id="text-stroke" value="#0c0e14">
                 <input type="number" id="text-stroke-width" min="0" max="6" step="0.5" value="2">
+              </label>
+              <!-- 标注点 = 图上那个小圆点。它的描边和文字描边是两件事：文字描边
+                   是为了读得出来，圆点的描边是为了在地貌上留一个位置记号。 -->
+              <label class="check inline"
+                     title="每个地貌标注点（小圆）的描边颜色与宽度；宽度按屏幕像素算，随缩放一起缩放">标注点描边
+                <input type="color" id="marker-stroke" value="#0c0e14">
+                <input type="number" id="marker-stroke-width" min="0" max="3" step="0.1" value="1">
               </label>
               <label class="check inline">
                 <input type="checkbox" id="text-bold">
@@ -219,16 +231,19 @@
                   <option value="none">不画</option>
                 </select>
               </label>
+              <!-- 锁定：避让算法是按字号算的，改字号就会重排 —— 那是"帮我排一版"的
+                   正确答案，却是"把字调大一点"的错误答案。锁定后只改字的大小，
+                   框的位置与避让方案不动。它是这一排参数的最后一项。 -->
+              <label class="check inline"
+                     title="锁定当前标注的位置与避让方案：改字号（或缩放窗口）只改变字形大小，标注不再重排；改分类、语言、密度、明暗或换一帧时会按新条件重排一次，并把这个新布局重新锁定">
+                <input type="checkbox" id="label-lock">
+                <span>锁定布局</span>
+              </label>
             </div>
 
-          <!-- 左边是搜索与几何标注（几何开关就在搜索框下方），右边是分类开关。 -->
+          <!-- 左边是几何标注，右边是分类开关；搜索已经搬到上面那一行。 -->
           <div class="find-bar">
             <div class="find-left">
-              <label class="find-label">地貌搜索 <span class="en">Find a landform</span>
-                <input type="text" id="feature-search" list="feature-options" autocomplete="off"
-                       placeholder="支持中英文">
-                <datalist id="feature-options"></datalist>
-              </label>
               <!-- 几何标注：只画在全月面上。它们不需要地名库，页面自己按正射投影算
                    得出来——这些恰好是模拟确切知道的东西。 -->
               <div class="mark-bar" id="mark-bar">
@@ -441,15 +456,12 @@
         <figcaption>
           <!-- 这一栏只有一张"页"：实时特写。标题做成标签页的样子，和「几何模拟 /
                后期成片」同一套：它们说的是同一件事——这里是一扇窗，不是一栏设置。
-               右上角那个按钮属于这扇窗（把选框退回上一次生成模拟时的那一套），所以
-               它和标签页同排、靠右，不和下面的输入框一起读。 -->
+               「同步选框到此视场」跟着选框走，所以它搬去了下面「几何模拟」那一排。 -->
           <span class="tabs" id="info-tabs">
             <!-- 没有 data-tab：这一栏只有一张页，标签不是开关，按下去不该发生
                  任何事——它的作用是把这一栏和「几何模拟 / 后期成片」归成一类。 -->
             <button class="tab" aria-pressed="true">实时特写</button>
           </span>
-          <button class="ghost" id="sel-sync-last" disabled
-                  title="把选框复位到上一次生成模拟时用的那一套设置（中心、大小、旋转角）">同步回当前视场</button>
         </figcaption>
         <div class="view-body info-body" id="body-info">
           <!-- 实时特写：永远框住选框（那是这一帧要渲染的地面），所以没有倍率选项。
@@ -489,6 +501,11 @@
             <button class="tab" data-tab="raw" aria-pressed="true">几何模拟</button>
             <button class="tab" data-tab="proc" aria-pressed="false">后期成片</button>
           </span>
+          <!-- 同步选框：把选框退回上一次生成模拟时的那一套（中心、大小、旋转角）。
+               它属于这一排的选框，不属于「实时特写」那扇窗：按下去之后要动的正是
+               下面这两张近景，所以它和缩放控件并排，贴在缩放左边。 -->
+          <button class="ghost" id="sel-sync-last" disabled
+                  title="把选框复位到上一次生成模拟时用的那一套设置（中心、大小、旋转角）">同步选框到此视场</button>
           <span class="zoom" data-zoom="raw">
             <button data-zoom-out title="缩小">−</button>
             <b data-zoom-label>100%</b>
@@ -838,8 +855,8 @@
           <!-- 饱和度就是饱和度：旁边那个"彩色"开关说的是相机，它已经在相机的
                那一页里了，放在这里读起来像饱和度的第二个开关。 -->
           <div class="slider-row wide">
-            <span class="slider-label">饱和度</span>
-            <input type="range" id="saturation" min="0" max="1" step="0.01" value="1">
+            <span class="slider-label" title="饱和度：0 是完全黑白，1 是原始色彩，大于 1 把颜色从灰度推开（最高 3 倍，高光与暗部会被裁切）">饱和度</span>
+            <input type="range" id="saturation" min="0" max="3" step="0.01" value="1">
             <output id="saturation-out">1.00</output>
           </div>
           <div class="slider-row wide">
@@ -987,7 +1004,21 @@
             </div>
             <div class="param-row">
               <span class="slider-label">时间步长</span>
-              <input type="number" id="anim-step" value="10" step="1" min="0.01">
+              <!-- A text input rather than a number input: every browser shows
+                   the datalist arrow on a text field, several do not on a
+                   number field, and the requirement is a visible list *and*
+                   free typing.  The value is validated when the run starts. -->
+              <input type="text" id="anim-step" value="10" inputmode="decimal"
+                     list="anim-step-presets"
+                     title="可直接键入任意步长，也可从下拉里挑 1 / 5 / 10 / 15 / 30 / 60">
+              <datalist id="anim-step-presets">
+                <option value="1"></option>
+                <option value="5"></option>
+                <option value="10"></option>
+                <option value="15"></option>
+                <option value="30"></option>
+                <option value="60"></option>
+              </datalist>
               <select id="anim-step-unit" class="unit" title="时间步长的单位">
                 <option value="1">秒</option>
                 <option value="60" selected>分</option>
@@ -1025,7 +1056,6 @@
               <input type="text" id="anim-px" inputmode="numeric" value="1000" size="6" hidden>
               <span class="unit">px</span>
             </div>
-            <p class="hint" id="anim-scale-note"></p>
             <!-- 每像素采样：n×n 条光线平均成一个像素，把月面边缘与明暗界线上的
                  锯齿平均掉。最细的物理分辨率下，阴影顶端会露出地形栅格的纹理，
                  这个旋钮就是为它准备的。 -->
@@ -1055,6 +1085,21 @@
               </label>
               <label class="check inline">地照增益
                 <input type="text" id="anim-earthshine-gain" inputmode="decimal" value="20" size="4">
+              </label>
+            </div>
+            <!-- 地貌标注：与整月面/近景保存里的「地貌」是同一个意思，只是这里按
+                 每一帧重新投影。锁定布局把第一帧的排法冻结给整段动画，标注不再
+                 随天平动和月相逐帧漂移。 -->
+            <div class="row">
+              <label class="check inline"
+                     title="把月面地貌名称与轮廓画进每一帧动画（按帧的视角重新投影）">
+                <input type="checkbox" id="anim-annotated">
+                <span>地貌</span>
+              </label>
+              <label class="check inline"
+                     title="锁定第一帧的标注布局：整段动画沿用同一套位置与避让；不锁定时每帧按当时的视角重新排版">
+                <input type="checkbox" id="anim-label-lock">
+                <span>锁定布局</span>
               </label>
             </div>
             <div class="row">
@@ -1106,9 +1151,9 @@
               <button class="ghost" id="anim-cancel">终止</button>
             </div>
             <div class="progress" id="anim-progress" hidden><span id="anim-progress-bar"></span></div>
-            <!-- 跨度与帧数：开始、结束与步长一改它就重算，不需要先按下生成。
-                 它说的是"这一次会拍出多长的一段"，是按下按钮之前唯一还想知道的事。 -->
-            <p class="hint" id="anim-span"></p>
+            <!-- 跨度、帧数与每像素尺度：一行，放在最下面。尺度不该单独占一行——
+                 它和「12 h，共 73 帧」都是"这一次会拍出什么"的答案。 -->
+            <p class="hint anim-plan" id="anim-plan"><span id="anim-scale-note"></span><span id="anim-span"></span></p>
             <p class="hint" id="anim-status" hidden></p>
           </div>
         </section>

@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # contain "-", and pip normalises the two spellings to the same project anyway,
 # so the two forms never disagree about which package this is.
 name = "moonlib-s"
-version = "1.1.1"
+version = "1.1.2"
 description = "Offline lunar computation library: position, phases, rise/set, libration, crescents and limb-target prediction from local JPL SPICE kernels"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -47,12 +47,15 @@ tiff = ["Pillow>=9.0"]
 # MP4 animation.  imageio-ffmpeg ships a static ffmpeg binary, so an animation
 # needs no system package; with neither it nor `ffmpeg` on PATH,
 # `moonlib_s.encode.write_mp4` raises rather than writing something else.
-video = ["imageio-ffmpeg>=0.4"]
+# Pillow is what writes landform names into the frames: PIL's own text drawing
+# is the only way to put a CJK name on a picture, and an animation with 地貌
+# ticked would otherwise fail after the first frame had already been traced.
+video = ["imageio-ffmpeg>=0.4", "Pillow>=9.0"]
 # HDR gain-map JPEG (ISO 21496-1).  Pillow encodes the two JPEG streams; the
 # MPF/APP2 and XMP boxes are written by hand in moonlib_s.hdr.
 hdr = ["Pillow>=9.0"]
 # Everything a normal installation wants.
-full = ["timezonefinder>=6.0", "matplotlib>=3.5"]
+full = ["timezonefinder>=6.0", "matplotlib>=3.5", "Pillow>=9.0"]
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",

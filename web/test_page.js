@@ -32,12 +32,13 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'syncKmPxPresets', 'DEFAULT_OFF_CLASSES', 'animationRequest',
   'animationRenderSize', 'animationOutputPixels', 'animationSkyKm',
   'setLabelControls', 'syncResolutionPicker', 'previewPixels',
-  'applySettings', 'centrePlacement', 'setAllClasses', 'aimingFrame',
+  'applySettings', 'centrePlacement', 'setAllClasses',
   'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setProcTab',
   'buildEventKinds', 'drawViewLabels', 'labelEdits', 'labelHidden', 'labelClass',
   'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler',
   'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'lockedDiskPlan',
-  'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx'];
+  'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
+  'renderPixels', 'compassDirection', 'animationAnnotationsPayload'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -639,6 +640,30 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   }
 
   console.log('');
+  console.log('方位角 in words as well as degrees');
+  /* The compass word is generated, not markup: the readout's English switch
+     cannot translate a word the script produced, so it has to be re-rendered. */
+  {
+    check('the example the reader asked for is ESE',
+      T.compassDirection(112.5, 'zh') === '东南偏东',
+      T.compassDirection(112.5, 'zh'));
+    check('due north and due west are the words themselves',
+      T.compassDirection(0, 'zh') === '北' && T.compassDirection(270, 'zh') === '西');
+    check('and it wraps past 360°',
+      T.compassDirection(350, 'zh') === '北' && T.compassDirection(-10, 'zh') === '北');
+    check('the readout prints the degree and the direction together',
+      /^180\.30°（南）$/.test(document.getElementById('mi-az').textContent),
+      document.getElementById('mi-az').textContent);
+    fire('moon-lang', 'click');
+    await tick();
+    check('the English readout switches the word too',
+      /^180\.30° \(S\)$/.test(document.getElementById('mi-az').textContent),
+      document.getElementById('mi-az').textContent);
+    fire('moon-lang', 'click');
+    await tick();
+  }
+
+  console.log('');
   console.log('the resolution menus');
   /* Every size either menu offers has to be one the page can actually ask for:
      a preset that gets clamped is a menu entry that lies. */
@@ -711,11 +736,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   console.log('');
   console.log('folding the landform panel away');
   T.setLabelControls(false);
-  check('the search, the overlays and the style controls all fold away',
+  check('the overlays and the style controls fold away',
     document.getElementById('annot-detail').hidden === true &&
     document.getElementById('label-more').getAttribute('aria-expanded') === 'false',
     document.getElementById('label-more').textContent);
-  check('and the switch itself stays', document.getElementById('annotate').hidden === false);
+  check('but the search and the switch itself stay',
+    document.getElementById('annotate').hidden === false &&
+    document.getElementById('feature-search').hidden === false);
   T.setLabelControls(true);
   check('and unfold again',
     document.getElementById('annot-detail').hidden === false &&
@@ -956,6 +983,32 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   set('label-colour', true);
   fire('label-colour', 'change');
   await tick();
+  /* 标注点描边 is the marker's own rim: it used to be the text stroke in
+     disguise, with a fixed width.  Both halves have to reach the painter. */
+  set('marker-stroke', '#ff0000');
+  set('marker-stroke-width', 0.6);
+  fire('marker-stroke', 'change');
+  await tick();
+  {
+    const style = T.labelStyleFor('disk');
+    check('the marker rim has its own colour and width',
+      style.markerStrokeColor === '#ff0000' &&
+      style.markerStrokeWidth > 0 &&
+      style.markerStrokeWidth < T.labelStyleFor('disk').strokeWidth,
+      `${style.markerStrokeColor} / ${style.markerStrokeWidth}`);
+    check('and the default is thinner than the old fixed rim',
+      (() => {
+        set('marker-stroke-width', 1);
+        fire('marker-stroke-width', 'change');
+        const s = T.labelStyleFor('disk');
+        return s.markerStrokeWidth * T.labelScreenFontPx('disk') /
+          Math.max(1e-9, T.labelFrameFontPx('disk')) <= 1.001;
+      })(),
+      String(T.labelStyleFor('disk').markerStrokeWidth));
+  }
+  set('marker-stroke', '#0c0e14');
+  set('marker-stroke-width', 1);
+  fire('marker-stroke', 'change');
 
   console.log('');
   console.log('the geometric overlays need no server');
@@ -1033,6 +1086,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
 
   console.log('');
   console.log('generating a close-up refreshes its labels');
+  /* The first press has to render at the 物理分辨率 the reader chose.  It used
+     to render an aiming preview of the box (a few hundred pixels) and only the
+     second press, 更新模拟, honoured the setting -- which read as "the highest
+     resolution is ignored the first time". */
+  set('out-kmpx-preset', '0.25');
+  fire('out-kmpx-preset', 'change');
+  const chosen = T.renderPixels();
   /* The regression this catches: acceptRender used to call a dead helper that
      threw, so every render after the first left the page half-updated -- the
      resolution line stale and, because the throw happened before the label
@@ -1043,6 +1103,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   const regionCall = fetchCalls.filter((c) => c.url === '/api/region').length;
   const annotationCalls2 = fetchCalls.filter((c) => c.url === '/api/annotations');
   check('生成模拟 rendered a close-up', regionCall >= 1, regionCall);
+  {
+    const first = fetchCalls.filter((c) => c.url === '/api/region').pop();
+    check('the first press renders at the chosen physical resolution',
+      first.body.output.width === chosen.width &&
+      first.body.output.height === chosen.height,
+      `${first.body.output.width}×${first.body.output.height} vs ` +
+      `${chosen.width}×${chosen.height}`);
+  }
   /* Once there is a frame to update, the same button offers to update it --
      under the name the status line uses when it asks the reader to press it. */
   check('the button becomes 更新模拟 after the first render',
@@ -1232,6 +1300,32 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('disk-preset').options.length,
     `${document.getElementById('anim-preset').options.length} vs ` +
     `${document.getElementById('disk-preset').options.length}`);
+  check('时间步长 is a list of common steps that can still be typed into',
+    /id="anim-step"[^>]*list="anim-step-presets"/.test(html) &&
+    ['1', '5', '10', '15', '30', '60']
+      .every((value) => new RegExp(`<option value="${value}"></option>`).test(html)),
+    'datalist');
+  {
+    /* 地貌 in the animation pane: the request has to carry the projection
+       knobs, and HDR has to give way because a name is an sRGB mark. */
+    set('anim-annotated', true);
+    fire('anim-annotated', 'change');
+    const ann = T.animationAnnotationsPayload();
+    check('地貌 sends a complete annotation block',
+      ann.on === true && (ann.classes === null || Array.isArray(ann.classes)) &&
+      ann.font_px > 0 && ann.class_colors && 'crater' in ann.class_colors &&
+      ann.marker_stroke === '#0c0e14' && ann.marker_stroke_width === 1,
+      JSON.stringify(ann));
+    check('and it is the same block the run will post',
+      T.animationRequest().annotations.on === true);
+    check('地貌 turns HDR off and disables it',
+      document.getElementById('anim-hdr').disabled === true &&
+      document.getElementById('anim-hdr').checked === false);
+    set('anim-annotated', false);
+    fire('anim-annotated', 'change');
+    check('turning it off gives HDR back',
+      document.getElementById('anim-hdr').disabled === false);
+  }
   {
     const before = fetchCalls.filter((c) => c.url === '/api/animation').length;
     fire('anim-run', 'click');
@@ -1260,6 +1354,29 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     await new Promise((resolve) => setTimeout(resolve, 30));
     check('终止 goes through the same /api/cancel as a single frame',
       fetchCalls.filter((c) => c.url === '/api/cancel').length === cancels + 1);
+    check('and a finished run puts 生成动画 back on the button',
+      document.getElementById('anim-run').textContent.trim() === '生成动画',
+      document.getElementById('anim-run').textContent);
+
+    /* 立即保存: while the run is going the same button stops after the frame
+       in flight and keeps the frames already rendered; it is a different
+       endpoint from 终止, which throws the file away. */
+    fire('anim-run', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    check('while a run is going the button says 立即保存',
+      document.getElementById('anim-run').textContent.trim() === '立即保存',
+      document.getElementById('anim-run').textContent);
+    const finishes = fetchCalls.filter((c) => /\/finish$/.test(c.url)).length;
+    fire('anim-run', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    check('pressing it asks the job to keep what it has',
+      fetchCalls.filter((c) => /\/finish$/.test(c.url)).length === finishes + 1 &&
+      /\/finish$/.test(fetchCalls.filter((c) => /\/finish$/.test(c.url)).pop().url),
+      JSON.stringify(fetchCalls.filter((c) => /\/finish$/.test(c.url)).map((c) => c.url)));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    check('and the button goes back to 生成动画 afterwards',
+      document.getElementById('anim-run').textContent.trim() === '生成动画',
+      document.getElementById('anim-run').textContent);
   }
   fire('proc-tab-processing', 'click');
 
@@ -1430,11 +1547,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     `${document.getElementById('roughness').value} / ` +
     `${document.getElementById('noise-poisson').value} / ` +
     `${document.getElementById('photometric-model').value}`);
-  check('and every reset button wears the two-arrow graphic, not a rotation',
+  check('and every reset button is the word Reset, not a glyph',
     [...document.querySelectorAll('button.reset')].length >= 4 &&
     [...document.querySelectorAll('button.reset')]
-      .every((button) => /<svg/.test(button.innerHTML)),
-    String(document.querySelectorAll('button.reset').length));
+      .every((button) => button.textContent.trim() === 'Reset' &&
+        !/<svg/.test(button.innerHTML)),
+    [...document.querySelectorAll('button.reset')]
+      .map((button) => button.textContent).join('|'));
   check('the render id travels with the label request',
     annotationCalls2[annotationCalls2.length - 1].body.render_id === T.state.renderId,
     annotationCalls2[annotationCalls2.length - 1].body.render_id);
@@ -1490,18 +1609,6 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   /* The window shows the box's own frame, so its size follows the box's shape:
      a square box gets a square window, a 2:1 box gets a 2:1 window. */
   const square = T.magnifierView(300, 300);
-  /* 生成模拟 previews the box's own proportions: a 3:1 box previewed in a
-     square frame showed a different patch of ground than the box encloses. */
-  {
-    const before = T.aimingFrame();
-    T.state.selection = { ...T.state.selection, aspect: 0.34 };
-    const wide = T.aimingFrame();
-    check('the aiming frame takes the box proportions',
-      wide.width > wide.height && Math.abs(wide.width / wide.height - 1 / 0.34) < 0.06,
-      `${before.width}×${before.height} -> ${wide.width}×${wide.height}`);
-    T.state.selection = { ...T.state.selection, aspect: 0.34 };
-  }
-
   check('the window takes the shape of the box it is showing',
     Math.abs(square.width / square.height - square.halfW / square.halfH) < 0.02,
     `${square.width}×${square.height}`);
@@ -2270,6 +2377,28 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       Math.abs(T.labelStyleForFrame('disk').fontPx - T.labelFrameFontPx('disk')) < 1e-9 &&
       T.labelStyleFor('disk').fontPx === undefined,
       `${T.labelStyleForFrame('disk').fontPx} / ${frozen.font_px}`);
+    /* 刷新字体: the third option between "leave it alone" and "lay it out
+       again".  It re-derives the plan's font for the current magnification and
+       touches nothing else -- not a box, not a hidden name, not a nudge the
+       reader made by hand. */
+    {
+      T.labelEdits.disk['Clavius'] = { dx: 5, dy: -3 };
+      const itemsBefore = T.state.labels.disk.items;
+      const callsBefore = annotations();
+      fire('label-refresh-font', 'click');
+      await tick();
+      check('刷新字体 changes the plan font and nothing else',
+        T.state.labels.disk.items === itemsBefore &&
+        Math.abs(T.state.labels.disk.font_px - T.labelFrameFontPx('disk')) < 1e-9,
+        `${T.state.labels.disk.font_px} / ${T.labelFrameFontPx('disk')}`);
+      check('and leaves a hand-placed name exactly where it was',
+        T.labelEdits.disk['Clavius'] &&
+        T.labelEdits.disk['Clavius'].dx === 5 && T.labelEdits.disk['Clavius'].dy === -3,
+        JSON.stringify(T.labelEdits.disk['Clavius']));
+      check('without asking the server for a new layout',
+        annotations() === callsBefore, `${annotations()} / ${callsBefore}`);
+      delete T.labelEdits.disk['Clavius'];
+    }
     check('and an unlocked style still leaves the size to the plan',
       (set('label-lock', false), fire('label-lock', 'change'),
        evalIn(sandbox, 'labelStyleFor("disk").fontPx') === undefined));
@@ -2288,10 +2417,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fire('class-rima', 'change');
     await tick(); await tick();
     const beforeUnlock = annotations();
+    const planBeforeUnlock = T.state.labels.disk;
     set('label-lock', false);
     fire('label-lock', 'change');
     await tick(); await tick();
-    check('unlocking asks for a fresh layout', annotations() > beforeUnlock,
+    check('unlocking does not re-lay out or move a single name',
+      annotations() === beforeUnlock &&
+      T.state.labels.disk === planBeforeUnlock && T.labelLockOn() === false,
       `${annotations()} / ${beforeUnlock}`);
     set('label-font', '');
     fire('label-font', 'change');

@@ -27,7 +27,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -342,6 +342,8 @@ def animation_frames(
     region: Any = None,
     terrain: Optional[Any] = None,
     cancel: Optional[Any] = None,
+    graceful: bool = False,
+    render_cancel: Optional[Any] = None,
 ) -> Iterator[AnimationFrame]:
     """Render the instants from *start* to *end* inclusive, one frame each.
 
@@ -379,6 +381,18 @@ def animation_frames(
         to the renderer so a long frame can be interrupted between bands.  When
         it reports true the generator stops with
         ``MoonlibError("animation cancelled")``.
+    graceful
+        Treat *cancel* as "stop after the frame in flight and keep the frames
+        already produced" instead of as an abort.  The generator then ends
+        normally, which is what lets an encoder finish a shorter file -- the
+        page's 立即保存 -- while the renderer is not interrupted mid-frame.  In
+        this mode *render_cancel* is what the renderer polls (``None`` means it
+        cannot be interrupted), so a hard stop can still be delivered through a
+        second flag.
+    render_cancel
+        Only used with *graceful*: the callable forwarded to every render.  When
+        it reports true the frame in flight is abandoned and the generator
+        raises ``MoonlibError("animation cancelled")``, which is what 终止 does.
 
     Yields
     ------
@@ -432,18 +446,26 @@ def animation_frames(
         hint: Optional[float] = None
         for index, instant in enumerate(instants):
             if _cancelled(cancel):
-                raise MoonlibError("animation cancelled")
+                if not graceful:
+                    raise MoonlibError("animation cancelled")
+                # Graceful: keep the frame already being traced, and keep at
+                # least one frame so the encoder has something to write.  A stop
+                # pressed before the first ray is finished waits for it.
+                if index > 0:
+                    return
             et = float(instant)
             # The same call render_moon makes for itself when no view is given,
             # so a frame is bit-for-bit an independent render of this instant.
             view = view_geometry(site, et, earth_albedo=options.earth_geometric_albedo)
+            # A graceful stop must not cut a frame in half; a hard cancel must.
+            interrupt = render_cancel if graceful else cancel
             try:
                 if target is None:
                     render = render_moon(
                         view=view,
                         settings=pinned,
                         terrain=shared,
-                        cancel=cancel,
+                        cancel=interrupt,
                         exposure_hint=hint,
                     )
                 else:
@@ -453,7 +475,7 @@ def animation_frames(
                         target.lat,
                         settings=pinned,
                         terrain=shared,
-                        cancel=cancel,
+                        cancel=interrupt,
                         exposure_hint=hint,
                         **request,
                     )
@@ -461,7 +483,10 @@ def animation_frames(
                 # render_moon reports cancellation in the server's own wording;
                 # this generator has one message for it, so the transport layer
                 # can map a stopped animation onto a single response.
-                if _cancelled(cancel):
+                hard_stop = (
+                    _cancelled(render_cancel) if graceful else _cancelled(cancel)
+                )
+                if hard_stop:
                     raise MoonlibError("animation cancelled") from error
                 raise
             if index == 0:
@@ -488,12 +513,18 @@ def animation_frames(
 # encoding
 # ---------------------------------------------------------------------------
 def _display_frame(item: Any) -> Any:
-    """The SDR pixels of one item: a render's display image, or the item itself."""
-    if isinstance(item, AnimationFrame):
-        image = getattr(item.render, "image", None)
+    """The SDR pixels of one item: a render's display image, or the item itself.
+
+    A plain object carrying ``render.image`` is accepted as well as an
+    :class:`AnimationFrame`: the server wraps a post-processed frame in one so
+    the caption and the annotation painter can still see its instant and view.
+    """
+    render = getattr(item, "render", None)
+    if render is not None:
+        image = getattr(render, "image", None)
         if image is None:
             raise MoonlibError(
-                "write_animation: this AnimationFrame carries no render.image."
+                "write_animation: this frame carries no render.image."
             )
         return image
     return item
@@ -555,6 +586,7 @@ def write_animation(
     scale_to: Optional[Any] = None,
     smooth_px: float = 0.0,
     timestamp: Optional[Dict[str, Any]] = None,
+    annotate: Optional[Callable[[Any, Any], Any]] = None,
     ffmpeg: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Encode *frames* to an MP4 at *path*.
@@ -594,6 +626,14 @@ def write_animation(
         from :func:`moonlib_s.caption.stamp_text`, so the format is fixed.  It
         needs :class:`AnimationFrame`s -- a plain array carries no instant, and
         asking for a stamp on one is an error rather than a silent omission.
+    annotate
+        Optional ``callable(item, frame) -> frame`` applied to each display
+        frame *after* the resize and the sub-pixel smoothing, and before the
+        time stamp.  It receives the item the frame came from (so the camera and
+        the instant are still reachable) and the pixels at the file's own size,
+        which is where a burned-in name belongs: type drawn before the resize
+        would be resampled with everything else.  Not available for HDR: a name
+        is an sRGB mark, not scene-linear light.
     ffmpeg
         Explicit ffmpeg executable, forwarded to :func:`moonlib_s.encode.write_mp4`.
 
@@ -603,6 +643,12 @@ def write_animation(
         The encoder's summary: ``{"path", "frames", "fps", "seconds", "width",
         "height", "codec", "hdr"}``.
     """
+    if hdr and annotate is not None:
+        raise MoonlibError(
+            "write_animation(hdr=True) cannot draw annotations: a name is an "
+            "sRGB mark, not scene-linear light."
+        )
+
     def convert(item: Any) -> Any:
         """One item, all the way to the pixels that go into the file.
 
@@ -618,6 +664,8 @@ def write_animation(
             frame = resize_frame(frame, scale_to)
         if smooth_px:
             frame = smooth_frame(frame, smooth_px)
+        if annotate is not None:
+            frame = annotate(item, frame)
         if timestamp:
             frame = stamp_frame(
                 frame,

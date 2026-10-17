@@ -71,6 +71,7 @@ LAYERS: Dict[str, int] = {
     "anim": 4,
     "encode": 4,
     "hdr": 4,
+    "labelpaint": 4,
 }
 
 #: Peer imports that are allowed in addition to the strictly-lower-layer rule.
@@ -92,10 +93,10 @@ POOL_OWNER = "kernels"
 OPTIONAL_DEPENDENCIES = {
     "timezonefinder": {"timeutil"},
     "matplotlib": {"plotting", "_mpl"},
-    # Pillow reads a *compressed* colour TIFF and writes the two JPEGs of an HDR
-    # gain map; both uses are opt-in and both fail with a MoonlibError naming
-    # the missing package.
-    "PIL": {"terrain", "hdr"},
+    # Pillow reads a *compressed* colour TIFF, writes the two JPEGs of an HDR
+    # gain map, and paints landform names into animation frames; every use is
+    # opt-in and every one fails with a MoonlibError naming the missing package.
+    "PIL": {"terrain", "hdr", "labelpaint"},
     # The MP4 encoder.  Only encode.py may look for it, so "there is no ffmpeg"
     # surfaces as one clear message instead of a crash somewhere else.
     "imageio_ffmpeg": {"encode"},

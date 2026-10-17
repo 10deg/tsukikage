@@ -42,6 +42,7 @@ const state = {
   features: null,      // the searchable landform index, fetched once
   moonLang: 'zh',      // the Moon readout's own language
   animationId: null,   // the background animation job being polled, if any
+  animationRunning: false, // the job is still producing frames
 };
 
 /* One zoom state per view, in CSS transform units.  Zooming is a transform on
@@ -499,7 +500,9 @@ const PROC_FIELDS = [
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
   'label-lock',
-  'text-bold', 'text-color', 'outline-style', 'outline-width', 'outline-color',
+  'text-bold', 'text-color', 'text-stroke', 'text-stroke-width',
+  'marker-stroke', 'marker-stroke-width',
+  'outline-style', 'outline-width', 'outline-color',
 ];
 
 /** The current instant as the wall clock of the page's own time zone. */
@@ -1080,18 +1083,17 @@ function updateDownloadLink() {
   link.download = downloadFileName(target) + '.png';
 }
 
-/* ── resolution: preview, aiming, and the final render ─────────────────────
+/* ── resolution: preview and the close-up render ───────────────────────────
  *
- * Three sizes, deliberately separate, because they cost very different things:
+ * Two sizes, deliberately separate, because they cost very different things:
  *
  *   **the whole-disk preview** (预览 px, in the disk's own title bar) is how
  *   sharp the aiming picture is.  It is re-rendered on every change of time or
  *   place, so it is capped to keep that responsive.
- *   **the aiming render** (生成模拟) is a close-up at a size *derived from the
- *   selection* -- about what the box already shows on the preview -- so that
- *   placing the box and seeing the result is quick.
- *   **the output render** (更新图像) is the size typed in the output pane, and
- *   it is the only one that is allowed to be slow.
+ *   **the close-up render** (生成模拟 / 更新模拟) is the size the 采样 ″/px
+ *   setting and the selection imply -- the frame the settings describe, from
+ *   the very first press.  It is allowed to be slow; the reader chose the
+ *   scale.
  *
  * The pixel count and the plate scale say the same thing twice, so they are
  * kept in step: type a scale and the pixels follow, type pixels and the scale
@@ -1203,35 +1205,6 @@ function wireResolutionPicker(inputId, selectId) {
 /** Aspect of the selection box (height / width); 1 when nothing is selected. */
 function selectionAspect() {
   return state.selection ? shapeAspect() : 1;
-}
-
-/** How big the selection box is drawn on the preview, in preview pixels. */
-function selectionBoxPixels() {
-  const box = boxGeometry();
-  if (!box) return null;
-  return 2 * Math.max(box.halfW, box.halfH);
-}
-
-/** Aiming size for 生成模拟: about the detail the box already shows. */
-function aimingPixels() {
-  const boxPx = selectionBoxPixels();
-  if (!boxPx) return 480;
-  return clampPx(boxPx * 1.5, 240, Math.min(LIMITS.preview_px, 1024));
-}
-
-/** The aiming frame's size, in the box's own proportions.
- *
- * A box dragged out to 3:1 used to be previewed in a square frame: the two
- * panes then showed a different patch of ground from the one the box encloses,
- * which is exactly what the reader is looking at them to check.  The short side
- * keeps the size the box's detail asks for and the long side follows.
- */
-function aimingFrame() {
-  const long = aimingPixels();
-  const aspect = Math.max(1e-3, selectionAspect());
-  return aspect >= 1
-    ? { width: Math.round(long / aspect), height: long }
-    : { width: long, height: Math.round(long * aspect) };
 }
 
 /** Arcseconds across the selection, which is the frame's shorter side. */
@@ -1833,6 +1806,7 @@ function labelStyleFor(viewName, frameFactor = 1) {
   const scale = screenScale(viewName) / Math.max(1e-6, frameFactor);
   const mode = $('outline-style').value;
   const strokeWidth = Number($('text-stroke-width').value);
+  const markerWidth = Number($('marker-stroke-width').value);
   const outlineWidth = Number($('outline-width').value);
   return {
     outlineWidth: (outlineWidth > 0 ? Math.min(4, outlineWidth) : 1) / scale,
@@ -1842,6 +1816,10 @@ function labelStyleFor(viewName, frameFactor = 1) {
     textColor: $('text-color').value,
     strokeColor: $('text-stroke').value,
     strokeWidth: Math.max(0, Number.isFinite(strokeWidth) ? strokeWidth : 2) / scale,
+    // The marker's rim is its own line: the text stroke is about legibility,
+    // this one only has to hold the dot apart from the ground under it.
+    markerStrokeColor: $('marker-stroke').value,
+    markerStrokeWidth: Math.max(0, Math.min(3, Number.isFinite(markerWidth) ? markerWidth : 1)) / scale,
     bold: $('text-bold').checked,
     classColors: CLASS_COLORS,
     // 彩色 on = every label takes its own class's colour; off = one colour for
@@ -1938,6 +1916,12 @@ function paintLabels(ctx, plan, style) {
   const textColor = ink.textColor || '#eef2ff';
   const strokeColor = ink.strokeColor || 'rgba(12, 14, 20, .92)';
   const strokeWidth = ink.strokeWidth === undefined ? fontPx * 0.28 : ink.strokeWidth;
+  // A marker's rim has its own colour and width.  The fallbacks are the old
+  // fixed rims, so a caller that paints without a style still draws what it
+  // always did.
+  const markerStrokeColor = ink.markerStrokeColor || strokeColor;
+  const markerStrokeWidth = ink.markerStrokeWidth === undefined
+    ? Math.max(1, fontPx * 0.1) : ink.markerStrokeWidth;
   const marker = Math.max(1.4, fontPx * 0.16);
   // A feature on the night side is not really observable -- it is drawn because
   // it was asked for, and half-faded so it cannot be mistaken for a lit one.
@@ -1988,9 +1972,11 @@ function paintLabels(ctx, plan, style) {
     ctx.arc(item.x, item.y, marker, 0, Math.PI * 2);
     ctx.fillStyle = colour;
     ctx.fill();
-    ctx.lineWidth = Math.max(1, fontPx * 0.1);
-    ctx.strokeStyle = strokeColor;
-    ctx.stroke();
+    if (markerStrokeWidth > 0) {
+      ctx.lineWidth = markerStrokeWidth;
+      ctx.strokeStyle = markerStrokeColor;
+      ctx.stroke();
+    }
   }
   for (const item of plan.items) {
     if (!item.labelled) continue;
@@ -3734,26 +3720,16 @@ function polygonArea(points) {
   return Math.abs(total) / 2;
 }
 
-/** The reset graphic: two arrows chasing each other round a circle.
+/** The word on every reset button.
  *
- * A single arrow curving back on itself reads as "rotate" -- which is what the
- * ↺ character looked like next to 图像旋转, and it was pressed by mistake.  Two
- * arrows say "put it back" and nothing else.
+ * It was two arrows chasing each other round a circle.  A glyph has to be
+ * taught -- "what does this circle do?" -- while the word says it before the
+ * reader has to work anything out, and at 8 px it fits inside the same button
+ * height the icon needed.  See `button.reset` in the stylesheet.
  */
-const RESET_ICON = [
-  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">',
-  '<path d="M3.4 6.6a4.9 4.9 0 0 1 8.9-.6" fill="none" stroke="currentColor"',
-  ' stroke-width="1.5" stroke-linecap="round"/>',
-  '<path d="M12.9 3.1v3.3H9.6" fill="none" stroke="currentColor"',
-  ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
-  '<path d="M12.6 9.4a4.9 4.9 0 0 1-8.9.6" fill="none" stroke="currentColor"',
-  ' stroke-width="1.5" stroke-linecap="round"/>',
-  '<path d="M3.1 12.9v-3.3h3.3" fill="none" stroke="currentColor"',
-  ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>',
-  '</svg>',
-].join('');
+const RESET_LABEL = 'Reset';
 
-/** Every button that wears the two-arrow reset graphic. */
+/** Every button that resets something. */
 const RESET_BUTTONS = ['label-reset', 'sel-reset-rot', 'output-reset', 'proc-reset'];
 
 const PHASE_EXPORT_PX = 600;
@@ -4089,6 +4065,43 @@ function refreshLabelPlans() {
   drawAllLabels();
   drawMagnifier();
   if (state.labelsOn) refreshLabels();
+}
+
+/** Re-derive the adaptive type size without moving a single name.
+ *
+ *  The plan's own ``font_px`` is the size its boxes were laid out for.  When
+ *  the window (or the zoom) changes, the *paint* follows the new scale, but an
+ *  unlocked plan keeps drawing at the old size -- so a picture magnified to read
+ *  a crater ends up with type that no longer matches what the reader is doing.
+ *  Re-laying out would move every name, including the ones they placed by hand.
+ *  This is the third option: keep the plan -- positions, hidden names, the
+ *  avoidance result -- and change only the number the glyphs are drawn at.
+ */
+function refreshLabelFontSizes() {
+  if (!state.labelsOn) {
+    setStatus('先打开「月面地貌标注」，再刷新字体', 'error');
+    return;
+  }
+  let updated = 0;
+  if (state.labels.disk) {
+    state.labels.disk = {
+      ...state.labels.disk,
+      font_px: labelFrameFontPx('disk'),
+    };
+    updated += 1;
+  }
+  if (state.labels.region) {
+    state.labels.region = {
+      ...state.labels.region,
+      font_px: labelFrameFontPx('raw'),
+    };
+    updated += 1;
+  }
+  drawAllLabels();
+  drawMagnifier();
+  setStatus(updated
+    ? `标注字体已按当前视口刷新（${Math.round(labelScreenFontPx('disk'))} px），布局未动`
+    : '还没有标注可刷新：先打开「月面地貌标注」');
 }
 
 function toggleLabels() {
@@ -4443,7 +4456,7 @@ function syncSelectionInputs() {
   $('sel-rotation').value = (s.rotationDeg || 0).toFixed(1);
 }
 
-/* ── 同步回当前视场 ────────────────────────────────────────────────────────
+/* ── 同步选框到此视场 ──────────────────────────────────────────────────────
  *
  * A close-up is aimed by dragging a box, and the moment the render lands the
  * reader starts exploring: they search a name, drag the corner, try a different
@@ -4600,7 +4613,7 @@ function describeDisk(g) {
  *
  * The disk covers the Moon's apparent diameter, so the scale is the linear
  * diameter over the disc's own pixel diameter -- no selection needed, which is
- * what makes it the right number for the aiming picture. */
+ * what makes it the right number for the whole-disk preview. */
 function diskKmPerPixel(width) {
   const g = state.geometry;
   if (!g) return null;
@@ -4732,6 +4745,7 @@ const SETTING_FIELDS = [
   'annotate', 'label-language', 'label-density', 'label-font',
   'label-shadow', 'label-colour', 'label-lock',
   'text-color', 'text-stroke', 'text-stroke-width', 'text-bold',
+  'marker-stroke', 'marker-stroke-width',
   'outline-color', 'outline-width', 'outline-style',
   'mark-terminator', 'mark-poles', 'mark-limb', 'mark-equator',
   'mark-libration', 'mark-subsolar', 'mark-nearside',
@@ -4740,6 +4754,7 @@ const SETTING_FIELDS = [
   'disk-hdr', 'disk-hdr-stops',
   'anim-start', 'anim-end', 'anim-step', 'anim-step-unit', 'anim-fps',
   'anim-px', 'anim-ref', 'anim-scope', 'anim-earthshine', 'anim-earthshine-gain',
+  'anim-annotated', 'anim-label-lock',
   'anim-samples', 'anim-timestamp', 'anim-timestamp-corner',
   'anim-timestamp-margin',
   'anim-hdr', 'anim-hdr-stops',
@@ -4871,6 +4886,10 @@ function applySettings(values) {
   // switch has to follow the format it was loaded with.  The zone may also be
   // stored as a plain "8", which is shown with its sign again.
   updateDiskHdrControls();
+  // The animation pane has two mutual exclusions of its own (后期处理 / 地貌
+  // against HDR), and a stored file can tick both sides at once.
+  updateAnimProcess();
+  refreshAnimationPlan();
   formatTimezone();
   applied += applyLayoutSettings(values['layout']);
 
@@ -5146,12 +5165,34 @@ function localTime(iso, offsetHours) {
   return d.toISOString().slice(11, 16);
 }
 
+/* ── compass words for the azimuth ─────────────────────────────────────────
+ *
+ * An azimuth in degrees is the measurement; the direction is what a reader
+ * actually plans by.  Sixteen points is the resolution of the instrument a
+ * person carries in their head, and it is enough that two directions a quarter
+ * of an hour apart are different words.  The Chinese names read as "east of
+ * south-east", which is exactly what the number says; the English ones are the
+ * aviation abbreviations. */
+const COMPASS_ZH = ['北', '北偏东', '东北', '东北偏东', '东', '东南偏东',
+                    '东南', '东南偏南', '南', '南偏西', '西南', '西南偏西',
+                    '西', '西北偏西', '西北', '西北偏北'];
+const COMPASS_EN = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+                    'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+
+/** The 16-point compass name of an azimuth measured from north through east. */
+function compassDirection(azimuthDeg, language) {
+  const value = Number(azimuthDeg);
+  if (!Number.isFinite(value)) return null;
+  const index = ((Math.round(value / 22.5) % 16) + 16) % 16;
+  return language === 'en' ? COMPASS_EN[index] : COMPASS_ZH[index];
+}
+
 function fillMoonInfo(g) {
   const rep = g.report || {};
-  const state = rep.state || {};
-  const phase = state.phase || {};
-  const lib = state.libration || {};
-  const orbit = state.orbit || {};
+  const snapshot = rep.state || {};
+  const phase = snapshot.phase || {};
+  const lib = snapshot.libration || {};
+  const orbit = snapshot.orbit || {};
   const rs = rep.rise_set || {};
   const tr = rep.transit || {};
   const tz = g.utc_offset_hours === undefined ? 8 : g.utc_offset_hours;
@@ -5168,20 +5209,27 @@ function fillMoonInfo(g) {
   set('mi-colong', fmt(lib.colongitude_deg, 2) + '°');
   // The two distances, each behind its own 地/站 mark: they differ by about a
   // third of a percent, and the marks say which is which without a header row.
-  set('mi-dist-geo', fmt(state.geo_distance_km, 0));
-  set('mi-dist-topo', fmt(state.topo_distance_km, 0));
-  set('mi-diam', arcsecText(state.angular_diameter_arcsec, 1));
-  set('mi-rad', arcsecText(state.angular_radius_arcsec, 1));
-  set('mi-alt', fmt(state.elevation_deg, 2) + '°');
-  set('mi-az', fmt(state.azimuth_deg, 2) + '°');
-  set('mi-ra', fmt(state.ra_hours, 4) + ' h');
-  set('mi-dec', fmt(state.dec_deg, 3) + '°');
-  set('mi-elong', fmt(state.elongation_deg, 2) + '°');
-  set('mi-sunalt', fmt(state.sun_elevation_deg, 2) + '°');
+  set('mi-dist-geo', fmt(snapshot.geo_distance_km, 0));
+  set('mi-dist-topo', fmt(snapshot.topo_distance_km, 0));
+  set('mi-diam', arcsecText(snapshot.angular_diameter_arcsec, 1));
+  set('mi-rad', arcsecText(snapshot.angular_radius_arcsec, 1));
+  set('mi-alt', fmt(snapshot.elevation_deg, 2) + '°');
+  // The direction is the same number in the words a reader navigates by.  It
+  // follows the readout's own language switch, which is why fillMoonInfo() is
+  // re-run when that switch moves.
+  const direction = compassDirection(snapshot.azimuth_deg, state.moonLang);
+  set('mi-az', direction === null
+    ? '—'
+    : `${fmt(snapshot.azimuth_deg, 2)}°${state.moonLang === 'en' ? ' ' : ''}` +
+      `${state.moonLang === 'en' ? `(${direction})` : `（${direction}）`}`);
+  set('mi-ra', fmt(snapshot.ra_hours, 4) + ' h');
+  set('mi-dec', fmt(snapshot.dec_deg, 3) + '°');
+  set('mi-elong', fmt(snapshot.elongation_deg, 2) + '°');
+  set('mi-sunalt', fmt(snapshot.sun_elevation_deg, 2) + '°');
   set('mi-earth', g.earthshine_magnitudes_below_sunlight === undefined ? '—'
     : `${fmt(g.earth_illuminated_percent, 1)} %　${fmt(g.earthshine_magnitudes_below_sunlight, 2)} mag`);
-  set('mi-vel', fmt(state.velocity_kms, 3) + ' km/s');
-  set('mi-light', fmt(state.light_time_s, 3) + ' s');
+  set('mi-vel', fmt(snapshot.velocity_kms, 3) + ' km/s');
+  set('mi-light', fmt(snapshot.light_time_s, 3) + ' s');
   set('mi-rise', localTime(rs.rise_utc, tz));
   set('mi-transit', localTime(rs.transit_utc, tz));
   set('mi-transit-alt', fmt(tr.elevation_deg, 2) + '°');
@@ -5347,32 +5395,17 @@ async function renderRegion(width, height, samples, label) {
   }
 }
 
-/** 生成模拟: a quick look at the selection, sized to what the box shows.
+/** 生成模拟: the first press renders the frame the settings ask for.
  *
- *  The expensive render is deliberately not here -- it happens when the output
- *  pane's own button is pressed, so aiming never costs the full resolution. */
+ *  It used to render an aiming preview sized to the box (a few hundred pixels,
+ *  one sample), so a reader who had just chosen the finest 物理分辨率 saw a
+ *  fast, coarse frame and only got the chosen resolution on the *second* press
+ *  (更新模拟).  The resolution pane is a statement about the picture, and the
+ *  first click has to honour it: there is no cheaper answer that is also the
+ *  answer to the question.
+ */
 async function generate() {
-  if (!state.selection) {
-      setStatus('先在「全月面」上拖一个选框，或点一个地名', 'error');
-      return;
-    }
-  // Both panes come from one render, and only one of them is on screen: cover
-  // them both, or aiming from the geometry tab shows nothing happening at all.
-  busy('result-busy', true);
-  busy('raw-busy', true);
-  const aiming = aimingFrame();
-  setStatus(`按选框出预览（${aiming.width}×${aiming.height} px，按选框自动定的分辨率）…`, 'busy');
-  try {
-    const payload = await renderRegion(aiming.width, aiming.height, 1, '选框预览');
-    await acceptRender(payload);
-    setStatus(`选框预览就绪（${aiming.width}×${aiming.height} px）。` +
-      '要出片请在「模拟设置」里定好分辨率，再点「更新图像」。');
-  } catch (error) {
-    setStatus(String(error.message || error), 'error');
-  } finally {
-    busy('result-busy', false);
-    busy('raw-busy', false);
-  }
+  await renderOutput();
 }
 
 /** 更新图像: the real render, at the size the save row asks for. */
@@ -6031,22 +6064,79 @@ function updateAnimScale() {
       ? `按 ${sizeText(render)} 渲染并输出`
       : `按 ${kmpx} km/px 渲染（${sizeText(render)}），再缩放到 ${sizeText(output)}`;
   }
+  syncAnimPlanVisibility();
+}
+
+/** One line, two answers: the scale and the run's length share the bottom row.
+ *  Hide it only when neither has anything to say. */
+function syncAnimPlanVisibility() {
+  const plan = $('anim-plan');
+  if (!plan) return;
+  const scale = $('anim-scale-note');
+  const span = $('anim-span');
+  plan.hidden = !((scale && scale.textContent) || (span && span.textContent));
 }
 
 /** 应用后期处理 ends in a display image, so there is no linear frame left for
- *  an HDR file -- the switch says so rather than quietly ignoring one of them. */
+ *  an HDR file -- the switch says so rather than quietly ignoring one of them.
+ *  「地貌」 has the same problem for the same reason: a name is an sRGB mark,
+ *  not scene-linear light, so it cannot be written into a linear HDR frame. */
 function updateAnimProcess() {
   const box = $('anim-process');
   const hdr = $('anim-hdr');
+  const labels = $('anim-annotated');
   if (!box || !hdr) return;
-  const on = !!box.checked;
-  hdr.disabled = on;
-  if (on) hdr.checked = false;
+  const blocked = !!box.checked || !!(labels && labels.checked);
+  hdr.disabled = blocked;
+  if (blocked) hdr.checked = false;
+}
+
+/** Everything the animation needs to draw landform names on its frames.
+ *
+ *  The page owns the *style* (colours, line widths, category switches); the
+ *  server owns the projection, because only it has the catalogue and each
+ *  frame's camera.  Widths travel as they are read on screen and are scaled to
+ *  the frame by the server against its own font size, exactly as the still
+ *  export does through `labelStyleFor()`. */
+function animationAnnotationsPayload() {
+  const box = $('anim-annotated');
+  if (!box || !box.checked) return { on: false };
+  const output = animationOutputSize();
+  const shortSide = Math.max(1, Math.min(output.width, output.height));
+  const density = densitySettings();
+  const scale = shortSide / 1000;
+  return {
+    on: true,
+    lock: !!$('anim-label-lock').checked,
+    language: labelLanguage(),
+    classes: activeClasses(),
+    only_illuminated: !$('label-shadow').checked,
+    labels: density.labels,
+    min_radius_px: density.min_radius_px * scale,
+    outline_min_radius_px: (Number(LIMITS.label_outline_px) || 9) * scale,
+    // The same 2.1 % of the short side the page uses for an untyped 字号.
+    font_px: Math.max(8, Math.min(160, Math.round(shortSide * 0.021))),
+    text_color: $('text-color').value,
+    text_stroke: $('text-stroke').value,
+    text_stroke_width: num('text-stroke-width'),
+    marker_stroke: $('marker-stroke').value,
+    marker_stroke_width: num('marker-stroke-width'),
+    bold: $('text-bold').checked,
+    outline_color: $('outline-color').value,
+    outline_width: num('outline-width'),
+    outline_style: $('outline-style').value,
+    uniform: !$('label-colour').checked,
+    class_colors: CLASS_COLORS,
+  };
 }
 
 function animationRequest() {
   const step = num('anim-step');
   const unit = Number($('anim-step-unit').value) || 1;
+  // 时间步长 is a typable field, so "abc" is possible; send 0 and let the
+  // request be refused instead of letting NaN become the server's 60 s default.
+  const stepSeconds = (step !== null && Number.isFinite(step) && step > 0)
+    ? step * unit : 0;
   const gain = num('anim-earthshine-gain');
   const render = animationRenderSize();
   const output = animationOutputSize();
@@ -6055,7 +6145,7 @@ function animationRequest() {
     when: whenPayload(),
     start: localToUtc($('anim-start').value),
     end: localToUtc($('anim-end').value),
-    step_seconds: (step === null ? 0 : step) * unit,
+    step_seconds: stepSeconds,
     fps: num('anim-fps') || 12,
     output: {
       width: render.width,
@@ -6079,6 +6169,7 @@ function animationRequest() {
       utc_offset_hours: Number($('tz').value) || 0,
     } : null,
     apply_processing: $('anim-process').checked,
+    annotations: animationAnnotationsPayload(),
     telescope: train.telescope,
     camera: train.camera,
     atmosphere: atmospherePayload(),
@@ -6132,34 +6223,37 @@ function updateAnimSpan() {
   const step = (num('anim-step') || 0) * (Number($('anim-step-unit').value) || 1);
   if (!start || !end) {
     el.textContent = '先填开始与结束时间，这里会算出跨度与帧数。';
-    el.dataset.kind = '';
+    if (el.dataset) el.dataset.kind = '';
+    syncAnimPlanVisibility();
     return;
   }
   const span = (Date.parse(end + 'Z') - Date.parse(start + 'Z')) / 1000;
   if (!(span >= 0)) {
     el.textContent = '结束时间早于开始时间。';
-    el.dataset.kind = 'error';
+    if (el.dataset) el.dataset.kind = 'error';
+    syncAnimPlanVisibility();
     return;
   }
   if (!(step > 0)) {
     el.textContent = '时间步长要大于 0。';
-    el.dataset.kind = 'error';
+    if (el.dataset) el.dataset.kind = 'error';
+    syncAnimPlanVisibility();
     return;
   }
   const frames = Math.floor(span / step + 1e-9) + 1;
   const cap = Number(LIMITS.animation_max_frames) || 0;
   const over = cap > 0 && frames > cap;
-  el.textContent = `${durationText(span)}，共 ${frames} 帧` +
+  el.textContent = `时长${durationText(span)}，共 ${frames} 帧` +
     (over ? `（超过上限 ${cap} 帧，先调大步长或缩短范围）` : '');
-  el.dataset.kind = over ? 'error' : '';
+  if (el.dataset) el.dataset.kind = over ? 'error' : '';
+  syncAnimPlanVisibility();
 }
 
 /** Everything the animation pane can say before it starts.
  *
- *  Two lines with two jobs: the scale note under the resolution field, and the
- *  span under the progress bar.  They are refreshed together because they read
- *  the same controls, and a reader who has just changed the step expects both
- *  to have moved. */
+ *  One line with two answers -- the ground scale and the run's length -- at the
+ *  bottom of the pane, where a reader looks before pressing the button.  They
+ *  are refreshed together because they read the same controls. */
 function refreshAnimationPlan() {
   updateAnimScale();
   updateAnimSpan();
@@ -6171,6 +6265,33 @@ function setAnimationStatus(text, kind) {
   el.textContent = text || '';
   el.hidden = !text;
   el.dataset.kind = kind || '';
+}
+
+/** What the one animation button says, and therefore what it will do.
+ *
+ *  While a run is going the same key means "stop after the frame being traced
+ *  and keep what is already rendered" -- the reader who has just watched the
+ *  opener they wanted has no use for the remaining forty minutes of frames.
+ *  A run that finished by itself puts the button back to 生成动画. */
+function setAnimationRunLabel(running) {
+  const button = $('anim-run');
+  if (!button) return;
+  if (running) {
+    button.textContent = '立即保存';
+    button.title = '停止生成后续帧，把已经生成的帧保存为一个动画文件';
+    button.dataset.mode = 'save';
+  } else {
+    button.textContent = '生成动画';
+    button.title = '';
+    button.dataset.mode = 'run';
+  }
+}
+
+function setAnimationRunning(running) {
+  state.animationRunning = !!running;
+  setAnimationRunLabel(!!running);
+  const button = $('anim-run');
+  if (button) button.disabled = false;
 }
 
 let animationTimer = null;
@@ -6195,14 +6316,33 @@ async function startAnimation() {
   try {
     const payload = await post('/api/animation', body);
     state.animationId = payload.id;
+    setAnimationRunning(true);
     setAnimationProgress(0, `0/${payload.total} 帧（0%）`, '正在渲染第一帧…');
     setStatus(`动画：共 ${payload.total} 帧`, 'busy');
     animationTimer = setInterval(pollAnimation, 700);
   } catch (error) {
-    $('anim-run').disabled = false;
+    setAnimationRunning(false);
     setAnimationProgress(null, '');
     setAnimationStatus('动画启动失败：' + String(error.message || error), 'error');
     setStatus('动画启动失败', 'error');
+  }
+}
+
+/** 立即保存: ask the job to stop after the frame it is tracing and encode the
+ *  frames it already has.  The cancel flag is *not* used for this -- that one
+ *  interrupts the frame in flight and throws the file away, which is 终止. */
+async function finishAnimation() {
+  const button = $('anim-run');
+  if (!state.animationId || !state.animationRunning) return;
+  if (button) button.disabled = true;
+  setAnimationStatus('正在保存已生成的帧…', 'busy');
+  setStatus('动画：正在保存已生成的帧…', 'busy');
+  try {
+    await post(`/api/animation/${state.animationId}/finish`, {});
+  } catch (error) {
+    if (button) button.disabled = false;
+    setAnimationStatus('保存请求失败：' + String(error.message || error), 'error');
+    setStatus('保存请求失败', 'error');
   }
 }
 
@@ -6245,7 +6385,7 @@ async function pollAnimation() {
     job = await getJson(`/api/animation/${state.animationId}`);
   } catch (error) {
     stopAnimationTimer();
-    $('anim-run').disabled = false;
+    setAnimationRunning(false);
     setAnimationProgress(null, '');
     setAnimationStatus('动画查询失败：' + String(error.message || error), 'error');
     return;
@@ -6259,11 +6399,15 @@ async function pollAnimation() {
     return;
   }
   stopAnimationTimer();
-  $('anim-run').disabled = false;
+  setAnimationRunning(false);
   if (job.state === 'done') {
-    setAnimationProgress(1,
-      `${job.frames}/${job.total} 帧（100%）`, '完成');
-    setStatus('动画已生成，正在下载…');
+    // A run stopped with 立即保存 is finished with fewer frames than it planned;
+    // the bar and the line say so rather than pretending the whole range was
+    // rendered.
+    const partial = job.total && done < job.total;
+    setAnimationProgress(partial && job.total ? done / job.total : 1,
+      `${job.frames}/${job.total} 帧${partial ? '（已提前保存）' : '（100%）'}`, '完成');
+    setStatus(partial ? '已保存已生成的帧，正在下载…' : '动画已生成，正在下载…');
     downloadUrl(job.url, `moon-animation-${job.id}.mp4`);
     return;
   }
@@ -6435,8 +6579,8 @@ function setLabelControls(open) {
   detail.hidden = !open;
   caret.setAttribute('aria-expanded', String(!!open));
   caret.textContent = open ? '▾' : '▸';
-  caret.title = open ? '收起搜索、几何标注与外观设置，只留开关'
-    : '展开搜索、几何标注与外观设置';
+  caret.title = open ? '收起几何标注与外观设置，只留开关与搜索'
+    : '展开几何标注与外观设置';
 }
 
 /** The chip highlight follows the checkbox, including after a settings load. */
@@ -6521,6 +6665,10 @@ function setMoonLanguage(language) {
     button.setAttribute('aria-pressed', String(state.moonLang === 'en'));
   }
   if (window.localStorage) window.localStorage.setItem('moon-readout-lang', state.moonLang);
+  // The azimuth's compass word is generated, not markup, so it has to be
+  // written again in the new language -- the `.zh`/`.en` spans cannot switch a
+  // word the script produced.
+  if (state.geometry) fillMoonInfo(state.geometry);
   // The little phase strip prints a lunar-calendar date, which is a word.
   drawPhaseStrip();
 }
@@ -6845,8 +6993,9 @@ function init() {
   for (const id of RESET_BUTTONS) {
     const button = $(id);
     if (!button) continue;
-    button.innerHTML = RESET_ICON;
-    // The icon is decoration; the button needs a name of its own.
+    button.textContent = RESET_LABEL;
+    // The word is the button's whole content, so the title is what explains
+    // *what* it resets; the accessible name follows the title.
     if (!button.getAttribute('aria-label')) {
       button.setAttribute('aria-label', button.title || '复位');
     }
@@ -6889,6 +7038,17 @@ function init() {
   refreshAnimationPlan();
   updateAnimProcess();
   $('anim-process').addEventListener('change', updateAnimProcess);
+  $('anim-annotated').addEventListener('change', () => {
+    updateAnimProcess();
+    setStatus($('anim-annotated').checked
+      ? `动画将带月面地貌标注（${$('anim-label-lock').checked ? '锁定第一帧布局' : '逐帧重排'}）`
+      : '动画不带地貌标注');
+  });
+  $('anim-label-lock').addEventListener('change', () => {
+    setStatus($('anim-label-lock').checked
+      ? '动画标注布局已锁定：整段沿用第一帧的排法'
+      : '动画标注将逐帧重新排版');
+  });
   updateDiskHdrControls();
   applySensorType();
   applyLock();
@@ -7137,7 +7297,9 @@ function init() {
   $('disk-hdr').addEventListener('change', updateDiskHdrControls);
   // The animation: start it, poll it, and stop it through the same /api/cancel
   // a single frame's 终止 uses.
-  $('anim-run').addEventListener('click', () => { startAnimation(); });
+  $('anim-run').addEventListener('click', () => {
+    if (state.animationRunning) finishAnimation(); else startAnimation();
+  });
   $('anim-cancel').addEventListener('click', () => { cancelAnimation(); });
   // 时间微调：八个步长按钮加中间的「同步设备时间」，都在观测信息里。最粗的一档
   // 是一周：月相一个月走一圈，"把同一相位往前挪一周"比"挪一个月"更接近读者
@@ -7353,9 +7515,14 @@ function init() {
     setStatus(labelLockOn() ? '字号已改，布局仍锁定…' : '字号已改，正在重排月面地貌…', 'busy');
     refreshLabels().then(() => setStatus('就绪'));
   });
+  // 刷新字体 is deliberately *not* a re-layout: it is the button for "the
+  // picture is bigger now, make the type fit it again" without throwing away
+  // the arrangement (or the hand-placed names) the reader already has.
+  $('label-refresh-font').addEventListener('click', refreshLabelFontSizes);
   // Locking takes the layouts that are already on screen as the frozen ones, so
-  // the very next font change is a restyle rather than a re-layout; unlocking
-  // throws them away and lays them out again for whatever the page says now.
+  // the very next font change is a restyle rather than a re-layout.  Unlocking
+  // only *arms* the layout for the next change: it does not re-flow anything by
+  // itself, because flipping a switch must not move the names under the pointer.
   $('label-lock').addEventListener('change', () => {
     if (labelLockOn()) {
       labelLockKeys.disk = state.labels.disk ? labelLayoutKey('disk') : null;
@@ -7368,9 +7535,10 @@ function init() {
     }
     labelLockKeys.disk = null;
     labelLockKeys.region = null;
-    if (!state.labelsOn) { drawAllLabels(); setStatus('已解锁标注布局'); return; }
-    setStatus('已解锁标注布局，正在按当前条件重排…', 'busy');
-    refreshLabels().then(() => setStatus('就绪'));
+    drawAllLabels();
+    setStatus(state.labelsOn
+      ? '已解锁标注布局（当前这一版不动，下次条件变化时才重排）'
+      : '已解锁标注布局');
   });
   $('preview-px').addEventListener('change', () => {
     $('preview-px').value = String(previewPixels());
@@ -7379,13 +7547,14 @@ function init() {
   // Colours, stroke and line style are client-side: the plan carries the
   // geometry, so a restyle is a redraw, never a round trip.
   for (const id of ['outline-width', 'outline-style', 'outline-color', 'label-colour',
-                    'text-color', 'text-stroke', 'text-stroke-width', 'text-bold']) {
+                    'text-color', 'text-stroke', 'text-stroke-width',
+                    'marker-stroke', 'marker-stroke-width', 'text-bold']) {
     const element = $(id);
     if (!element) continue;
     element.addEventListener('change', () => {
       drawAllLabels();
       drawMagnifier();
-      setStatus(id === 'text-bold' || id === 'text-color' || id.startsWith('text-')
+      setStatus(id.startsWith('text-') || id.startsWith('marker-') || id === 'text-bold'
         ? '文字样式已更新' : '轮廓样式已更新');
     });
   }

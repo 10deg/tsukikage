@@ -1135,8 +1135,10 @@ def finish_image(
     The four controls are applied in a fixed order, and the order is the
     conventional one so that the numbers mean what they usually mean:
 
-    1. **saturation** -- blend towards luma.  Set ``mono=True`` to force it to
-       zero regardless, which is what a monochrome sensor does.
+    1. **saturation** -- blend towards luma; above 1, continue the same blend
+       *through* grey so the colour is pushed further from luma.  Set
+       ``mono=True`` to force it to zero regardless, which is what a
+       monochrome sensor does.
     2. **gain** and **offset** -- a linear stretch of the display values.
     3. **gamma** -- ``out ** (1 / gamma)``.  Above 1 lifts the midtones, below
        1 deepens them.  Applied last so it shapes the tone curve rather than
@@ -1148,11 +1150,23 @@ def finish_image(
     """
     if gamma <= 0.0:
         raise MoonlibError("gamma must be positive.")
+    if not math.isfinite(float(saturation)) or saturation < 0.0:
+        raise MoonlibError("saturation must be a finite number >= 0.")
     if mono:
         saturation = 0.0
     values = np.asarray(image, dtype=np.float32)
     if saturation < 1.0:
         values = desaturate(values, amount=1.0 - float(saturation))
+    elif saturation > 1.0 and values.ndim >= 3 and values.shape[-1] > 1:
+        # The same interpolation continued past grey.  Clipped because this is
+        # the display end of the chain, exactly like gain below.
+        luma = np.einsum(
+            "...c,c->...", values, np.asarray(LUMA_WEIGHTS, dtype=np.float32)
+        )
+        grey = np.repeat(luma[..., None], values.shape[-1], axis=-1)
+        values = np.clip(
+            grey + (values - grey) * float(saturation), 0.0, 1.0
+        ).astype(np.float32)
     if gain != 1.0 or offset != 0.0:
         values = np.clip(values * float(gain) + float(offset), 0.0, 1.0)
     if gamma != 1.0:
