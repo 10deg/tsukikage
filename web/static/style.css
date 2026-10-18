@@ -1186,6 +1186,26 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 .event-list .event-row span { color: var(--ink-dim); }
 .event-list .event-row[data-observable="true"] b { color: var(--accent); }
 
+/* 极低照明度: the crescent list.  The date/night leads, the illuminated
+   fraction is the sort key so it gets its own column and a number that does not
+   shift the row when it changes width, and the recommended range sits last
+   because it is the thing a reader copies down. */
+.event-list .event-row.crescent-row { gap: 10px; }
+.event-list .event-row.crescent-row b { min-width: 7.4em; }
+.event-list .event-row.crescent-row .crescent-thin {
+  min-width: 6.6em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.event-list .event-row.crescent-row[data-night="waning"] .crescent-thin {
+  color: var(--ink-dim);
+}
+.event-list .event-row.crescent-row .crescent-best {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* A folded-away block of advanced settings (高级设置). */
 details.fold { margin-top: 7px; }
 details.fold > summary {

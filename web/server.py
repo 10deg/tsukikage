@@ -81,6 +81,11 @@ IDENTITY_PROCESSING = {
 }
 PREVIEW_SAMPLES = 1
 PREVIEW_SHADOW_STEPS = 24
+#: A whole-disk frame is at most 10000 px across, i.e. 370 m/px: 64 steps is
+#: already finer than the terrain it samples.  Close-ups are the ones that need
+#: depth, and 1.3.4 settled on 256 there (a grazing shadow edge is quantised by
+#: the step length, and below that the tips read as a staircase).
+DISK_SHADOW_STEPS = 64
 #: Shadow steps for a close-up still.  64 was the historical default, but at a
 #: grazing Sun its geometric march takes ~12 km strides at the far end and
 #: quantises the shadow boundary into visible rectangular blocks.  256 cuts that
@@ -1352,6 +1357,57 @@ class MoonService:
             "events": [event.to_dict() for event in found],
         }
 
+    def crescents(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """"极低照明度": the thinnest crescent sessions of a period.
+
+        The library already knows when a crescent is observable; this reports
+        the *extreme* ones -- within two nights of the new moon, thinnest
+        first -- with everything a reader needs to plan the shot: which night,
+        how much of the disc is lit, the elongation and the Moon's altitude at
+        the best moment, and the range of the session it belongs to.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        start = str(request.get("start") or "")
+        end = str(request.get("end") or "")
+        if not start or not end:
+            raise moonlib_s.MoonlibError("极低照明度需要开始与结束时间。")
+        limit = int(_f(request, "limit", 15))
+        if not 1 <= limit <= 15:
+            raise moonlib_s.MoonlibError(f"最多显示 15 条（收到 {limit}）。")
+        nights = str(request.get("nights") or "both")
+        rows = moonlib_s.extreme_crescents(
+            site, (start, end), nights=nights, days_around_new_moon=1, limit=limit
+        )
+        items = [
+            {
+                "local_date": row["local_date"],
+                "night": row["night"],
+                "session": row["session"],
+                "best_utc": row["best_utc"],
+                "best_local": row["best_local"],
+                "window_start_utc": row["window_start_utc"],
+                "window_end_utc": row["window_end_utc"],
+                "illumination_percent": round(float(row["illumination_percent"]), 3),
+                "elongation_deg": round(float(row["elongation_deg"]), 2),
+                "moon_elevation_deg": round(float(row["moon_elevation_deg"]), 2),
+                "sun_elevation_deg": round(float(row["sun_elevation_deg"]), 2),
+                "age_days": round(float(row["age_days"]), 3),
+                "nights_from_new_moon": int(row["nights_from_new_moon"]),
+                "photo_score": round(float(row["photo_score"]), 3),
+                "yallop": (row.get("visibility") or {}).get("yallop", {}).get("verdict"),
+            }
+            for row in rows
+        ]
+        return {
+            "start": start,
+            "end": end,
+            "observer": {"lat": site.lat, "lon": site.lon},
+            "nights": nights,
+            "limit": limit,
+            "items": items,
+        }
+
     # -- 区域补片 ---------------------------------------------------------
     def patch_download(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Fetch a high-resolution patch covering the current selection.
@@ -1499,11 +1555,16 @@ class MoonService:
                     f"（收到 {value}）。"
                 )
         earth = _earthshine(request.get("earthshine"))
+        # Read before the settings: which kind of frame this is decides the
+        # shadow step budget (see below).
+        region = request.get("region")
+        if region is not None and not isinstance(region, dict):
+            raise moonlib_s.MoonlibError("region must be an object when it is given.")
         settings = MoonRenderSettings(
             width=width,
             height=height,
             samples_per_pixel=int(_f(output, "samples", 1)),
-            shadow_steps=int(_f(output, "shadow_steps", 48)),
+            shadow_steps=_animation_shadow_steps(output, region),
             band_workers=_parallel(request.get("parallel")),
             photometric_model=_optical_model(
                 _light_option(request, "output", "photometric_model")
@@ -1515,9 +1576,6 @@ class MoonService:
             roughness_deg=_roughness(_light_option(request, "output", "roughness_deg")),
             **earth,
         )
-        region = request.get("region")
-        if region is not None and not isinstance(region, dict):
-            raise moonlib_s.MoonlibError("region must be an object when it is given.")
         # The file's size is a separate question from the render's: frames can
         # be rendered at the scale the physics resolves and written at the size
         # the reader asked for.  One number for a square frame, a pair for one
@@ -2089,6 +2147,18 @@ def _utc_iso(timestamp: float) -> str:
     from datetime import datetime, timezone
 
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def _animation_shadow_steps(output: Dict[str, Any], region: Any) -> int:
+    """The shadow budget for an animation frame.
+
+    The same policy a still of the same kind uses, in one place: a close-up gets
+    what 1.3.4 settled on for close-ups, the whole disk gets the disk budget.
+    The animation used to hard-code 48, which is the *old* quality -- its frames
+    kept the stair-stepped shadow edges the stills had already lost.
+    """
+    return int(_f(output, "shadow_steps",
+                  REGION_SHADOW_STEPS if region is not None else DISK_SHADOW_STEPS))
 
 
 def _frame_carrier(frame: Any, image: Any) -> Any:
@@ -2719,6 +2789,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.annotations(request))
             if path == "/api/features":
                 return self._json(200, self.service.features())
+            if path == "/api/crescents":
+                return self._json(200, self.service.crescents(request))
             if path == "/api/events":
                 return self._json(200, self.service.events(request))
             if path == "/api/animation":

@@ -1074,8 +1074,8 @@
                    能分辨的尺寸渲染，再缩放到下面那个分辨率。 -->
               <select id="anim-kmpx-preset"
                       title="渲染时每个像素覆盖多少地面：原生＝按输出分辨率渲染，不缩放">
-                <option value="native" selected>原生（按输出）</option>
-                <option value="custom">自定义…</option>
+                <option value="native" data-own="1" selected>原生（按输出）</option>
+                <option value="custom" data-own="1">自定义…</option>
               </select>
               <input type="number" id="anim-kmpx" step="0.01" min="0" hidden>
               <span class="unit">km/px</span>

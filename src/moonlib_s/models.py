@@ -678,12 +678,18 @@ class CrescentWindow:
     candidate_points: int
     moon_elevation_range_deg: Tuple[float, float]
     sun_elevation_range_deg: Tuple[float, float]
+    window_start_utc: Optional[datetime] = None
+    """First acceptable instant of the session -- the start of the *recommended*
+    range, which is the part of the night the crescent is actually workable in."""
+    window_end_utc: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload = _fields_dict(self)
         payload["best_utc"] = _iso(self.best_utc)
         payload["best_local"] = self.best_local.isoformat()
         payload["new_moon_utc"] = _iso(self.new_moon_utc)
+        payload["window_start_utc"] = _iso(self.window_start_utc)
+        payload["window_end_utc"] = _iso(self.window_end_utc)
         payload["moon_elevation_range_deg"] = list(self.moon_elevation_range_deg)
         payload["sun_elevation_range_deg"] = list(self.sun_elevation_range_deg)
         return payload

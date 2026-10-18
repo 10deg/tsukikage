@@ -86,6 +86,7 @@ from . import (  # noqa: F401
 )
 #   ^ imported for their side-effect-free presence as attributes; the public
 #     names themselves are re-exported explicitly below.
+from .crescent import extreme_crescents
 from .events import EVENT_KINDS, MoonEvent, moon_events
 from .frames import AzEl, RaDec, az_el, angular_separation, position_angle
 from .instrument import (
@@ -345,6 +346,7 @@ __all__ = [
     "crescent_width_arcsec",
     "elongation_deg",
     "scan_geometry",
+    "extreme_crescents",
     # moon
     "moon_state",
     "moon_report",

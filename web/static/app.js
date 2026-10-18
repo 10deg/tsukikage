@@ -6336,6 +6336,10 @@ async function chooseDataSource(value) {
     };
     renderDataSources(LIMITS.data_sources);
     syncKmPxPresets();
+    // The ladder changed (the LOLA row now carries the measured floor, too-fine
+    // rows are disabled), so the animation's copy of it is rebuilt: a copy made
+    // once at start-up would keep offering rows this machine cannot honour.
+    copyPresetOptions('out-kmpx-preset', 'anim-kmpx-preset', true);
     syncCopiedPresets('out-kmpx-preset', 'anim-kmpx-preset');
     $('out-kmpx').min = String(LIMITS.terrain_km_per_px);
     $('out-kmpx').title =
@@ -7347,6 +7351,7 @@ async function loadLimits() {
       // The menu's own rows have to agree with that floor -- and so does the
       // animation's copy of them.
       syncKmPxPresets();
+      copyPresetOptions('out-kmpx-preset', 'anim-kmpx-preset', true);
       syncCopiedPresets('out-kmpx-preset', 'anim-kmpx-preset');
       // The two disk resolutions are type-or-pick fields, not spinners: the
       // published cap goes in the title (and is clamped on read) rather than on
@@ -7465,6 +7470,11 @@ function buildEventKinds() {
     ['full_moon', '满月'], ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
     ['highest_full', '最高满月'], ['highest_quarter', '最高弦月'],
     ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
+    // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
+    // list, and it is ranked by how thin it is rather than by date.  It shares
+    // the same range boxes and the same list, because a reader asking "when"
+    // does not care which of the two answered.
+    ['crescent', '极低照明度'],
   ];
   for (const [key, label] of kinds) {
     const chip = document.createElement('label');
@@ -7510,6 +7520,20 @@ async function loadEvents() {
   const end = $('events-end').value;
   if (!start || !end) return;
   host.innerHTML = '';
+  if (state.eventKind === 'crescent') {
+    try {
+      const payload = await post('/api/crescents', {
+        when: whenPayload(), start, end, limit: 15,
+      });
+      renderCrescents(payload.items || []);
+    } catch (error) {
+      const row = document.createElement('div');
+      row.className = 'event-row';
+      row.textContent = '极低照明度预报失败：' + String(error.message || error);
+      host.appendChild(row);
+    }
+    return;
+  }
   try {
     const payload = await post('/api/events', {
       when: whenPayload(), kind: state.eventKind, start, end,
@@ -7519,6 +7543,56 @@ async function loadEvents() {
     const row = document.createElement('div');
     row.className = 'event-row';
     row.textContent = '事件预报失败：' + String(error.message || error);
+    host.appendChild(row);
+  }
+}
+
+/** 极低照明度: one row per crescent session, thinnest first.
+ *
+ * The columns are the four questions a reader asks in order -- which night,
+ * how thin, how far from the Sun and how high, and exactly when to shoot --
+ * so the list needs no header row and no sentence above it.  Sorting is by
+ * illumination, so the first row is the hardest crescent in the range; that
+ * is the whole answer, and the date is deliberately not the sort key.
+ */
+function renderCrescents(items) {
+  const host = $('event-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const tz = Number($('tz').value) || 0;
+  const clock = (iso) => {
+    const stamp = Date.parse(iso);
+    if (!Number.isFinite(stamp)) return '—';
+    return new Date(stamp + tz * 3600 * 1000).toISOString().slice(11, 16);
+  };
+  const day = (iso) => new Date(Date.parse(iso) + tz * 3600 * 1000)
+    .toISOString().slice(5, 10);
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'event-row crescent-row';
+    row.dataset.night = item.night === '残月' ? 'waning' : 'waxing';
+    row.title = `${item.session === 'sunset' ? '日落' : '日出'}时段；双击把时间设到最佳时刻`;
+    const head = document.createElement('b');
+    head.textContent = `${day(item.best_utc)} ${item.night}`;
+    const thin = document.createElement('span');
+    thin.className = 'crescent-thin';
+    thin.textContent = `照亮 ${fmt(item.illumination_percent, 2)}%`;
+    const shape = document.createElement('span');
+    shape.textContent = `距角 ${fmt(item.elongation_deg, 1)}°　高度 ${fmt(item.moon_elevation_deg, 1)}°`;
+    const best = document.createElement('span');
+    best.className = 'crescent-best';
+    best.textContent = `最佳 ${clock(item.best_utc)}　推荐 `
+      + `${clock(item.window_start_utc)}–${clock(item.window_end_utc)}`;
+    row.append(head, thin, shape, best);
+    row.addEventListener('dblclick', () => {
+      const stamp = Date.parse(item.best_utc);
+      if (!Number.isFinite(stamp)) return;
+      $('when').value = new Date(stamp + tz * 3600 * 1000)
+        .toISOString().slice(0, 16);
+      if ($('auto-refresh').checked) refreshDisk();
+      setStatus(`时间已设为 ${$('when').value}（${item.night}，照亮 `
+        + `${fmt(item.illumination_percent, 2)}%）`);
+    });
     host.appendChild(row);
   }
 }
@@ -7602,18 +7676,34 @@ function syncCopiedPresets(sourceId, targetId) {
 function copyPresetOptions(sourceId, targetId, keep) {
   const source = $(sourceId), target = $(targetId);
   if (!source || !target) return;
-  // Whatever the caller has already put in the target stays in front of the
-  // copied rows: the animation's scale menu leads with 原生 and 自定义.
-  const first = keep ? [...target.options] : [];
+  // The target's *own* rows (marked data-own in the markup: the animation's
+  // 原生) stay in front of the copied ones.  Everything else is a previous
+  // copy and is dropped first -- without that, calling this again after
+  // 模拟设置 learns a new floor from /api/health would stack a second copy of
+  // the whole ladder on top of the first.
+  const own = keep ? [...target.options].filter((option) => option.dataset
+    && option.dataset.own === '1') : [];
+  const current = target.value;
+  const owned = new Set(own.map((option) => option.value));
+  const rows = [...own];
+  for (const option of source.options) {
+    // One 自定义, not two: the target already has the row that reveals its own
+    // input, and the copied one would be a second control for the same number.
+    if (owned.has(option.value)) continue;
+    rows.push(option);
+  }
   target.innerHTML = '';
-  for (const option of [...first, ...source.options]) {
+  for (const option of rows) {
     const copy = document.createElement('option');
     copy.value = option.value;
     copy.textContent = option.textContent || String(option.value);
     copy.disabled = !!option.disabled;
+    if (option.dataset && option.dataset.own) copy.dataset.own = '1';
     target.appendChild(copy);
   }
-  if (!keep) target.value = '1000';
+  // Keep what the reader had selected if it still exists; 原生 otherwise.
+  const values = [...target.options].map((option) => option.value);
+  target.value = values.includes(current) ? current : (keep ? 'native' : '1000');
 }
 
 /** ``YYYY-MM-DDTHH:MM`` read as the page's own wall clock, named in UTC.
@@ -7733,7 +7823,22 @@ function animationOutputSize() {
 function animationKmPerPixel() {
   const select = $('anim-kmpx-preset');
   if (!select || select.value === 'native') return null;
-  const value = select.value === 'custom' ? num('anim-kmpx') : Number(select.value);
+  let value;
+  if (select.value === 'custom') {
+    value = num('anim-kmpx');
+  } else if (select.value === 'disk') {
+    // 同步全月面, with the same meaning it has in 模拟设置: the scale the
+    // whole-disk frame is drawn at, read off the disk geometry rather than
+    // typed here.  Without this the row silently meant 原生.
+    const output = animationOutputSize();
+    value = diskKmPerPixel(Math.min(output.width, output.height));
+  } else {
+    value = Number(select.value);
+  }
+  const floor = Number(LIMITS.terrain_km_per_px);
+  if (Number.isFinite(floor) && floor > 0 && Number.isFinite(value) && value < floor) {
+    value = floor;
+  }
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
@@ -7898,7 +8003,10 @@ function animationRequest() {
       width: render.width,
       height: render.height,
       samples: Number($('anim-samples').value) || 2,
-      shadow_steps: 48,
+      // No shadow_steps here: the server picks the budget for the kind of frame
+      // it is about to draw (close-up 256, whole disk 64), which is the same
+      // policy the stills use.  A number in this payload is how the animation
+      // ended up still rendering 1.3.3-quality shadows after 1.3.4 fixed them.
     },
     // The file's size, applied by the server after the frame is rendered (and
     // after 后期处理, which is an angular operation and belongs at the render's

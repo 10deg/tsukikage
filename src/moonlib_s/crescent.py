@@ -36,7 +36,7 @@ the same instant.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, replace, fields
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import MoonlibError
@@ -54,7 +54,14 @@ from .models import CrescentGeometry, CrescentWindow
 from .numerics import bisect_root, wrap_angle
 from .observer import Observer
 from .phases import find_new_moons, moon_age
-from .timeutil import SYNODIC_MONTH_DAYS, TimeRange, as_time_range, to_utc, utc_now
+from .timeutil import (
+    SYNODIC_MONTH_DAYS,
+    TimeRange,
+    as_time_range,
+    to_et,
+    to_utc,
+    utc_now,
+)
 
 __all__ = [
     "CrescentCriteria",
@@ -67,6 +74,7 @@ __all__ = [
     "crescent_geometry",
     "photo_score",
     "crescent_visibility",
+    "extreme_crescents",
     "find_crescent_windows",
 ]
 
@@ -642,27 +650,143 @@ def find_crescent_windows(
             (sample["new_moon_index"], sample["period"], local.strftime("%Y-%m-%d"))
         ].append(sample)
 
+    # One *session*, not one calendar date.  The envelope allows the Sun up to
+    # six degrees above the horizon, so on a date with both a dawn candidate and
+    # a dusk one the group above holds two disjoint runs of samples -- and a
+    # window built from that reports a "best range" spanning thirteen hours,
+    # most of them daylight.  Splitting on a gap larger than any twilight
+    # session's own length is what makes one run one window.
     windows: List[CrescentWindow] = []
     for (_, period, local_date), group in grouped.items():
-        best_sample, best_geometry, best_score = _select_best(
-            group, observer, criteria, weights, mode
-        )
-        windows.append(
-            _build_window(
-                best_sample,
-                best_geometry,
-                best_score,
-                group,
-                observer,
-                period,
-                local_date,
-                mode,
-                include_criteria,
+        for run in _split_sessions(group):
+            best_sample, best_geometry, best_score = _select_best(
+                run, observer, criteria, weights, mode
             )
-        )
+            windows.append(
+                _build_window(
+                    best_sample,
+                    best_geometry,
+                    best_score,
+                    run,
+                    observer,
+                    period,
+                    local_date,
+                    mode,
+                    include_criteria,
+                )
+            )
 
     windows.sort(key=lambda item: item.best_utc)
     return windows
+
+
+def extreme_crescents(
+    observer: Observer,
+    time_range=None,
+    *,
+    nights: str = "both",
+    days_around_new_moon: int = 1,
+    limit: int = 15,
+    max_illumination_percent: Optional[float] = None,
+    criteria: Optional[CrescentCriteria] = None,
+    phase_mode: "PhaseMode | str" = PhaseMode.GEOCENTRIC,
+) -> List[Dict[str, Any]]:
+    """"极低照明度" windows: the thinnest crescents of a period, thinnest first.
+
+    :func:`find_crescent_windows` already answers "when is a thin crescent
+    observable"; this answers "which of those are *extreme*", and it decides
+    both halves of that question explicitly:
+
+    * **within two nights of the new moon**, counted in *sessions* rather than
+      in elapsed hours.  A waxing crescent is observable at sunset on the
+      evening of the conjunction and the evening after it (local dates +0 and
+      +1); a waning one at the two sunrises before it (+0 and -1).  Counting
+      days from a 48-hour difference instead would call an evening session two
+      days out "within two days" when it is really the *third* sunset, which is
+      not an extreme crescent any more.
+    * **thinnest first**: sorted by illuminated fraction, not by date.  The
+      point of the list is "the hardest crescent in this window is on this
+      evening", so the order is the answer, not a chronology.
+
+    Returns dicts ready for the page: the session's local date and night
+    (残月/蛾眉月), the best instant with its illumination, elongation and
+    altitudes, the recommended range (:attr:`CrescentWindow.window_start_utc`
+    to ``window_end_utc``), and the advisory verdicts.
+    """
+    if nights not in ("both", "evening", "morning"):
+        raise MoonlibError(
+            f"nights 只能是 both / evening / morning（收到 {nights!r}）"
+        )
+    if limit <= 0:
+        return []
+    # The session envelope: see the docstring -- sunset/sunrise is the boundary
+    # between "a photograph" and "a daytime sighting".
+    criteria = criteria or CrescentCriteria(sun_elevation_max_deg=0.0)
+    criteria = replace(criteria, sun_elevation_max_deg=min(criteria.sun_elevation_max_deg, 0.0))
+    wanted = {"evening"} if nights == "evening" else (
+        {"morning"} if nights == "morning" else {"evening", "morning"})
+
+    windows = find_crescent_windows(
+        observer, time_range, criteria=criteria, phase_mode=phase_mode
+    )
+    observer = Observer.from_value(observer)
+
+    rows: List[Dict[str, Any]] = []
+    for window in windows:
+        if window.period not in wanted:
+            continue
+        # Which side of the sky the session is on, taken from the Sun's own
+        # azimuth rather than from the sign of the age: just after a
+        # conjunction, a spring dawn can hold the Moon a couple of degrees
+        # *above* the Sun while still being east of it, and calling that an
+        # evening session would put a 残月 label on a sunrise photograph.
+        et = to_et(window.best_utc)
+        sunset_session = az_el("SUN", et, observer).azimuth_deg > 180.0
+        if sunset_session != (window.period == "evening"):
+            continue
+        new_moon_local = observer.local_time(window.new_moon_utc).date()
+        # +0 / +1 for an evening session, 0 / -1 for a morning one.
+        offset = (window.best_local.date() - new_moon_local).days
+        allowed = (0 <= offset <= days_around_new_moon) if window.period == "evening" \
+            else (-days_around_new_moon <= offset <= 0)
+        if not allowed:
+            continue
+        illumination = float(window.geometry.illumination_percent)
+        if max_illumination_percent is not None \
+                and illumination > float(max_illumination_percent):
+            continue
+        payload = window.to_dict()
+        payload["night"] = "残月" if window.period == "morning" else "蛾眉月"
+        payload["session"] = "sunset" if sunset_session else "sunrise"
+        payload["nights_from_new_moon"] = int(offset)
+        payload["illumination_percent"] = illumination
+        payload["elongation_deg"] = float(window.geometry.elongation_deg)
+        payload["moon_elevation_deg"] = float(window.geometry.moon_elevation_deg)
+        payload["sun_elevation_deg"] = float(window.geometry.sun_elevation_deg)
+        payload["age_days"] = float(window.age_days)
+        payload["best_local"] = window.best_local.isoformat()
+        rows.append(payload)
+
+    rows.sort(key=lambda row: (row["illumination_percent"], row["best_utc"]))
+    return rows[: int(limit)]
+
+
+#: Samples further apart than this belong to different sessions: a twilight
+#: session lasts a couple of hours at most, and twelve hours is always a gap
+#: between a dawn one and a dusk one.
+_SESSION_GAP_SECONDS = 6.0 * 3600.0
+
+
+def _split_sessions(group: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Split one date's samples into contiguous observing sessions."""
+    ordered = sorted(group, key=lambda item: item["et"])
+    runs: List[List[Dict[str, Any]]] = []
+    for sample in ordered:
+        if runs and sample["et"] - runs[-1][-1]["et"] <= _SESSION_GAP_SECONDS:
+            runs[-1].append(sample)
+        else:
+            runs.append([sample])
+    return runs
 
 
 def _select_best(
@@ -791,6 +915,8 @@ def _build_window(
         min(item["moon_elevation_deg"] for item in group),
         max(item["moon_elevation_deg"] for item in group),
     )
+    start_et = min(item["et"] for item in group)
+    end_et = max(item["et"] for item in group)
     return CrescentWindow(
         period=period,
         local_date=local_date,
@@ -804,4 +930,6 @@ def _build_window(
         candidate_points=len(group),
         moon_elevation_range_deg=moon_range,
         sun_elevation_range_deg=sun_range,
+        window_start_utc=to_utc(start_et),
+        window_end_utc=to_utc(end_et),
     )

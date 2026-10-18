@@ -206,7 +206,21 @@ function makeElement(id, spec) {
     disabled: false,
     hidden: false,
     textContent: '',
-    innerHTML: '',
+    // A real element's innerHTML assignment replaces what is inside it; the
+    // stub has to do the same, or `menu.innerHTML = ''` leaves the previous
+    // options in `menu.options` and every re-copy of a ladder stacks another
+    // copy on top of the last one.
+    get innerHTML() { return this._innerHTML === undefined ? '' : this._innerHTML; },
+    set innerHTML(value) {
+      this._innerHTML = String(value);
+      if (String(value) === '') {
+        this.children.length = 0;
+        if (this.tagName === 'SELECT') {
+          this.options.length = 0;
+          this.value = '';
+        }
+      }
+    },
     className: info.class || '',
     options: (info.options || []).map((option) =>
       (typeof option === 'string' ? { value: option } : Object.assign({}, option))),
@@ -503,6 +517,9 @@ function respond(url, body) {
                label_zh: '四月初九', label_latin: 'M04D09',
                civil_date: '2026-05-25' },
       angular_diameter_deg: 0.5135, disk_radius_fraction: 0.47,
+      // The real payload carries the distance the scale is derived from; the
+      // stub used to omit it, which made every 同步全月面 resolution read null.
+      distance_km: 384400,
       libration_lon_deg: -4.7, libration_lat_deg: 1.4,
       sub_solar_lon_deg: -6.5, sub_solar_lat_deg: 1.5,
       illuminated_percent: 69.6, bright_limb_position_angle_deg: 89.4,
@@ -530,6 +547,38 @@ function respond(url, body) {
                          geo_distance_km: 384400, topo_distance_km: 384300,
                          elongation_deg: 89.4, elevation_deg: 57.08, azimuth_deg: 180.3 } },
     } };
+  }
+  if (url === '/api/crescents') {
+    /* Three sessions, thinnest first, exactly as the server sorts them.  The
+       page must not re-sort: the order is the answer. */
+    return {
+      items: [
+        { local_date: '2026-03-19', night: '蛾眉月', session: 'sunset',
+          best_utc: '2026-03-19T10:04:00Z', best_local: '2026-03-19T18:04:00',
+          window_start_utc: '2026-03-19T10:04:00Z',
+          window_end_utc: '2026-03-19T10:14:00Z',
+          illumination_percent: 0.21, elongation_deg: 4.3,
+          moon_elevation_deg: 3.3, sun_elevation_deg: -0.4,
+          age_days: 0.42, nights_from_new_moon: 0, photo_score: 0.2,
+          yallop: 'not_visible' },
+        { local_date: '2026-04-17', night: '残月', session: 'sunrise',
+          best_utc: '2026-04-16T21:22:00Z', best_local: '2026-04-17T05:22:00',
+          window_start_utc: '2026-04-16T21:07:00Z',
+          window_end_utc: '2026-04-16T21:37:00Z',
+          illumination_percent: 0.60, elongation_deg: 8.1,
+          moon_elevation_deg: 5.3, sun_elevation_deg: -1.2,
+          age_days: -1.1, nights_from_new_moon: 0, photo_score: 0.3,
+          yallop: 'marginal' },
+        { local_date: '2026-05-17', night: '蛾眉月', session: 'sunset',
+          best_utc: '2026-05-17T10:56:00Z', best_local: '2026-05-17T18:56:00',
+          window_start_utc: '2026-05-17T10:11:00Z',
+          window_end_utc: '2026-05-17T11:16:00Z',
+          illumination_percent: 0.79, elongation_deg: 9.2,
+          moon_elevation_deg: 5.8, sun_elevation_deg: -1.0,
+          age_days: 0.9, nights_from_new_moon: 1, photo_score: 0.35,
+          yallop: 'marginal' },
+      ],
+    };
   }
   if (url === '/api/sky') {
     /* A high Moon far from a Sun already below the horizon: the exact case the
@@ -808,9 +857,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   };
   const previewMenu = presets('preview-preset');
   const diskMenu = presets('disk-preset');
+  /* 5 of them: 模拟设置's km/px, the two size menus, 标注, and the disk preset --
+     plus the animation's own km/px row, which is marked data-own so re-copying
+     the ladder cannot duplicate it. */
   check('every menu offers a way in by hand',
-    (html.match(/<option value="custom">/g) || []).length === 5,
-    (html.match(/<option value="custom">/g) || []).length);
+    (html.match(/<option value="custom"/g) || []).length === 5,
+    (html.match(/<option value="custom"/g) || []).length);
   check('the preview menu offers the sizes the page may ask for',
     previewMenu.length >= 8 && previewMenu.every((px) => px <= T.LIMITS.preview_px),
     previewMenu.join(','));
@@ -1405,9 +1457,47 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
+  /* 7 event kinds plus 极低照明度, which shares the range boxes and the list but
+     is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 7 && T.state.eventKind === 'full_moon',
+    kindChips().length === 8 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
+  /* 极低照明度: same range boxes, a different report -- sessions ranked by how
+     thin they are, not instants ranked by date. */
+  {
+    const callsBefore = fetchCalls.filter((c) => c.url === '/api/crescents').length;
+    fire('event-kind-crescent', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const call = fetchCalls.filter((c) => c.url === '/api/crescents').pop();
+    check('极低照明度 asks the crescent endpoint',
+      fetchCalls.filter((c) => c.url === '/api/crescents').length === callsBefore + 1 &&
+      !!call && !!call.body.start && !!call.body.end && call.body.limit === 15,
+      call ? JSON.stringify({ start: call.body.start, limit: call.body.limit }) : 'no call');
+    // The harness has no container-selector engine: the rows are the list's own
+    // children, in the order the page appended them (date/night, thinness,
+    // geometry, best + range).
+    const rows = document.getElementById('event-list').children
+      .filter((el) => String(el.className).includes('crescent-row'));
+    const cell = (row, index) => String((row.children[index] || {}).textContent || '');
+    check('and lists one row per session', rows.length === 3, String(rows.length));
+    check('thinnest first, in the server\'s order',
+      /0\.21/.test(cell(rows[0], 1)) && /0\.60/.test(cell(rows[1], 1))
+      && /0\.79/.test(cell(rows[2], 1)),
+      rows.map((row) => cell(row, 1)).join(' | '));
+    check('each row says which night and which half of the day',
+      /蛾眉月/.test(cell(rows[0], 0)) && /残月/.test(cell(rows[1], 0))
+      && rows[1].dataset.night === 'waning',
+      rows.map((row) => cell(row, 0)).join(' | '));
+    check('with the best instant and the recommended range',
+      /最佳 18:04/.test(cell(rows[0], 3)) && /推荐 18:04–18:14/.test(cell(rows[0], 3)),
+      cell(rows[0], 3));
+    check('and the geometry the choice was made on',
+      /距角 4\.3°/.test(cell(rows[0], 2)) && /高度 3\.3°/.test(cell(rows[0], 2)),
+      cell(rows[0], 2));
+    fire('event-kind-full_moon', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
   const eventBody = fetchCalls.filter((c) => c.url === '/api/events').pop();
   check('and opening it asks the server for this year',
     !!eventBody && eventBody.body.kind === 'full_moon' &&
@@ -2183,6 +2273,44 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       request.output.width < 1200 && request.output.width >= 64 &&
       request.scale_to[0] === 1200,
       `${request.output.width} -> ${JSON.stringify(request.scale_to)}`);
+    /* The ladder is 模拟设置's own table, not a shorter hand-written one: the
+       reader picks between the same steps in both panes, including 同步全月面. */
+    {
+      const values = (id) => [...document.getElementById(id).options]
+        .map((option) => option.value);
+      const simulation = values('out-kmpx-preset');
+      const animation = values('anim-kmpx-preset').filter((value) => value !== 'native');
+      const restore = document.getElementById('anim-kmpx-preset').value;
+      check('the animation menu carries the same ladder as 模拟设置',
+        JSON.stringify(animation) === JSON.stringify(simulation),
+        `${animation.join(',')} vs ${simulation.join(',')}`);
+      const customs = values('anim-kmpx-preset').filter((v) => v === 'custom');
+      check('with exactly one 自定义 row, however often the ladder is recopied',
+        customs.length === 1, String(customs.length));
+      // 同步全月面 is a real choice here too: the whole disk's own scale.  On a
+      // disk frame that is the output size by definition, so the check is run
+      // on a close-up, where 3 km/px is far coarser than the file's 1200 px.
+      const scope = document.getElementById('anim-scope').value;
+      set('anim-scope', 'region');
+      fire('anim-scope', 'change');
+      set('anim-kmpx-preset', 'disk');
+      fire('anim-kmpx-preset', 'change');
+      const synced = T.animationRenderSize();
+      check('同步全月面 resolves to the disk frame\'s own scale',
+        !!synced && synced.width < 300 && T.animationOutputPixels() === 1200,
+        `${JSON.stringify(synced)} out=${T.animationOutputPixels()} ` +
+        `sky=${T.animationSkyKm()} km`);
+      set('anim-scope', scope);
+      fire('anim-scope', 'change');
+      set('anim-kmpx-preset', restore);
+      fire('anim-kmpx-preset', 'change');
+      check('and putting the menu back restores the coarse render',
+        T.animationRenderSize().width < 1200, JSON.stringify(T.animationRenderSize()));
+      check('and the animation no longer dictates the shadow budget',
+        T.animationRequest().output.shadow_steps === undefined,
+        JSON.stringify(T.animationRequest().output));
+    }
+
     check('and the pane says what it is doing',
       /渲染 \d+ px → 输出 1200 px/.test(
         document.getElementById('anim-scale-note').textContent),
