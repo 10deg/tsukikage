@@ -87,6 +87,12 @@ from . import (  # noqa: F401
 #   ^ imported for their side-effect-free presence as attributes; the public
 #     names themselves are re-exported explicitly below.
 from .crescent import extreme_crescents
+from .eclipse import (
+    ECLIPSE_KINDS,
+    LUNAR_ECLIPSE_LABELS,
+    LunarEclipse,
+    eclipse_state,
+)
 from .events import EVENT_KINDS, MoonEvent, moon_events
 from .frames import AzEl, RaDec, az_el, angular_separation, position_angle
 from .instrument import (
@@ -207,6 +213,7 @@ from .annotations import (
     load_nomenclature,
     plan_annotations,
     region_frame,
+    rim_anchor,
     rim_outline,
 )
 from .moonview import (
@@ -372,6 +379,10 @@ __all__ = [
     "EVENT_KINDS",
     "MoonEvent",
     "moon_events",
+    "ECLIPSE_KINDS",
+    "LUNAR_ECLIPSE_LABELS",
+    "LunarEclipse",
+    "eclipse_state",
     "find_quarter_moons",
     "previous_new_moon_et",
     "moon_age",
@@ -488,6 +499,7 @@ __all__ = [
     "FrameProjection",
     "disk_frame",
     "region_frame",
+    "rim_anchor",
     "rim_outline",
     "LANGUAGES",
     "Annotation",

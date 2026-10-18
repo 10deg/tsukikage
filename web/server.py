@@ -886,6 +886,10 @@ class MoonService:
                 "crescent_width_arcsec": float(geometry.crescent_width_arcsec),
                 "bright_limb_angle_deg": float(geometry.bright_limb_angle_deg),
             },
+            # The Moon's marker in the chart is a picture of the body, so it
+            # has to know when the body is inside the Earth's shadow.  The
+            # state is at the chart's own instant, not at the main page's.
+            "eclipse": moonlib_s.eclipse_state(anchor_et).to_dict(),
         }
 
     # -- full disk ------------------------------------------------------
@@ -1996,6 +2000,11 @@ class MoonService:
         # on the sphere drifts off its own feature by the relief there -- a
         # kilometre of it is 0.65 px on a 2400 px frame.
         options["terrain"] = self.terrain()
+        # A crater near the limb is a circle standing on the height field; its
+        # catalogue centre and the middle of the shape the reader sees are not
+        # the same pixel.  The page wants the marker in the middle of the
+        # crater, so it takes the projected rim's centroid.
+        options["center_on_rim"] = True
         payload = moonlib_s.annotate_frame(frame, self.catalogue(), **options).to_dict()
         payload["seconds"] = time.time() - started
         # Echo the request in the words the wire uses, so the page can quote the
@@ -2009,6 +2018,7 @@ class MoonService:
             "language": options["language"],
             "classes": options["classes"],
             "outline_min_radius_px": options["outline_min_radius_px"],
+            "center_on_rim": True,
         }
         return payload
 

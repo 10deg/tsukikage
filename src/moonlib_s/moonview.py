@@ -45,6 +45,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from .eclipse import LunarEclipse, eclipse_state
 from .errors import MoonlibError
 from .frames import (
     angular_separation,
@@ -1470,6 +1471,7 @@ def _shade_rays(
     sample_km: float,
     steps: int,
     sky_shape: Optional[Tuple[int, int]] = None,
+    eclipse: Optional[LunarEclipse] = None,
     cancel: Optional[Any] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
     """Trace and shade one block of rays.
@@ -1482,6 +1484,11 @@ def _shade_rays(
     *sky_shape* is the ``(rows, columns)`` layout of ``flat``, when the caller
     is a renderer that lays its band out on a grid; it is what lets the sky
     visibility be evaluated coarsely and read back bilinearly.
+
+    *eclipse* replaces the Sun with the Earth's shadow, point by point: the
+    direct term is scaled by the visible fraction of the solar disc, and the
+    umbra gains the atmosphere's refracted copper-and-turquoise glow.  ``None``
+    is the ordinary Moon, bit for bit the path it was before this parameter.
     """
     del ground_km  # shadows march at the sub-sample footprint, not the pixel
     hit, points = _march_view_rays(
@@ -1604,6 +1611,23 @@ def _shade_rays(
             block["sky_visibility_min"] = float(np.min(sky[in_shadow]))
             block["sky_ambient_pixels"] = int(np.count_nonzero(in_shadow))
             direct = direct + options.sky_ambient * albedo * sky[:, None]
+    if eclipse is not None and eclipse.active:
+        # The Earth's shadow is a property of each point, not of the frame:
+        # across the Moon the direction to the Earth moves by its own angular
+        # radius, which is larger than the whole umbra, so the shadow edge can
+        # cross the disk and a single transmission would put it in the wrong
+        # place.  The direct term is everything the Sun still delivers --
+        # including the sky fill, which is scattered sunlight too -- and the
+        # refracted term is the atmosphere's own glow inside the umbra.
+        light = eclipse.surface_light(hit_points)
+        direct = direct * light["sun_visible"][:, None] * light["sun_tint"]
+        earth_cosine = np.clip(
+            np.einsum("ij,ij->i", normals, light["earth_direction"]), 0.0, 1.0
+        )
+        direct = direct + albedo * light["refracted"] * earth_cosine[:, None]
+        block["eclipse_visible_mean"] = float(np.mean(light["sun_visible"]))
+        block["eclipse_visible_min"] = float(np.min(light["sun_visible"]))
+        block["eclipse_refracted_peak"] = float(np.max(light["refracted"]))
     sunlit[hit] = direct.astype(np.float32)
 
     # --- earthshine -----------------------------------------------------
@@ -1667,6 +1691,7 @@ def _render_bands(
     level: int,
     albedo_level: int,
     steps: int,
+    eclipse: Optional[LunarEclipse] = None,
     cancel: Optional[Any] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Trace and shade a whole frame, one band of rows at a time.
@@ -1700,6 +1725,8 @@ def _render_bands(
         "sky_ambient": float(options.sky_ambient),
         "sky_samples": int(options.sky_samples) if options.sky_ambient > 0.0 else 0,
     }
+    if eclipse is not None:
+        stats["eclipse"] = eclipse.to_dict()
 
     hits = 0
     sums = {"sunlit": 0.0, "earthshine": 0.0}
@@ -1726,6 +1753,7 @@ def _render_bands(
             sample_km=sample_km,
             steps=steps,
             sky_shape=((row_stop - row_start), fine_width),
+            eclipse=eclipse,
             cancel=cancel,
         )
         mask = None
@@ -2066,6 +2094,7 @@ def render_moon(
     if terrain is None:
         terrain = open_terrain(progress=progress)
 
+    eclipse = eclipse_state(view.et)
     forward, right, up = _camera_basis(view)
     origin = float(view.distance_km) * np.asarray(
         view.observer_direction, dtype=np.float64
@@ -2110,6 +2139,7 @@ def render_moon(
         level=level,
         albedo_level=albedo_level,
         steps=steps,
+        eclipse=eclipse,
         cancel=cancel,
     )
     stats["apparent_diameter_pixels"] = float(
@@ -2411,6 +2441,7 @@ def render_region(
         else ("global pyramid (no window covers this frame)"
               if footprint is not None else "global pyramid")
     )
+    eclipse = eclipse_state(view.et)
 
     sunlit, earthlit, stats = _render_bands(
         observer_position,
@@ -2427,6 +2458,7 @@ def render_region(
         level=level,
         albedo_level=albedo_level,
         steps=steps,
+        eclipse=eclipse,
         cancel=cancel,
     )
     stats["terrain_source"] = terrain_source
@@ -3235,4 +3267,7 @@ def view_summary(view: MoonView) -> Dict[str, Any]:
         "earthshine_apparent_magnitude": view.earthshine_apparent_magnitude,
         "earthshine_magnitudes_below_sunlight":
             view.earthshine_magnitudes_below_sunlight,
+        # The Earth's shadow at this instant.  Most of the time this is
+        # {"kind": "none"}, and the page simply does not draw the row.
+        "eclipse": eclipse_state(view.et).to_dict(),
     }

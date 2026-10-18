@@ -41,7 +41,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
-  'skyLabelItems', 'saveSkyPng'];
+  'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
+  'skyPaintEclipseMoon'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -3069,6 +3070,56 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fire('sky-close', 'click');
     check('the close button hides the window',
       document.getElementById('sky-backdrop').hidden === true);
+  }
+
+  console.log('');
+  console.log('a lunar eclipse appears without a switch');
+  {
+    const eclipse = {
+      kind: 'total', active: true, label: '月全食',
+      label_en: 'Total lunar eclipse', magnitude: 1.19,
+      penumbral_magnitude: 2.24, separation_deg: 0.3,
+      moon_radius_deg: 0.25, umbra_radius_deg: 0.66,
+      penumbra_radius_deg: 1.18,
+    };
+    const geometry = {
+      eclipse,
+      report: {
+        state: { phase: { label: '满月' }, libration: {}, orbit: {} },
+        rise_set: {}, transit: {},
+      },
+      utc_offset_hours: 8,
+    };
+    T.fillMoonInfo(geometry);
+    check('the 月球信息 column grows a 月食 row',
+      document.getElementById('mi-eclipse-dt').hidden === false);
+    check('and names the eclipse and its magnitude',
+      /月全食.*食分 1\.19/.test(document.getElementById('mi-eclipse-dd').textContent),
+      document.getElementById('mi-eclipse-dd').textContent);
+    T.state.moonLang = 'en';
+    T.fillMoonInfo(geometry);
+    check('the row follows the readout language',
+      /Total lunar eclipse.*mag 1\.19/
+        .test(document.getElementById('mi-eclipse-dd').textContent),
+      document.getElementById('mi-eclipse-dd').textContent);
+    T.state.moonLang = 'zh';
+    T.fillMoonInfo({ ...geometry, eclipse: { kind: 'none', active: false } });
+    check('an ordinary instant hides the row again',
+      document.getElementById('mi-eclipse-dt').hidden === true &&
+      document.getElementById('mi-eclipse-dd').hidden === true);
+
+    const ctx = document.getElementById('sky-canvas').getContext('2d');
+    ctx.drawn.fills.length = 0;
+    T.skyPaintEclipseMoon(ctx, 100, 100, 11, eclipse, { x: 120, y: 100 });
+    check('the chart moon carries a copper umbra in totality',
+      ctx.drawn.fills.includes('rgba(74, 22, 12, .42)'),
+      ctx.drawn.fills.join(' | '));
+    ctx.drawn.fills.length = 0;
+    T.skyPaintEclipseMoon(ctx, 100, 100, 11,
+      { ...eclipse, kind: 'partial' }, { x: 120, y: 100 });
+    check('and a dark bite in a partial eclipse',
+      ctx.drawn.fills.includes('rgba(18, 7, 5, .9)'),
+      ctx.drawn.fills.join(' | '));
   }
 
   console.log('');

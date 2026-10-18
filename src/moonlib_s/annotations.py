@@ -66,6 +66,7 @@ __all__ = [
     "disk_frame",
     "region_frame",
     "rim_outline",
+    "rim_anchor",
     "Annotation",
     "AnnotationPlan",
     "plan_annotations",
@@ -346,6 +347,12 @@ _DEFAULT_FONT_PX = 13.0
 #: something that is not a circle, and drawing a circle round it would invent a
 #: shape the Moon does not have.
 _OUTLINE_CLASSES = frozenset({"basin", "crater", "mare", "lacus", "sinus", "palus"})
+
+#: Classes whose marker may be recentred on the drawn rim.  Only the genuinely
+#: round ones: a mare's gazetteer diameter is the width of an irregular patch,
+#: and the centroid of a circle invented around it is not a better answer than
+#: the catalogue's own centre.
+_RIM_CENTRED_CLASSES = frozenset({"crater", "basin"})
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +755,56 @@ def _terrain_level(
     return terrain.dem.level_for_ground_scale(frame.ground_sample_km(distance))
 
 
+def _mean_landform_height(
+    terrain: MoonTerrain,
+    lat_deg: float,
+    lon_deg: float,
+    diameter_km: float,
+    level: int,
+) -> float:
+    """Average terrain height over a round feature's own footprint, km.
+
+    The fallback for a feature whose rim cannot be walked because it crosses
+    the limb.  The catalogue centre is one point on the ground; a large crater
+    or basin has relief across its whole extent, and at the limb that relief is
+    what shifts the picture of the feature away from the picture of its centre.
+    Eight points on a ring plus the centre are enough to stand in for the
+    feature without a per-pixel integral.
+    """
+    centre = surface_normals(lat_deg, lon_deg)
+    east = np.cross(np.array([0.0, 0.0, 1.0]), centre)
+    norm = float(np.linalg.norm(east))
+    if norm < 1e-9:
+        east = np.cross(np.array([0.0, 1.0, 0.0]), centre)
+        norm = float(np.linalg.norm(east))
+    east = east / max(norm, 1e-12)
+    north = np.cross(centre, east)
+    # Half the angular radius keeps the samples inside the feature; the cap
+    # stops a hemisphere-sized basin from averaging the whole Moon.
+    angular = min(
+        math.radians(20.0),
+        0.5 * max(float(diameter_km), 0.0) / MOON_REFERENCE_RADIUS_KM,
+    )
+    azimuth = np.linspace(0.0, 2.0 * math.pi, 8, endpoint=False)
+    ring = (
+        math.cos(angular) * centre[None, :]
+        + math.sin(angular)
+        * (
+            np.cos(azimuth)[:, None] * east[None, :]
+            + np.sin(azimuth)[:, None] * north[None, :]
+        )
+    )
+    directions = np.vstack((centre[None, :], ring))
+    latitudes = np.degrees(np.arcsin(np.clip(directions[:, 2], -1.0, 1.0)))
+    longitudes = np.degrees(
+        np.arctan2(directions[:, 1], directions[:, 0])
+    )
+    heights = np.asarray(
+        terrain.height_km(longitudes, latitudes, level), dtype=np.float64
+    )
+    return float(np.mean(heights))
+
+
 def _elevation_slack_px(frame: FrameProjection) -> float:
     """How far, in pixels, an elevation can move a point across the frame.
 
@@ -862,6 +919,78 @@ def rim_outline(
     return tuple(
         (round(float(x), 1), round(float(y), 1)) for x, y in zip(xs, ys)
     )
+
+
+def _polygon_centroid(
+    points: Sequence[Tuple[float, float]]
+) -> Optional[Tuple[float, float]]:
+    """Area centroid of a closed polygon, or ``None`` when it has no area.
+
+    Vertices are *not* equally spaced in the picture once a circle on the
+    sphere is projected near the limb -- the far side of a rim is compressed
+    into a few pixels -- so the mean of the vertices would bias the answer
+    outwards.  The shoelace centroid weights each triangle by its own area,
+    which is the projected shape's actual centre.
+    """
+    if len(points) < 3:
+        return None
+    twice_area = 0.0
+    centre_x = 0.0
+    centre_y = 0.0
+    for (x1, y1), (x2, y2) in zip(points, list(points[1:]) + [points[0]]):
+        cross = float(x1) * float(y2) - float(x2) * float(y1)
+        twice_area += cross
+        centre_x += (float(x1) + float(x2)) * cross
+        centre_y += (float(y1) + float(y2)) * cross
+    if abs(twice_area) < 1e-9:
+        return None
+    centroid = (
+        centre_x / (3.0 * twice_area),
+        centre_y / (3.0 * twice_area),
+    )
+    if not (math.isfinite(centroid[0]) and math.isfinite(centroid[1])):
+        return None
+    return centroid
+
+
+def rim_anchor(
+    frame: FrameProjection,
+    lat_deg: float,
+    lon_deg: float,
+    diameter_km: float,
+    *,
+    points: int = 48,
+    terrain: Optional[MoonTerrain] = None,
+    terrain_level: Optional[int] = None,
+) -> Optional[Tuple[float, float]]:
+    """Where a round feature's *drawn* centre is, in frame pixels.
+
+    The gazetteer gives a centre on the reference sphere, and the renderer puts
+    the ground at its own height there.  For a feature seen face-on those are
+    the same point in the picture.  Near the limb they are not: the rim is a
+    three-dimensional circle stood on the height field, and its projection is
+    compressed on the far side and stretched on the near side, so the pixel
+    the catalogue centre projects to is not the middle of the shape the reader
+    sees.
+
+    This walks the same rim :func:`rim_outline` draws and returns the projected
+    polygon's **area centroid** -- the visual centre of the feature -- so a
+    marker can sit in the middle of the crater rather than on the ground point
+    underneath its catalogue coordinates.  ``None`` when there is no complete
+    rim to measure (far side, or a rim crossing the limb).
+    """
+    outline = rim_outline(
+        frame,
+        lat_deg,
+        lon_deg,
+        diameter_km,
+        points=points,
+        terrain=terrain,
+        terrain_level=terrain_level,
+    )
+    if outline is None:
+        return None
+    return _polygon_centroid(outline)
 
 
 @dataclass(frozen=True)
@@ -1118,6 +1247,7 @@ def plan_annotations(
     language: str = "zh",
     outline_min_radius_px: float = 9.0,
     outline_points: int = 48,
+    center_on_rim: bool = False,
 ) -> AnnotationPlan:
     """Choose the labels for one frame and lay them out.
 
@@ -1174,6 +1304,14 @@ def plan_annotations(
         it the outline would be smaller than the marker it surrounds.
     outline_points
         Samples around one rim; 48 is smooth at any zoom the page offers.
+    center_on_rim
+        Put a round feature's marker on the **visual centre of its drawn rim**
+        instead of on the pixel its catalogue coordinates project to.  The two
+        agree on a sphere; on the height field near the limb the rim is a
+        three-dimensional circle and its projection is no longer centred on
+        that pixel.  Off by default, because most callers arrived before the
+        height field did and the historical pixel is their contract; the web
+        page asks for it.
     """
     if max_labels < 0:
         raise MoonlibError("max_labels cannot be negative.")
@@ -1323,6 +1461,50 @@ def plan_annotations(
             index for index, feature in enumerate(features)
             if any(name in feature.name_en for name in highlight)
         )
+
+    if center_on_rim and terrain is not None:
+        # The catalogue centre projects onto the ground under it; the rim the
+        # renderer drew is a circle stood *on* that ground, and near the limb
+        # its picture is centred somewhere else.  Move only the chosen markers
+        # -- at most a few dozen rims -- and only when the projected polygon is
+        # a sane shape rather than a rim crossing the limb.
+        for _score, index, _family_name in chosen:
+            if groups.get(index) not in _RIM_CENTRED_CLASSES:
+                continue
+            feature = features[index]
+            anchor = rim_anchor(
+                frame,
+                float(feature.lat_deg),
+                float(feature.lon_deg),
+                float(feature.diameter_km),
+                terrain=terrain,
+                terrain_level=terrain_level,
+            )
+            if anchor is None:
+                # The rim crosses the limb, so there is no closed polygon to
+                # measure.  Stand the marker on the feature's own mean height
+                # instead: that is the part of the offset the user sees even
+                # when the outline has already been dropped for honesty.
+                level = _terrain_level(terrain, frame, terrain_level)
+                height = _mean_landform_height(
+                    terrain,
+                    float(feature.lat_deg),
+                    float(feature.lon_deg),
+                    float(feature.diameter_km),
+                    level,
+                )
+                lifted = frame.project(
+                    [float(feature.lat_deg)], [float(feature.lon_deg)], height
+                )
+                anchor = (float(lifted["x"][0]), float(lifted["y"][0]))
+            limit = max(2.0 * float(radius[index]), 8.0 * unit)
+            if math.hypot(anchor[0] - float(x[index]),
+                          anchor[1] - float(y[index])) > limit:
+                # A rim that crosses the limb can still close in the picture;
+                # its centroid is then an artefact of the warp, not a centre.
+                continue
+            x[index] = anchor[0]
+            y[index] = anchor[1]
 
     max_marker = _MAX_MARKER_PX * unit
     padding = 3.0 * unit if padding_px is None else float(padding_px)

@@ -238,6 +238,11 @@ check('the sky window has a canvas, a close button and its own save row',
   /id="sky-open"[^>]*>天空位置</.test(html) &&
   html.indexOf('id="sky-open"') > html.indexOf('id="moon-info"') - 400 &&
   html.indexOf('id="sky-open"') < html.indexOf('id="moon-info"'));
+/* 天空位置 is a door rather than a switch beside it: blue border and blue type,
+   so it reads as the accent action and not as a second EN toggle. */
+check('the sky button is drawn in the accent blue',
+  /h2 \.mini\.sky-open\s*\{[^}]*border-color:\s*var\(--accent\)[^}]*color:\s*var\(--accent\)/
+    .test(css));
 /* The close-up save row is meant to be the same row as the full disk's: its two
    resolution menus and the number all sit inside the 保存分辨率 label, and the
    unit span carries the scale.  Spread out again, the row grows taller than the

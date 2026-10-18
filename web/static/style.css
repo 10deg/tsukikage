@@ -1704,6 +1704,14 @@ h2 .mini.sky-open {
   line-height: 17px;
   font-size: 10px;
   white-space: nowrap;
+  /* 蓝色边框、蓝色字：这是打开一扇窗的入口，不是一个开关，所以它不跟
+     .mini 的灰字走，而是用页面的强调色把自己和 EN 开关区分开。 */
+  border-color: var(--accent);
+  color: var(--accent);
+}
+h2 .mini.sky-open:hover {
+  background: rgba(122, 162, 247, .12);
+  color: #a9c1ff;
 }
 .sky-backdrop {
   position: fixed;

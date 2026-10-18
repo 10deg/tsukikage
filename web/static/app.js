@@ -4434,6 +4434,77 @@ function skyPaintMoon(ctx, x, y, radius, fraction, angle) {
   ctx.restore();
 }
 
+/** The Moon in eclipse: the Earth's shadow drawn over the disc.
+ *
+ *  The chart's Moon marker is not to scale -- 7.5 px for a body a quarter of a
+ *  degree across -- so the shadow is drawn with the same artificial scale: one
+ *  Moon radius in the picture is `radius`, and the umbra and penumbra keep
+ *  their true angular ratio to it.  The offset of the shadow centre is the
+ *  Moon's separation from the shadow axis, likewise in Moon radii.
+ *
+ *  The colours are the phenomenon: a copper disc for totality, a dark bite for
+ *  a partial eclipse, and the ozone turquoise along the umbral rim.  In a total
+ *  eclipse the rim itself is off the Moon, so the band is drawn on the limb
+ *  nearest to it -- the sunward one -- which is where an observer sees it.
+ */
+function skyPaintEclipseMoon(ctx, x, y, radius, eclipse, sunPoint) {
+  const moonRadius = Math.max(1e-6, Number(eclipse.moon_radius_deg) || 0.259);
+  const umbra = Math.max(0, Number(eclipse.umbra_radius_deg) || 0.7) / moonRadius;
+  const penumbra = Math.max(
+    umbra, Number(eclipse.penumbra_radius_deg) || 1.2) / moonRadius;
+  const separation = Math.max(0, Number(eclipse.separation_deg) || 0) / moonRadius;
+  const total = eclipse.kind === 'total';
+  let dx = sunPoint.x - x;
+  let dy = sunPoint.y - y;
+  const length = Math.hypot(dx, dy);
+  if (length < 1e-6) { dx = 0; dy = -1; } else { dx /= length; dy /= length; }
+  // Away from the Sun is the anti-solar direction, where the shadow centre is.
+  const sx = x - dx * separation * radius;
+  const sy = y - dy * separation * radius;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = total ? '#5a2014' : '#e8ecf5';
+  ctx.fillRect(x - radius, y - radius, 2 * radius, 2 * radius);
+  if (penumbra * radius > 0.5) {
+    ctx.beginPath();
+    ctx.arc(sx, sy, penumbra * radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(8, 10, 16, .28)';
+    ctx.fill();
+  }
+  if (umbra * radius > 0.5) {
+    ctx.beginPath();
+    ctx.arc(sx, sy, umbra * radius, 0, Math.PI * 2);
+    ctx.fillStyle = total ? 'rgba(74, 22, 12, .42)' : 'rgba(18, 7, 5, .9)';
+    ctx.fill();
+    // The ozone band: a hairline of turquoise on the umbral rim.
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(0.5, umbra * radius), 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(96, 232, 214, .82)';
+    ctx.lineWidth = total ? 0.9 : 1.2;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  if (total && separation * radius < radius) {
+    // The umbral edge is outside the disc, so the band belongs on the limb.
+    const angle = Math.atan2(dy, dx);
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(0.5, radius - 0.7), angle - 0.85, angle + 0.85);
+    ctx.strokeStyle = 'rgba(96, 232, 214, .72)';
+    ctx.lineWidth = 1.3;
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(230, 232, 238, .42)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
 function skyRayLength(x, y, dx, dy, plot) {
   let distance = Infinity;
   if (dx > 1e-9) distance = Math.min(distance, (plot.x + plot.w - x) / dx);
@@ -4653,10 +4724,20 @@ function paintSkyChart(ctx, area, data, view, options) {
   }
 
   // Moon marker: the phase is the one the sky actually shows, with the bright
-  // limb turned towards the Sun *on the chart*.
-  if (moonPoint.x > plot.x - 20 && moonPoint.x < plot.x + plot.w + 20
-      && moonPoint.y > plot.y - 20 && moonPoint.y < plot.y + plot.h + 20) {
-    skyPaintMoon(ctx, moonPoint.x, moonPoint.y, 7.5, fraction, sunAngle);
+  // limb turned towards the Sun *on the chart*.  During an eclipse the disc is
+  // a little bigger and carries the Earth's shadow: it is the one state where
+  // the Moon's own face, not its position, is what the reader came to see.
+  const eclipse = data.eclipse && data.eclipse.active ? data.eclipse : null;
+  const moonMarkerRadius = eclipse ? 11 : 7.5;
+  if (moonPoint.x > plot.x - 26 && moonPoint.x < plot.x + plot.w + 26
+      && moonPoint.y > plot.y - 26 && moonPoint.y < plot.y + plot.h + 26) {
+    if (eclipse) {
+      skyPaintEclipseMoon(ctx, moonPoint.x, moonPoint.y, moonMarkerRadius,
+                          eclipse, sunPoint);
+    } else {
+      skyPaintMoon(ctx, moonPoint.x, moonPoint.y, moonMarkerRadius,
+                   fraction, sunAngle);
+    }
   }
 
   // In the close-up the Sun is reduced to a direction: an arrow from the Moon
@@ -4749,7 +4830,9 @@ function paintSkyChart(ctx, area, data, view, options) {
   const obstacles = [];
   if (moonPoint.x > plot.x && moonPoint.x < plot.x + plot.w
       && moonPoint.y > plot.y && moonPoint.y < plot.y + plot.h) {
-    obstacles.push({ x: moonPoint.x - 10, y: moonPoint.y - 10, w: 20, h: 20 });
+    const reach = moonMarkerRadius + 2.5;
+    obstacles.push({ x: moonPoint.x - reach, y: moonPoint.y - reach,
+                     w: 2 * reach, h: 2 * reach });
   }
   if (sunRelevant && sunPoint.x > plot.x && sunPoint.x < plot.x + plot.w
       && sunPoint.y > plot.y && sunPoint.y < plot.y + plot.h) {
@@ -4843,9 +4926,18 @@ function fillSkySummary(data) {
   const illum = Number(geometry.illumination_percent_topo
                        || geometry.illumination_percent_geo || 0);
   const elong = Number(geometry.elongation_deg) || 0;
+  const eclipse = data.eclipse || {};
+  let eclipseText = '';
+  if (eclipse.active) {
+    const magnitude = eclipse.kind === 'penumbral'
+      ? Number(eclipse.penumbral_magnitude) || 0
+      : Number(eclipse.magnitude) || 0;
+    eclipseText = ` · ${eclipse.label || '月食'} ${magnitude.toFixed(2)}`;
+  }
   summary.textContent = `${local} · 月亮 ${fmt(moon.elevation_deg, 1)}° / `
     + `方位 ${fmt(moon.azimuth_deg, 1)}° · 照亮 ${illum.toFixed(1)}% · `
-    + `距角 ${elong.toFixed(1)}° · 太阳高度 ${fmt(sun.elevation_deg, 1)}°`;
+    + `距角 ${elong.toFixed(1)}° · 太阳高度 ${fmt(sun.elevation_deg, 1)}°`
+    + eclipseText;
 }
 
 /** The sky window's own instant, as its three fields hold it. */
@@ -6918,6 +7010,27 @@ function compassDirection(azimuthDeg, language) {
   return language === 'en' ? COMPASS_EN[index] : COMPASS_ZH[index];
 }
 
+/** 月食 one-liner for the 月球信息 column, or null when there is no eclipse.
+ *
+ *  The server has already classified it and chosen the words (月全食, not
+ *  "月食 · 全食"), so this only decides which of the two magnitudes belongs to
+ *  the kind and whether to say 食分 in Chinese or English.
+ */
+function eclipseReadout(eclipse) {
+  if (!eclipse || !eclipse.active) return null;
+  const english = state.moonLang === 'en';
+  const name = english
+    ? (eclipse.label_en || 'Lunar eclipse')
+    : (eclipse.label || '月食');
+  const magnitude = eclipse.kind === 'penumbral'
+    ? Number(eclipse.penumbral_magnitude)
+    : Number(eclipse.magnitude);
+  const value = Number.isFinite(magnitude) ? magnitude : 0;
+  return english
+    ? `${name} · mag ${value.toFixed(2)}`
+    : `${name} · 食分 ${value.toFixed(2)}`;
+}
+
 function fillMoonInfo(g) {
   const rep = g.report || {};
   const snapshot = rep.state || {};
@@ -6930,6 +7043,15 @@ function fillMoonInfo(g) {
   const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
 
   set('mi-phase-name', phase.label || '—');
+  // 月食 appeared in the simulation, so the readout grows a row for it and
+  // drops it again at the next instant that is not eclipsed.  There is no
+  // switch anywhere: the row's presence *is* the report.
+  const eclipseText = eclipseReadout(g.eclipse);
+  for (const id of ['mi-eclipse-dt', 'mi-eclipse-dd']) {
+    const node = $(id);
+    if (node) node.hidden = !eclipseText;
+  }
+  if (eclipseText) set('mi-eclipse-dd', eclipseText);
   set('mi-illum', fmt(phase.illuminated_percent_topo !== undefined
     ? phase.illuminated_percent_topo : g.illuminated_percent, 2) + ' %');
   set('mi-phase', fmt(phase.phase_angle_topo_deg !== undefined
