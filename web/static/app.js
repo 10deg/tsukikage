@@ -400,6 +400,21 @@ function lightPayload() {
  * different budgets run without either one writing an environment variable
  * the other can see.  Blank means "let the library decide".
  */
+/** 阴影精度: the close-up's shadow-step budget, or null for the server default.
+ *
+ *  A shadow edge at a grazing sun is quantised to the step length, so this is a
+ *  real quality knob -- but only for the *edges*.  The texture inside a lit
+ *  slope is terrain and albedo data at the finest level, and no step budget
+ *  changes it; the tooltip says so rather than letting a reader expect
+ *  otherwise.
+ */
+function shadowStepsPayload() {
+  const select = $('shadow-steps');
+  if (!select || select.value === 'auto') return null;
+  const value = Number(select.value);
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : null;
+}
+
 function computePayload() {
   const value = num('parallel');
   return {
@@ -1362,10 +1377,15 @@ function updateSaveInfo() {
   const span = selectionSpanArcsec();
   const el = $('save-info');
   if (!el) return;
-  if (!span) { el.textContent = ''; return; }
-  // One line: what a pixel of the file is worth, in the sky and on the ground.
+  if (!span) { el.textContent = 'px'; return; }
+  // The same shape the full disk's row uses for its own scale — "px（0.06 km）"
+  // — because the two rows are meant to read as one row of one kind.  The
+  // arcseconds are in the tooltip: they are the answer to a rarer question.
   const arcsec = span / Math.min(width, height);
-  el.textContent = `1 px = ${arcsec.toFixed(3)}″ = ${groundScaleText(kilometresPerPixel(arcsec))}`;
+  const ground = groundScaleText(kilometresPerPixel(arcsec));
+  el.textContent = `px（${ground}）`;
+  el.title = `1 px = ${arcsec.toFixed(3)}″ = ${ground}；`
+    + '保存文件里一个像素对应天上的多少角秒、月面上的多少公里';
 }
 
 /** Baseline 8-bit RGB TIFF: uncompressed, one strip, little-endian.
@@ -2433,7 +2453,7 @@ function mirroredPlan(plan, mode) {
  *
  * The geometry pane is the frame as it was marched: turning it would mean the
  * two panes no longer show the same pixels, and its labels are laid out in the
- * server's own frame.  So the rotation and the mirror belong to 后期成片
+ * server's own frame.  So the rotation and the mirror belong to 后期处理
  * alone -- the server skips them for the raw half, and the page does not turn
  * or mirror the labels of the geometry pane either. */
 function frameOrientation() {
@@ -2454,7 +2474,7 @@ function frameOrientation() {
 function planFor(viewName) {
   const plan = applyLabelEdits(state.labels[viewName === 'disk' ? 'disk' : 'region'],
                               viewName);
-  // Only 后期成片 carries the orientation; 几何模拟 is the frame itself.
+  // Only 后期处理 carries the orientation; 高分辨率模拟 is the frame itself.
   if (!plan || viewName !== 'proc') return plan;
   return mirroredPlan(plan, frameOrientation().mirror);
 }
@@ -7087,6 +7107,7 @@ async function renderRegion(width, height, samples, label) {
         arcsec_per_pixel: null,
         photometric_model: $('photometric-model').value,
         sun_samples: Number($('sun-samples').value) || 1,
+        ...(shadowStepsPayload() === null ? {} : { shadow_steps: shadowStepsPayload() }),
       },
       selection: selectionPayload(),
     }, controller.signal);
@@ -7334,7 +7355,11 @@ async function loadLimits() {
         if (parallel) {
           parallel.max = String(LIMITS.cpu_count);
           const wanted = Number(parallel.value);
-          if (Number.isFinite(wanted) && wanted > LIMITS.cpu_count) {
+          if (!Number.isFinite(wanted) || wanted < 1) {
+            // 自动: the machine's own core count, spelled out rather than left
+            // as a blank that only the tooltip explains.
+            parallel.value = String(LIMITS.cpu_count);
+          } else if (wanted > LIMITS.cpu_count) {
             parallel.value = String(LIMITS.cpu_count);
           }
           parallel.title = '渲染按横带分给多个线程；调小可以给主机留出余量，调大则更快。'
@@ -7907,7 +7932,7 @@ function updateAnimScale() {
         : `${perPixel.toFixed(2)} km`}/px`;
     } else {
       note.textContent =
-        `渲染 ${sizeText(render)} → 输出 ${sizeText(output)}：多出来的像素是插值，不是细节`;
+        `渲染 ${sizeText(render)} → 输出 ${sizeText(output)}`;
     }
   }
   const button = $('anim-run');
@@ -8002,11 +8027,12 @@ function animationRequest() {
     output: {
       width: render.width,
       height: render.height,
-      samples: Number($('anim-samples').value) || 2,
-      // No shadow_steps here: the server picks the budget for the kind of frame
-      // it is about to draw (close-up 256, whole disk 64), which is the same
-      // policy the stills use.  A number in this payload is how the animation
-      // ended up still rendering 1.3.3-quality shadows after 1.3.4 fixed them.
+      samples: Number($('anim-samples').value) || 1,
+      // 阴影精度 is the one setting here that the reader chooses explicitly; when
+      // it is 自动 the key is left out and the server picks the budget for the
+      // kind of frame it is about to draw (close-up 256, whole disk 64), which
+      // is the same policy the stills use.
+      ...(shadowStepsPayload() === null ? {} : { shadow_steps: shadowStepsPayload() }),
     },
     // The file's size, applied by the server after the frame is rendered (and
     // after 后期处理, which is an angular operation and belongs at the render's

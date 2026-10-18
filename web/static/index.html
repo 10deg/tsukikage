@@ -83,6 +83,10 @@
 
     <section class="group grow">
       <h2><span class="zh">月球信息</span><span class="en">Moon</span>
+        <!-- 天空位置示意图的入口：读的是同一时刻、同一地点，所以归在月球信息
+             这一栏的标题行里，紧挨着语言开关。 -->
+        <button class="mini sky-open" id="sky-open"
+                title="按当前时间和地点，画出月亮与太阳在天空中的方位—高度轨迹">天空位置</button>
         <button class="mini" id="moon-lang" aria-pressed="false"
                 title="月球信息用中文 / English 显示">EN</button>
       </h2>
@@ -134,13 +138,6 @@
           <dt>余经度</dt><dd id="phase-colong">—</dd>
         </dl>
       </div>
-    </div>
-
-    <!-- 天空位置示意图的入口：放在月相栏下面，和它读的是同一时刻、同一地点。
-         蓝框与「更新图像」同一套样式，宽度按文字给足，不折行。 -->
-    <div class="sky-launch">
-      <button class="outline" id="sky-open"
-              title="按当前时间和地点，画出月亮与太阳在天空中的方位—高度轨迹">模拟天空位置</button>
     </div>
 
   </aside>
@@ -461,12 +458,12 @@
 
       <figure class="view view-info" data-view="info">
         <figcaption>
-          <!-- 这一栏只有一张"页"：实时特写。标题做成标签页的样子，和「几何模拟 /
-               后期成片」同一套：它们说的是同一件事——这里是一扇窗，不是一栏设置。
+          <!-- 这一栏只有一张"页"：实时特写。标题做成标签页的样子，和「高分辨率模拟 /
+               后期处理」同一套：它们说的是同一件事——这里是一扇窗，不是一栏设置。
                「同步选框到此视场」跟着选框走，所以它搬去了下面「几何模拟」那一排。 -->
           <span class="tabs" id="info-tabs">
             <!-- 没有 data-tab：这一栏只有一张页，标签不是开关，按下去不该发生
-                 任何事——它的作用是把这一栏和「几何模拟 / 后期成片」归成一类。 -->
+                 任何事——它的作用是把这一栏和「高分辨率模拟 / 后期处理」归成一类。 -->
             <button class="tab" aria-pressed="true">实时特写</button>
           </span>
         </figcaption>
@@ -505,8 +502,8 @@
       <figure class="view view-stack" data-view="stack">
         <figcaption>
           <span class="tabs" id="result-tabs">
-            <button class="tab" data-tab="raw" aria-pressed="true">几何模拟</button>
-            <button class="tab" data-tab="proc" aria-pressed="false">后期成片</button>
+            <button class="tab" data-tab="raw" aria-pressed="true">高分辨率模拟</button>
+            <button class="tab" data-tab="proc" aria-pressed="false">后期处理</button>
           </span>
           <!-- 同步选框：把选框退回上一次生成模拟时的那一套（中心、大小、旋转角）。
                它属于这一排的选框，不属于「实时特写」那扇窗：按下去之后要动的正是
@@ -556,39 +553,41 @@
         </div>
         <p class="view-foot" id="result-info">—</p>
 
-        <!-- 近景图的保存排：与全月面那一排同样的排法，只是尺寸跟着选框走 -->
+        <!-- 近景图的保存排：与全月面那一排同一种排法——分辨率的三件套（长边/短边、
+             档位、数字）都收在「保存分辨率」这一个标签里，像素单位那个 span 顺便
+             显示"一个像素值多少"，于是这一排和全月面那一排一样高。 -->
         <div class="disk-save-bar" id="region-save-bar">
-          <label class="check inline" title="按选框的长宽比保存；长边或短边由这里指定">
+          <label class="check inline"
+                 title="按选框的长宽比保存；长边或短边由这里指定，分辨率可挑一档或直接填。">
             保存分辨率
             <select id="out-ref">
               <option value="long" selected>长边</option>
               <option value="short">短边</option>
             </select>
+            <select id="out-preset" title="保存的分辨率">
+              <option value="480">480</option>
+              <option value="600">600</option>
+              <option value="800">800</option>
+              <option value="900">900</option>
+              <option value="1000">1000</option>
+              <option value="1200" selected>1200</option>
+              <option value="1400">1400</option>
+              <option value="1500">1500</option>
+              <option value="1600">1600</option>
+              <option value="1800">1800</option>
+              <option value="1920">1920</option>
+              <option value="2000">2000</option>
+              <option value="2160">2160</option>
+              <option value="2400">2400</option>
+              <option value="3840">3840</option>
+              <option value="4000">4000</option>
+              <option value="5000">5000</option>
+              <option value="custom">自定义…</option>
+            </select>
+            <input type="text" id="out-px" inputmode="numeric" value="1200" size="6">
           </label>
-          <select id="out-preset" title="保存的分辨率">
-            <option value="480">480</option>
-            <option value="600">600</option>
-            <option value="800">800</option>
-            <option value="900">900</option>
-            <option value="1000">1000</option>
-            <option value="1200" selected>1200</option>
-            <option value="1400">1400</option>
-            <option value="1500">1500</option>
-            <option value="1600">1600</option>
-            <option value="1800">1800</option>
-            <option value="1920">1920</option>
-            <option value="2000">2000</option>
-            <option value="2160">2160</option>
-            <option value="2400">2400</option>
-            <option value="3840">3840</option>
-            <option value="4000">4000</option>
-            <option value="5000">5000</option>
-            <option value="custom">自定义…</option>
-          </select>
-          <input type="text" id="out-px" inputmode="numeric" value="1200" size="6">
-          <span class="unit">px</span>
           <span class="unit" id="save-info"
-                title="保存文件里一个像素对应天上的多少角秒、月面上的多少公里"></span>
+                title="保存文件里一个像素对应天上的多少角秒、月面上的多少公里">px</span>
           <label class="check inline" title="导出时把月面地貌标注一并画进文件">
             <input type="checkbox" id="download-annotated" checked>
             <span>地貌</span>
@@ -740,8 +739,8 @@
               </label>
               <label>每像素采样 <span class="en">Samples/px</span>
                 <select id="out-samples">
-                  <option value="1">1</option>
-                  <option value="2" selected>2</option>
+                  <option value="1" selected>1</option>
+                  <option value="2">2</option>
                   <option value="3">3</option>
                 </select>
               </label>
@@ -751,9 +750,20 @@
                    a paragraph that would take a row of its own.  The render is
                    band-parallel, so this is a real ceiling, not a priority hint;
                    blank means "let the library use every core". -->
-              <label title="渲染按横带分给多个线程；调小可以给主机留出余量，调大则更快。">
+              <label title="渲染按横带分给多个线程；默认用本机的全部核心（自动识别的最大值），调小可以给主机留出余量。">
                 并行数 <span class="en">CPU workers</span>
-                <input type="number" id="parallel" min="1" max="64" step="1" value="4">
+                <input type="number" id="parallel" min="1" max="64" step="1"
+                       placeholder="自动">
+              </label>
+              <label title="阴影边缘的细分步数：越大越接近真实边缘，也越费时间。它只决定阴影**边缘**切得多细，不改变地形自身的纹理（那个由数据源和物理分辨率决定）。">
+                阴影精度 <span class="en">Shadow steps</span>
+                <select id="shadow-steps">
+                  <option value="auto" selected>自动</option>
+                  <option value="128">128</option>
+                  <option value="256">256</option>
+                  <option value="512">512</option>
+                  <option value="1024">1024</option>
+                </select>
               </label>
             </div>
           </details>
@@ -880,8 +890,8 @@
                自己的性质，读者要判断的也是"那圈光晕有几个像素宽"。 -->
           <div class="slider-row wide">
             <span class="slider-label" title="锐化半径：反锐化蒙版的宽度，按这张图自己的像素算。比模糊窄只提亮核心，比模糊宽就不再是锐化而是改大尺度明暗；通常与视宁度斑差不多宽。">锐化半径</span>
-            <input type="range" id="sharpen-radius" min="0" max="4" step="0.1" value="1.2">
-            <output id="sharpen-radius-out">1.2</output>
+            <input type="range" id="sharpen-radius" min="0" max="4" step="0.1" value="1">
+            <output id="sharpen-radius-out">1.00</output>
             <span class="unit">px</span>
           </div>
           <div class="slider-row wide">
@@ -1100,8 +1110,8 @@
               <label class="check inline" title="每像素采样：n×n 条光线平均成一个像素。边缘与明暗界线更干净，代价是 n² 倍渲染时间">
                 <span class="slider-label">采样</span>
                 <select id="anim-samples">
-                  <option value="1">1×</option>
-                  <option value="2" selected>2×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
                   <option value="3">3×</option>
                   <option value="4">4×</option>
                 </select>

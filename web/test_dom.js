@@ -234,7 +234,27 @@ check('the 并行数 explanation is a tooltip, not a paragraph',
 check('the sky window has a canvas, a close button and its own save row',
   htmlIds.has('sky-canvas') && htmlIds.has('sky-close') &&
   htmlIds.has('sky-save') && htmlIds.has('sky-label-step') &&
-  /id="sky-open"[^>]*>模拟天空位置</.test(html));
+  /* The entry now sits in 月球信息's title row, next to the language switch. */
+  /id="sky-open"[^>]*>天空位置</.test(html) &&
+  html.indexOf('id="sky-open"') > html.indexOf('id="moon-info"') - 400 &&
+  html.indexOf('id="sky-open"') < html.indexOf('id="moon-info"'));
+/* The close-up save row is meant to be the same row as the full disk's: its two
+   resolution menus and the number all sit inside the 保存分辨率 label, and the
+   unit span carries the scale.  Spread out again, the row grows taller than the
+   disk's and the two columns stop lining up. */
+check('the close-up save row keeps its resolution controls in one label',
+  (() => {
+    const from = html.indexOf('id="region-save-bar"');
+    const bar = html.slice(from, html.indexOf('id="download"', from));
+    const label = bar.indexOf('保存分辨率');
+    const ref = bar.indexOf('id="out-ref"');
+    const preset = bar.indexOf('id="out-preset"');
+    const field = bar.indexOf('id="out-px"');
+    const closed = bar.indexOf('</label>', label);
+    return label >= 0 && ref > label && preset > ref && field > preset
+      && closed > field && /id="save-info"[^>]*>px</.test(bar);
+  })());
+
 /* 饱和度 may now be pushed above 1; the cap is 3 in the markup, and the
    library's own finish_image() was extended to honour it. */
 check('saturation can be boosted above 1',

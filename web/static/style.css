@@ -1696,18 +1696,14 @@ button .en::before, button .en::after { content: ""; }
    and tracks are all geometry that has to stay in step with one another.  The
    window is deliberately *not* full screen: it opens at about four fifths of
    the viewport and every edge can be dragged. */
-.sky-launch {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: flex-start;
-  padding: 8px 12px 10px;
-  border-top: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.sky-launch button {
+/* 天空位置示意图的入口现在坐在「月球信息」的标题行里，和 EN 开关同一档：
+   高度与 EN 一致（同一行的高矮），宽度由文字自己撑开，不折行。 */
+h2 .mini.sky-open {
+  margin-left: 6px;
+  padding: 0 7px;
+  line-height: 17px;
+  font-size: 10px;
   white-space: nowrap;
-  padding: 4px 12px;
-  font-size: 11px;
 }
 .sky-backdrop {
   position: fixed;

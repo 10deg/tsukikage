@@ -776,8 +776,21 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fetchCalls.some((c) => c.url === '/api/settings/list'));
   check('the geometry from /api/disk landed in the state',
     T.state.geometry && T.state.geometry.angular_diameter_deg > 0.5);
-  check('the render request carries the 并行数 ceiling',
-    fetchCalls.filter((call) => call.url === '/api/disk').pop().body.parallel === 4,
+  /* 并行数 now starts on 自动: /api/health spells the host's own core count into
+     the field, and the *next* render carries it.  (The very first frame is asked
+     for before the health reply lands, so it still goes out as "let the library"
+     -- which is the same number of workers.) */
+  check('并行数 starts on the host\'s own core count',
+    document.getElementById('parallel').value === String(T.LIMITS.cpu_count),
+    document.getElementById('parallel').value);
+  set('parallel', T.LIMITS.cpu_count);
+  fire('parallel', 'change');
+  // 并行数 is read when a render is asked for, so ask for one.
+  fire('refresh', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  check('and the render request carries that ceiling',
+    fetchCalls.filter((call) => call.url === '/api/disk').pop().body.parallel
+      === T.LIMITS.cpu_count,
     JSON.stringify(fetchCalls.filter((call) => call.url === '/api/disk').pop().body.parallel));
   check('并行数 explains itself on hover rather than in a visible hint',
     /渲染按横带分给多个线程/.test(document.getElementById('parallel').title) &&
@@ -1341,6 +1354,39 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       `${first.body.output.width}×${first.body.output.height} vs ` +
       `${chosen.width}×${chosen.height}`);
   }
+  function echoToAnimShadow() {
+    const before = fetchCalls.filter((c) => c.url === '/api/animation').length;
+    set('shadow-steps', '256');
+    fire('shadow-steps', 'change');
+    const body = T.animationRequest();
+    check('and the animation carries it too',
+      body.output.shadow_steps === 256,
+      JSON.stringify(body.output.shadow_steps));
+    if (fetchCalls.filter((c) => c.url === '/api/animation').length !== before) {
+      throw new Error('animationRequest must not render by itself');
+    }
+  }
+
+  /* 阴影精度: 自动 leaves the key out (the server's per-kind policy decides),
+     a chosen number travels with the close-up request. */
+  {
+    const auto = fetchCalls.filter((c) => c.url === '/api/region').pop();
+    check('阴影精度 自动 leaves the step budget to the server',
+      auto.body.output.shadow_steps === undefined,
+      JSON.stringify(auto.body.output));
+    set('shadow-steps', '512');
+    fire('shadow-steps', 'change');
+    fire('generate', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const chosenCall = fetchCalls.filter((c) => c.url === '/api/region').pop();
+    check('and a chosen 阴影精度 travels with the request',
+      chosenCall.body.output.shadow_steps === 512,
+      JSON.stringify(chosenCall.body.output.shadow_steps));
+    echoToAnimShadow();
+    set('shadow-steps', 'auto');
+    fire('shadow-steps', 'change');
+  }
+
   /* Once there is a frame to update, the same button offers to update it --
      under the name the status line uses when it asks the reader to press it. */
   check('the button becomes 更新模拟 after the first render',
@@ -1738,7 +1784,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
      a round it was the one control in that pane that did nothing (the fields
      under it did, which is how a dead switch can sit there looking fine).  It
      also has to show itself, and the mask is drawn on the processed frame --
-     so turning it on from 几何模拟 brings that pane forward. */
+     so turning it on from 高分辨率模拟 brings that pane forward. */
   T.setResultTab('raw');
   {
     // The mask is drawn, not simulated, so throwing the switch may not start
@@ -1777,9 +1823,9 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     await new Promise((resolve) => setTimeout(resolve, 250));
     const sent = fetchCalls.filter((c) => c.url === '/api/process').pop();
     check('double-clicking a slider puts it back where the page found it',
-      document.getElementById('sharpen-radius').value === '1.2' &&
+      document.getElementById('sharpen-radius').value === '1' &&
       document.getElementById('label-density').value === '0.5' &&
-      (!sent || sent.body.processing.sharpen_radius_px === 1.2),
+      (!sent || sent.body.processing.sharpen_radius_px === 1),
       `${document.getElementById('sharpen-radius').value} / ` +
       `${document.getElementById('label-density').value} / ` +
       `${sent && sent.body.processing.sharpen_radius_px}`);
@@ -2624,11 +2670,11 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.state.downloads.proc = 'data:image/png;base64,cHJvYw==';
     T.state.labelsOn = false;
     T.setResultTab('raw');
-    check('几何模拟 saves the geometry render',
+    check('高分辨率模拟 saves the geometry render',
       String(document.getElementById('download').href).indexOf('cmF3') >= 0,
       String(document.getElementById('download').href));
     T.setResultTab('proc');
-    check('后期成片 saves the processed one',
+    check('后期处理 saves the processed one',
       String(document.getElementById('download').href).indexOf('cHJvYw') >= 0,
       String(document.getElementById('download').href));
     T.setResultTab('raw');
