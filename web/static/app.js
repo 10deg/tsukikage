@@ -21,6 +21,8 @@ const STACK = $('disk-stack');
 const RAW = $('raw');
 const RESULT = $('result');
 const MIN_ZOOM = 1, MAX_ZOOM = 8;
+/** The full disk may be zoomed *out* to see it in its window; close-ups stop at 1. */
+const DISK_MIN_ZOOM = 0.1;
 
 const state = {
   geometry: null,      // last /api/disk response geometry
@@ -33,11 +35,18 @@ const state = {
   panning: null,       // in-progress pan
   renderId: null,
   trainScale: 0,
+  regionInfo: null,    // region block of the last close-up, for pixel <-> lon/lat
   labelsOn: false,     // show named landforms on the pictures
   labels: { disk: null, region: null },   // last plans, in frame pixels
+  manualMarks: [],     // {id, lon, lat, text}: Ctrl-click anchors, on every view
+  manualSeq: 0,        // next 标记点 number
+  manualLayout: { disk: [], raw: [], proc: [] },  // last painted boxes, frame px
+  coord: { disk: null, region: null },  // last pointer coordinate per picture
+  resultInfoBase: '',  // the line under the close-ups, without the coordinate
   diskWhen: null,      // the instant the *displayed* preview was rendered for
   downloads: { disk: null, raw: null, proc: null },  // what each target last made
   diskExport: null,    // last full-disk export render: {key, url, geometry}
+  diskAbort: null,     // the preview request in flight, aborted by a newer one
   earthshine: null,    // earthshine block of the last close-up render
   features: null,      // the searchable landform index, fetched once
   moonLang: 'zh',      // the Moon readout's own language
@@ -51,9 +60,11 @@ const state = {
   skySeq: 0,           // guards a stale /api/sky reply
   skyOpen: false,
   skyCloseupTouched: false, // the reader has chosen the close-up mode themselves
-  skyViewLocked: false, // keep the current axes while time and span change
+  skyViewLocked: true,  // keep the current axes while time and span change
   eventTable: [],      // rows currently shown by the forecast (and its window)
   eventImported: false, // the rows came from a CSV, not from the server
+  eventSort: { key: 'date', dir: 1 }, // table sort: column and direction
+  processAbort: null,   // the /api/process request in flight
   skyWindow: null,     // {left, top, width, height} of the floating window
   skyDrag: null,       // in-progress window or plot drag
   skyHoverEdge: null,  // plot edge under the pointer, for the cursor and grips
@@ -95,16 +106,16 @@ const LAND_CLASSES = [
   { key: 'rima',         zh: '月溪',                 en: 'Rima',                 color: '#e09a9a' },
   { key: 'vallis',       zh: '月谷',                 en: 'Vallis',               color: '#c8a0d4' },
   { key: 'mons',         zh: '山脉',                 en: 'Mons',                 color: '#dcc98a' },
-  { key: 'dome',         zh: '穹丘 (Domes)',         en: 'Dome',                 color: '#c9b98a' },
+  { key: 'dome',         zh: '穹丘',         en: 'Dome',                 color: '#c9b98a' },
   { key: 'dorsum',       zh: '山脊',                 en: 'Dorsum',               color: '#bfa886' },
   { key: 'rupes',        zh: '峭壁',                 en: 'Rupes',                color: '#d4a179' },
   { key: 'catena',       zh: '坑链',                 en: 'Catena',               color: '#9aa8cc' },
   { key: 'promontorium', zh: '海角',                 en: 'Promontorium',         color: '#9ed4b4' },
   { key: 'statio',       zh: '着陆点',               en: 'Statio',               color: '#e9a86b' },
   { key: 'pit',          zh: 'Lunar pits',           en: 'Lunar pit',            color: '#9fd0c0' },
-  { key: 'pyroclastic',  zh: '火成碎屑 (Pyroclastic)', en: 'Pyroclastic',        color: '#d9a0b4' },
-  { key: 'imp',          zh: '不规则月海斑块 (IMP)',  en: 'Irregular mare patch', color: '#bcd0a0' },
-  { key: 'impact',       zh: '撞击闪光 (NELIOTA)',    en: 'NELIOTA impact',       color: '#f0c0a0' },
+  { key: 'pyroclastic',  zh: '火成碎屑', en: 'Pyroclastic',        color: '#d9a0b4' },
+  { key: 'imp',          zh: '不规则月海斑块',  en: 'Irregular mare patch', color: '#bcd0a0' },
+  { key: 'impact',       zh: '撞击闪光',    en: 'NELIOTA impact',       color: '#f0c0a0' },
   { key: 'albedo',       zh: '反射率特征点',          en: 'Albedo feature',       color: '#c9c9dc' },
   { key: 'other',        zh: '其他',                 en: 'Other',                color: '#b9bec9' },
 ];
@@ -543,7 +554,7 @@ const PROC_FIELDS = [
 /** The announce annotations panel's own controls. */
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
-  'label-lock',
+  'label-lock', 'label-overlap',
   'text-bold', 'text-color', 'text-stroke', 'text-stroke-width',
   'marker-stroke', 'marker-stroke-width',
   'outline-style', 'outline-width', 'outline-color',
@@ -895,6 +906,272 @@ function pixelToLonLat(px, py) {
 function lonLatToPixel(lonDeg, latDeg) {
   const point = projectSelenographic(lonDeg, latDeg, diskGeom());
   return point.far ? null : { x: point.x, y: point.y };
+}
+
+/* ── the close-up's camera, for pointing and for anchors ───────────────────
+ *
+ * The disk has an inverse in `pixelToLonLat`; the close-up needs the same
+ * thing, but its camera is aimed at a target instead of at the Moon's centre.
+ * The renderer already told us everything that camera is: the target, its
+ * span, its roll and the observer's distance.  Rebuilding the ray here is the
+ * inverse of `annotations.region_frame` -- no round trip, and it keeps working
+ * while the pointer moves.
+ */
+function regionCamera() {
+  const r = state.regionInfo;
+  const g = state.geometry;
+  if (!r || !g) return null;
+  const width = Math.max(1, Number(r.width) || RAW.width);
+  const height = Math.max(1, Number(r.height) || RAW.height);
+  const radiusKm = Number(((g.report || {}).state || {}).moon_radius_km) || 1737.4;
+  // The disk summary carries the distance; a stripped-down payload (the test
+  // harness, or a cached frame) can still derive it from the angular size.
+  let distance = Number(r.observer_distance_km) || Number(g.distance_km);
+  if (!(distance > radiusKm)) {
+    const angular = (Number(r.angular_diameter_deg
+      || g.angular_diameter_deg) / 2) * Math.PI / 180;
+    distance = angular > 0 ? radiusKm / Math.sin(angular) : NaN;
+  }
+  if (!(distance > radiusKm)) return null;
+  // The observer sits on the sub-observer direction.  In disk terms that is
+  // -d * forward, with forward pointing from the observer towards the centre.
+  const sub = moonVector(
+    Number(r.sub_observer_lon_deg ?? g.libration_lon_deg) || 0,
+    Number(r.sub_observer_lat_deg ?? g.libration_lat_deg) || 0);
+  const origin = [sub[0] * distance, sub[1] * distance, sub[2] * distance];
+  const target = moonVector(Number(r.lon_deg) || 0, Number(r.lat_deg) || 0)
+    .map((value) => value * radiusKm);
+  const forward = unit3([
+    target[0] - origin[0], target[1] - origin[1], target[2] - origin[2],
+  ]);
+  const pole = [0, 0, 1];
+  let up = unit3([
+    pole[0] - dot3(pole, forward) * forward[0],
+    pole[1] - dot3(pole, forward) * forward[1],
+    pole[2] - dot3(pole, forward) * forward[2],
+  ]);
+  let right = unit3(cross3(forward, up));
+  const roll = (Number(r.rotation_deg) || 0) * Math.PI / 180;
+  if (roll) {
+    const cos = Math.cos(roll), sin = Math.sin(roll);
+    const oldRight = right, oldUp = up;
+    right = [
+      cos * oldRight[0] + sin * oldUp[0],
+      cos * oldRight[1] + sin * oldUp[1],
+      cos * oldRight[2] + sin * oldUp[2],
+    ];
+    up = [
+      -sin * oldRight[0] + cos * oldUp[0],
+      -sin * oldRight[1] + cos * oldUp[1],
+      -sin * oldRight[2] + cos * oldUp[2],
+    ];
+  }
+  const toTarget = Math.hypot(
+    target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]);
+  const span = Number(r.span_km) || 0;
+  if (!(span > 0) || !(toTarget > 0)) return null;
+  const pixelScale = 2 * Math.tan(Math.atan(0.5 * span / toTarget))
+    / Math.min(width, height);
+  return { width, height, origin, forward, right, up, pixelScale, radiusKm };
+}
+
+/** Close-up frame pixel -> selenographic lon/lat, or null if it misses the Moon. */
+function regionPixelToLonLat(px, py) {
+  const cam = regionCamera();
+  if (!cam) return null;
+  const column = (px - 0.5 * (cam.width - 1)) * cam.pixelScale;
+  const row = (0.5 * (cam.height - 1) - py) * cam.pixelScale;
+  const direction = unit3([
+    cam.forward[0] + column * cam.right[0] + row * cam.up[0],
+    cam.forward[1] + column * cam.right[1] + row * cam.up[1],
+    cam.forward[2] + column * cam.right[2] + row * cam.up[2],
+  ]);
+  // Ray from the observer to a sphere of the reference radius (kilometres).
+  const b = dot3(cam.origin, direction);
+  const c = dot3(cam.origin, cam.origin) - cam.radiusKm * cam.radiusKm;
+  const disc = b * b - c;
+  if (!(disc > 0)) return null;
+  const t = -b - Math.sqrt(disc);
+  if (!(t > 0)) return null;
+  const point = [
+    cam.origin[0] + t * direction[0],
+    cam.origin[1] + t * direction[1],
+    cam.origin[2] + t * direction[2],
+  ];
+  if (dot3(point, cam.origin) <= 0) return null;   // the far side
+  const [lon, lat] = lonLatFromVector(point);
+  return { lon, lat };
+}
+
+/** Close-up frame pixel of a selenographic point, or null when it is hidden. */
+function regionLonLatToPixel(lonDeg, latDeg) {
+  const cam = regionCamera();
+  if (!cam) return null;
+  const point = moonVector(lonDeg, latDeg).map((value) => value * cam.radiusKm);
+  if (dot3(point, cam.origin) <= 0) return null;
+  const offset = [
+    point[0] - cam.origin[0], point[1] - cam.origin[1], point[2] - cam.origin[2],
+  ];
+  const distance = Math.hypot(offset[0], offset[1], offset[2]);
+  if (!(distance > 0)) return null;
+  const direction = offset.map((value) => value / distance);
+  const depth = dot3(direction, cam.forward);
+  if (!(depth > 0)) return null;
+  const column = dot3(direction, cam.right) / depth;
+  const row = dot3(direction, cam.up) / depth;
+  return {
+    x: 0.5 * (cam.width - 1) + column / cam.pixelScale,
+    y: 0.5 * (cam.height - 1) - row / cam.pixelScale,
+  };
+}
+
+/** The raw frame's width and height for a view. */
+function frameSize(viewName) {
+  if (viewName === 'disk') return { width: DISK.width, height: DISK.height };
+  const r = state.regionInfo;
+  return {
+    width: Math.max(1, Number(r && r.width) || RAW.width),
+    height: Math.max(1, Number(r && r.height) || RAW.height),
+  };
+}
+
+/** A device-pixel position in a view, as a raw frame pixel.
+ *
+ * 后期成片 is the same frame with the processing rotation and mirror applied;
+ * undo those first, because the camera projection knows only the raw frame.
+ */
+function deviceToFramePoint(viewName, point) {
+  const { width, height } = frameSize(viewName);
+  let x = point.x, y = point.y;
+  if (viewName === 'proc') {
+    const turn = frameOrientation().rotation;
+    if (turn) {
+      const cx = 0.5 * (width - 1), cy = 0.5 * (height - 1);
+      const cos = Math.cos(turn), sin = Math.sin(turn);
+      const dx = x - cx, dy = y - cy;
+      x = cx + dx * cos - dy * sin;
+      y = cy + dx * sin + dy * cos;
+    }
+    const mirror = frameOrientation().mirror;
+    if (mirror === 'horizontal') x = (width - 1) - x;
+    else if (mirror === 'vertical') y = (height - 1) - y;
+  }
+  return { x, y };
+}
+
+/** A raw frame pixel in a view, in that view's own displayed device pixels. */
+function framePointToDevice(viewName, frameX, frameY) {
+  const map = imageToScreen(viewName, 0, 0);
+  if (!map) return null;
+  const { width, height } = frameSize(viewName);
+  let x = frameX, y = frameY;
+  if (viewName === 'proc') {
+    const mirror = frameOrientation().mirror;
+    if (mirror === 'horizontal') x = (width - 1) - x;
+    else if (mirror === 'vertical') y = (height - 1) - y;
+    const turn = frameOrientation().rotation;
+    if (turn) {
+      const cx = 0.5 * (width - 1), cy = 0.5 * (height - 1);
+      const cos = Math.cos(turn), sin = Math.sin(turn);
+      const dx = x - cx, dy = y - cy;
+      x = cx + dx * cos - dy * sin;
+      y = cy + dx * sin + dy * cos;
+    }
+  }
+  return { x: map.x + x * map.scaleX, y: map.y + y * map.scaleY };
+}
+
+/** Pointer position -> raw frame pixel for one view. */
+function pointerFramePoint(viewName, event) {
+  const map = imageToScreen(viewName, 0, 0);
+  if (!map) return null;
+  const rect = views[viewName] && views[viewName].body
+    ? views[viewName].body.getBoundingClientRect() : null;
+  if (!rect) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const device = {
+    x: (event.clientX - rect.left) * dpr,
+    y: (event.clientY - rect.top) * dpr,
+  };
+  const raw = deviceToFramePoint(viewName, device);
+  return {
+    x: (raw.x - map.x) / Math.max(1e-9, map.scaleX),
+    y: (raw.y - map.y) / Math.max(1e-9, map.scaleY),
+  };
+}
+
+/** Pointer position -> lon/lat on whichever picture it is over. */
+function pointerLonLat(viewName, event) {
+  const p = pointerFramePoint(viewName, event);
+  if (!p) return null;
+  return viewName === 'disk' ? pixelToLonLat(p.x, p.y)
+    : regionPixelToLonLat(p.x, p.y);
+}
+
+/** Format one coordinate for the footer. */
+function coordText(lon, lat) {
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return '';
+  const ew = lon >= 0 ? 'E' : 'W';
+  const ns = lat >= 0 ? 'N' : 'S';
+  return `经度 ${Math.abs(lon).toFixed(2)}°${ew}　纬度 ${Math.abs(lat).toFixed(2)}°${ns}`;
+}
+
+/** The coordinate a selected thing pins to the footer, or null. */
+function selectedCoord(viewName) {
+  const chosen = overlay.selected;
+  if (!chosen) return null;
+  if (chosen.kind === 'manual') {
+    const mark = state.manualMarks.find((item) => item.id === chosen.id);
+    if (!mark) return null;
+    // A manual mark is a place, so it pins every picture that shows it.
+    return { lon: mark.lon, lat: mark.lat, prefix: '选中标记：' };
+  }
+  if (chosen.kind !== 'label') return null;
+  if (viewName === 'disk' && chosen.view !== 'disk') return null;
+  if (viewName !== 'disk' && chosen.view === 'disk') return null;
+  const plan = planFor(viewName === 'disk' ? 'disk' : chosen.view);
+  const item = plan && plan.items
+    ? plan.items.find((entry) => labelKey(entry) === chosen.key) : null;
+  if (!item || !Number.isFinite(Number(item.lon_deg))) return null;
+  return {
+    lon: Number(item.lon_deg), lat: Number(item.lat_deg),
+    prefix: '选中地貌：',
+  };
+}
+
+/** Repaint one picture's coordinate readout, preferring a selection. */
+function paintCoordReadout(viewName) {
+  if (viewName === 'disk') {
+    const el = $('disk-coord');
+    if (!el) return;
+    const picked = selectedCoord('disk');
+    const here = picked || state.coord.disk;
+    el.textContent = here
+      ? `${here.prefix || ''}${coordText(here.lon, here.lat)}` : '';
+    el.title = picked
+      ? '选中的标注：取消选中后，这里重新显示鼠标所在位置的经纬度'
+      : '鼠标所在位置的月面经纬度；选中地貌或手动标记时显示标记点';
+    return;
+  }
+  const base = state.resultInfoBase || '';
+  const picked = selectedCoord(activeTarget());
+  const here = picked || state.coord.region;
+  $('result-info').textContent = here
+    ? `${base}${base ? '　' : ''}${here.prefix || ''}${coordText(here.lon, here.lat)}`
+    : base;
+}
+
+/** The coordinate line for a hover event over one of the three pictures. */
+function updateCoordFromEvent(viewName, event) {
+  const frameView = viewName === 'proc' ? 'proc' : viewName;
+  const at = pointerLonLat(frameView, event);
+  state.coord[viewName === 'disk' ? 'disk' : 'region'] = at;
+  paintCoordReadout(viewName);
+}
+
+function clearCoordReadout(viewName) {
+  state.coord[viewName === 'disk' ? 'disk' : 'region'] = null;
+  paintCoordReadout(viewName);
 }
 
 function drawDisk() {
@@ -1656,21 +1933,40 @@ function drawSelection() {
    features" to "as many as fit", and both the label budget and the smallest
    radius worth a marker move together.  The numbers are the server's two
    knobs, so the control stays fine-grained without any new API. */
+/* 0…0.5 is the old ruler (12→30 names, 4.5→1.5 px floor).  Past the midpoint
+   the second half is for "show me everything": up to 300 names and a floor
+   below a pixel, which is where labels begin to overlap and 停用避让 becomes
+   the useful switch.  The curve is deliberately not linear -- the first 100
+   names are what most readers want, and they should not all fit in the last
+   ten pixels of the slider. */
 const DENSITY_RANGE = {
-  labels: [12, 60],
-  min_radius_px: [4.5, 1.5],
+  labels: [12, 30, 300],
+  min_radius_px: [4.5, 1.5, 0.55],
 };
+const DENSITY_MAX = 1.5;
 
 /** The label layer of each view, drawn over its picture. */
 const LABEL_LAYERS = { disk: 'labels-disk', raw: 'labels-raw', proc: 'labels-proc' };
 
 function densitySettings() {
   const raw = Number($('label-density').value);
-  const at = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0.5;
-  const between = (pair) => pair[0] + at * (pair[1] - pair[0]);
+  const at = Number.isFinite(raw)
+    ? Math.max(0, Math.min(DENSITY_MAX, raw)) : 0.5;
+  const first = DENSITY_RANGE.labels[0];
+  const middle = DENSITY_RANGE.labels[1];
+  const labels = at <= 0.5
+    ? first + (at / 0.5) * (middle - first)
+    : middle + Math.pow((at - 0.5) / (DENSITY_MAX - 0.5), 1.2)
+      * (DENSITY_RANGE.labels[2] - middle);
+  const floorLow = DENSITY_RANGE.min_radius_px[0];
+  const floorMid = DENSITY_RANGE.min_radius_px[1];
+  const floor = at <= 0.5
+    ? floorLow + (at / 0.5) * (floorMid - floorLow)
+    : floorMid + Math.pow((at - 0.5) / (DENSITY_MAX - 0.5), 1.2)
+      * (DENSITY_RANGE.min_radius_px[2] - floorMid);
   return {
-    labels: Math.round(between(DENSITY_RANGE.labels)),
-    min_radius_px: Number(between(DENSITY_RANGE.min_radius_px).toFixed(2)),
+    labels: Math.round(labels),
+    min_radius_px: Number(floor.toFixed(2)),
   };
 }
 
@@ -2015,14 +2311,15 @@ function paintLabels(ctx, plan, style) {
       ctx.globalAlpha = alphaFor(item);
       // The rim carries the class colour too; the picker is the override for
       // when the reader wants one colour for everything.
-      ctx.strokeStyle = ink.uniform ? rim.color : itemColor(item, ink);
+      ctx.strokeStyle = item.manual ? MANUAL_COLOUR
+        : ink.uniform ? rim.color : itemColor(item, ink);
       strokeRing(item);
     }
     ctx.setLineDash([]);
   }
   for (const item of plan.items) {
     ctx.globalAlpha = alphaFor(item);
-    const colour = itemColor(item, ink);
+    const colour = item.manual ? MANUAL_COLOUR : itemColor(item, ink);
     ctx.beginPath();
     ctx.arc(item.x, item.y, marker, 0, Math.PI * 2);
     ctx.fillStyle = colour;
@@ -2036,7 +2333,7 @@ function paintLabels(ctx, plan, style) {
   for (const item of plan.items) {
     if (!item.labelled) continue;
     ctx.globalAlpha = alphaFor(item);
-    const colour = itemColor(item, ink);
+    const colour = item.manual ? MANUAL_COLOUR : itemColor(item, ink);
     const left = item.label_x;
     const top = item.label_y;
     const right = left + item.label_w;
@@ -2060,6 +2357,248 @@ function paintLabels(ctx, plan, style) {
     ctx.fillText(item.label, left + 3, midY);
   }
   ctx.restore();
+}
+
+/* ── manual anchors ────────────────────────────────────────────────────────
+ *
+ * Ctrl-click on any of the three pictures drops a pin: a red dot and a red
+ * caption, in the same visual language as a named landform, but never filtered
+ * by class, density or the scheduler.  They are stored by lon/lat, so the same
+ * pin appears on the disk and on both close-ups; their captions live here
+ * because they are the reader's, not the gazetteer's.
+ */
+const MANUAL_COLOUR = '#ff2f2f';
+const MANUAL_LIMIT = 10;
+
+function manualFramePoint(viewName, mark, frame) {
+  if (viewName === 'disk') {
+    if (!state.geometry) return null;
+    const at = frame || { width: DISK.width, height: DISK.height };
+    const geom = diskGeomFor(at.width, at.height);
+    const point = projectSelenographic(mark.lon, mark.lat, geom);
+    return point.far ? null : { x: point.x, y: point.y };
+  }
+  return regionLonLatToPixel(mark.lon, mark.lat);
+}
+
+/** The manual anchors' boxes for one view, in the space the labels are painted.
+ *
+ * 后期成片 mirrors its plan before painting, so a manual anchor has to be
+ * mirrored the same way; the canvas rotation is applied afterwards by the
+ * caller's transform, exactly as it is for the landform names.
+ */
+function manualItemsFor(viewName, ctx, style, frameOverride, mirrorForView = true) {
+  const frame = frameOverride || frameSize(viewName);
+  const plan = state.labels[viewName === 'disk' ? 'disk' : 'region'];
+  const fontPx = (style && style.fontPx)
+    || (plan && plan.font_px) || labelFrameFontPx(viewName);
+  const marker = Math.max(1.4, fontPx * 0.16);
+  const height = fontPx * 1.25;
+  const items = [];
+  ctx.save();
+  ctx.font = `${style && style.bold ? 'bold ' : ''}${fontPx}px "PingFang SC", ` +
+    `"Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif`;
+  for (const mark of state.manualMarks) {
+    const at = manualFramePoint(viewName, mark, frame);
+    if (!at) continue;
+    const width = Math.max(fontPx * 1.2, ctx.measureText(mark.text).width) + 6;
+    let labelX = at.x + marker + 4;
+    if (labelX + width > frame.width - 2) labelX = at.x - marker - 4 - width;
+    labelX = Math.max(1, Math.min(frame.width - width - 1, labelX));
+    let labelY = at.y - height / 2;
+    labelY = Math.max(1, Math.min(frame.height - height - 1, labelY));
+    const item = {
+      mark, manual: true, labelled: true, x: at.x, y: at.y,
+      label_x: labelX, label_y: labelY,
+      label_w: width, label_h: height, fontPx, marker,
+      label: mark.text, colour: MANUAL_COLOUR,
+    };
+    if (mirrorForView && viewName === 'proc') {
+      const mirror = frameOrientation().mirror;
+      if (mirror === 'horizontal') {
+        item.x = (frame.width - 1) - item.x;
+        item.label_x = (frame.width - 1) - (item.label_x + item.label_w);
+      } else if (mirror === 'vertical') {
+        item.y = (frame.height - 1) - item.y;
+        item.label_y = (frame.height - 1) - (item.label_y + item.label_h);
+      }
+    }
+    items.push(item);
+  }
+  ctx.restore();
+  return items;
+}
+
+/** Paint the manual anchors and remember where they landed for hit-testing. */
+function paintManualMarks(ctx, viewName, style) {
+  const items = manualItemsFor(viewName, ctx, style || {});
+  state.manualLayout[viewName] = items;
+  if (!items.length) return;
+  for (const item of items) {
+    const selected = overlay.selected && overlay.selected.kind === 'manual'
+      && overlay.selected.id === item.mark.id;
+    ctx.save();
+    if (selected) {
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, item.marker + item.fontPx * 0.35, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 214, 102, .95)';
+      ctx.lineWidth = Math.max(1, item.fontPx * 0.12);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(item.x, item.y, item.marker, 0, Math.PI * 2);
+    ctx.fillStyle = MANUAL_COLOUR;
+    ctx.fill();
+    ctx.lineWidth = Math.max(0.6, item.fontPx * 0.08);
+    ctx.strokeStyle = 'rgba(12, 14, 20, .8)';
+    ctx.stroke();
+    const midY = item.label_y + item.label_h / 2;
+    const textX = item.label_x + 3;
+    ctx.font = `${style && style.bold ? 'bold ' : ''}${item.fontPx}px "PingFang SC", ` +
+      `"Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(1.5, item.fontPx * 0.28);
+    ctx.strokeStyle = 'rgba(12, 14, 20, .92)';
+    ctx.strokeText(item.label, textX, midY);
+    ctx.fillStyle = MANUAL_COLOUR;
+    ctx.fillText(item.label, textX, midY);
+    ctx.restore();
+  }
+}
+
+/** The manual anchors as a plan for an export at an arbitrary frame size.
+ *
+ * The plan is in the export's own pixels and goes through the same painter as
+ * the landform names, mirroring and rotation included -- so a saved file
+ * carries the pins exactly where the preview showed them.
+ */
+function manualPlanFor(viewName, style, width, height) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return null;
+  const frame = { width: Math.max(1, width), height: Math.max(1, height) };
+  const items = manualItemsFor(viewName, ctx, style || {}, frame, false);
+  if (!items.length) return null;
+  const fontPx = items[0].fontPx || (style && style.fontPx) || 13;
+  return { frame, items, font_px: fontPx };
+}
+
+/** Join a plan and the manual anchors into one plan for a painter. */
+function withManualPlan(plan, viewName, style, width, height) {
+  if (!state.labelsOn || !state.manualMarks.length) return plan;
+  const extra = manualPlanFor(viewName, style, width, height);
+  if (!extra) return plan;
+  if (!plan) return extra;
+  return { ...plan, items: [...(plan.items || []), ...extra.items] };
+}
+
+/** Is the pointer over a manual anchor or its caption? */
+function manualHitTest(viewName, point) {
+  const items = state.manualLayout[viewName] || [];
+  if (!items.length) return null;
+  const map = imageToScreen(viewName, 0, 0);
+  if (!map) return null;
+  const frame = frameSize(viewName);
+  const slack = 5 * point.dpr;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    const at = frameToDevice(viewName, map, frame, item.x, item.y);
+    const marker = item.marker * Math.max(map.scaleX, map.scaleY);
+    if (point.x >= at.x - marker - slack && point.x <= at.x + marker + slack
+        && point.y >= at.y - marker - slack && point.y <= at.y + marker + slack) {
+      return item;
+    }
+    const corner = frameToDevice(viewName, map, frame, item.label_x, item.label_y);
+    if (point.x >= corner.x - slack
+        && point.x <= corner.x + item.label_w * map.scaleX + slack
+        && point.y >= corner.y - slack
+        && point.y <= corner.y + item.label_h * map.scaleY + slack) {
+      return item;
+    }
+  }
+  return null;
+}
+
+/** The × a selected manual anchor carries. */
+function manualBadgeFor(viewName) {
+  const chosen = overlay.selected;
+  if (!chosen || chosen.kind !== 'manual') return null;
+  const items = state.manualLayout[viewName] || [];
+  const item = items.find((entry) => entry.mark.id === chosen.id);
+  if (!item) return null;
+  const map = imageToScreen(viewName, 0, 0);
+  if (!map) return null;
+  const frame = frameSize(viewName);
+  const dpr = window.devicePixelRatio || 1;
+  const gap = (HANDLE_BADGE_PX + 5) * dpr;
+  const corner = frameToDevice(viewName, map, frame,
+    item.label_x + item.label_w, item.label_y);
+  return { x: corner.x + gap, y: corner.y - gap,
+           radius: HANDLE_BADGE_PX * dpr, kind: 'manual',
+           view: viewName, id: chosen.id };
+}
+
+/** Add one anchor at a pointer position; returns whether it was added. */
+function addManualMark(viewName, event) {
+  if (state.manualMarks.length >= MANUAL_LIMIT) {
+    setStatus(`手动标记最多 ${MANUAL_LIMIT} 个；先点「清空手动标记」或删掉一个再添加`, 'error');
+    return true;
+  }
+  const at = pointerLonLat(viewName === 'proc' ? 'proc' : viewName, event);
+  if (!at) {
+    setStatus('这里不在月面上，取不到经纬度', 'error');
+    return true;
+  }
+  state.manualSeq += 1;
+  // The caption's number is the smallest one not already in use, so adding
+  // after a deletion still reads 标记点1…标记点10 rather than 11 of 10.
+  const used = new Set(state.manualMarks.map((mark) => mark.number));
+  let number = 1;
+  while (used.has(number)) number += 1;
+  state.manualMarks.push({
+    id: state.manualSeq, number, lon: at.lon, lat: at.lat,
+    text: `标记点${number}`,
+  });
+  if (!state.labelsOn) ensureLabelsOn();
+  drawAllLabels();
+  setStatus(`已添加手动标记 ${state.manualMarks.length}/${MANUAL_LIMIT}：`
+    + `${coordText(at.lon, at.lat)}；双击文字可改名`);
+  return true;
+}
+
+/** 双击手动标记的文字：改成一个读者自己的名字。 */
+function editManualMark(viewName, event) {
+  const point = overlayPoint(viewName, event);
+  if (!point) return false;
+  const item = manualHitTest(viewName, point);
+  if (!item) return false;
+  const current = item.mark.text;
+  const next = window.prompt ? window.prompt('手动标记的文字', current) : null;
+  if (next === null || next === undefined) return true;
+  const text = String(next).trim().slice(0, 40);
+  if (!text) {
+    setStatus('标记文字不能为空');
+    return true;
+  }
+  item.mark.text = text;
+  drawAllLabels();
+  paintCoordReadout(viewName);
+  setStatus(`手动标记已改名为「${text}」`);
+  return true;
+}
+
+function clearManualMarks() {
+  if (!state.manualMarks.length) {
+    setStatus('还没有手动标记');
+    return;
+  }
+  const count = state.manualMarks.length;
+  state.manualMarks.length = 0;
+  state.manualSeq = 0;
+  if (overlay.selected && overlay.selected.kind === 'manual') overlay.selected = null;
+  drawAllLabels();
+  repaintCoordReadouts();
+  setStatus(`已清空 ${count} 个手动标记`);
 }
 
 /* ── geometric overlays on the full disk ───────────────────────────────────
@@ -2507,8 +3046,15 @@ function drawViewLabels(viewName) {
   const plan = regionLabelsWanted(viewName) ? planFor(viewName) : null;
   const marks = viewName === 'disk' && marksWanted() && state.geometry;
   const hasNames = !!(plan && plan.items && plan.items.length);
-  if (!hasNames && !marks) return;
-  const frame = (plan && plan.frame) || { width: DISK.width, height: DISK.height };
+  // Manual anchors are the reader's own, so they obey the label switch but not
+  // the landform-class filters or the close-ups' 地貌 export checkbox.
+  const manual = state.labelsOn && state.manualMarks.length > 0;
+  if (!hasNames && !marks && !manual) {
+    state.manualLayout[viewName] = [];
+    return;
+  }
+  const ownFrame = frameSize(viewName);
+  const frame = (plan && plan.frame) || ownFrame;
   const anchor = imageToScreen(viewName, 0, 0);
   const corner = imageToScreen(viewName, frame.width, frame.height);
   if (!anchor || !corner) return;
@@ -2529,7 +3075,9 @@ function drawViewLabels(viewName) {
       ctx.translate(-cx, -cy);
     }
   }
-  if (hasNames) paintLabels(ctx, plan, labelStyleForFrame(viewName));
+  const style = labelStyleForFrame(viewName);
+  if (hasNames) paintLabels(ctx, plan, style);
+  if (manual) paintManualMarks(ctx, viewName, style);
   if (marks) {
     // The overlay is sized like the labels: the plan's own frame-pixel font
     // when there is one, and what the window would ask for when there is not.
@@ -2921,6 +3469,10 @@ function drawSelectionHandles(ctx, viewName) {
       if (badge) badges.push(badge);
     }
   }
+  if (chosen && chosen.kind === 'manual') {
+    const badge = manualBadgeFor(viewName);
+    if (badge) badges.push(badge);
+  }
   for (const badge of badges) {
     ctx.save();
     ctx.beginPath();
@@ -2953,6 +3505,13 @@ const overlay = { selected: null, drag: null };
    through a nudge.  Empty picture deselects. */
 function selectOverlay(what) {
   overlay.selected = what;
+  repaintCoordReadouts();
+}
+
+/** Both footers, because a selection can move from one picture to another. */
+function repaintCoordReadouts() {
+  paintCoordReadout('disk');
+  paintCoordReadout('raw');
 }
 
 /** The ruler's grab targets, in device pixels: either end, or the bar. */
@@ -2982,8 +3541,8 @@ function overlayDown(viewName, event) {
   // A press on a × takes the thing away; it does not start a drag.  The
   // ruler's × only exists on the full disk, where the ruler is.
   const badges = viewName === 'disk'
-    ? [rulerBadge(), labelBadgeFor(viewName)]
-    : [labelBadgeFor(viewName)];
+    ? [rulerBadge(), labelBadgeFor(viewName), manualBadgeFor(viewName)]
+    : [labelBadgeFor(viewName), manualBadgeFor(viewName)];
   for (const badge of badges) {
     if (!badge) continue;
     if (Math.hypot(point.x - badge.x, point.y - badge.y) <= badge.radius + 3 * point.dpr) {
@@ -3003,6 +3562,17 @@ function overlayDown(viewName, event) {
     drawDisk();
     return true;
   }
+  const manual = manualHitTest(viewName, point);
+  if (manual) {
+    selectOverlay({ kind: 'manual', id: manual.mark.id, view: viewName });
+    overlay.drag = {
+      kind: 'manual', view: viewName, id: manual.mark.id, start: point,
+      origin: { lon: manual.mark.lon, lat: manual.mark.lat },
+    };
+    drawAllLabels();
+    paintCoordReadout(viewName);
+    return true;
+  }
   const item = labelHitTest(viewName, point);
   if (item) {
     const key = labelKey(item);
@@ -3013,6 +3583,7 @@ function overlayDown(viewName, event) {
       edit: { ...(labelEdits[labelStore(viewName)][key] || { dx: 0, dy: 0 }) },
     };
     drawAllLabels();
+    paintCoordReadout(viewName);
     return true;
   }
   // A press on empty picture puts the × away again.
@@ -3020,6 +3591,7 @@ function overlayDown(viewName, event) {
     overlay.selected = null;
     ruler.selected = false;
     drawAllLabels();
+    repaintCoordReadouts();
   }
   return false;
 }
@@ -3044,7 +3616,16 @@ function hideBadgeTarget(kind, badge) {
     overlay.selected = null;
     syncMarkChips();
     drawAllLabels();
+    paintCoordReadout('disk');
     setStatus('标尺已隐藏');
+    return;
+  }
+  if (kind === 'manual') {
+    state.manualMarks = state.manualMarks.filter((mark) => mark.id !== badge.id);
+    overlay.selected = null;
+    drawAllLabels();
+    repaintCoordReadouts();
+    setStatus(`手动标记已取消（还剩 ${state.manualMarks.length} 个）`);
     return;
   }
   const store = labelStore(badge.view);
@@ -3055,6 +3636,7 @@ function hideBadgeTarget(kind, badge) {
   labelHidden[store].add(badge.key);
   overlay.selected = null;
   drawAllLabels();
+  repaintCoordReadouts();
   setStatus('这一条地貌标注已临时隐藏（重新排版、关掉它的分类或点「复位」可恢复）');
 }
 
@@ -3071,6 +3653,19 @@ function overlayMove(event) {
   const delta = deviceToFrameDelta(
     drag.kind === 'ruler' ? 'disk' : drag.view,
     map, point.x - drag.start.x, point.y - drag.start.y);
+  if (drag.kind === 'manual') {
+    const at = pointerLonLat(drag.view, event);
+    if (at) {
+      const mark = state.manualMarks.find((item) => item.id === drag.id);
+      if (mark) {
+        mark.lon = at.lon;
+        mark.lat = at.lat;
+        drawAllLabels();
+        paintCoordReadout(drag.view);
+      }
+    }
+    return true;
+  }
   if (drag.kind === 'ruler') {
     const bar = drag.bar;
     if (!bar) return true;
@@ -3105,6 +3700,11 @@ function overlayUp() {
   overlay.drag = null;
   if (drag.kind === 'ruler') {
     setStatus(`标尺：${rulerText(ruler.km)}（拖动可改位置与长度）`);
+  } else if (drag.kind === 'manual') {
+    const mark = state.manualMarks.find((item) => item.id === drag.id);
+    setStatus(mark
+      ? `${mark.text}：${coordText(mark.lon, mark.lat)}（拖动可移动；双击文字可改名）`
+      : '手动标记已移动');
   } else {
     setStatus('地貌标注已微调位置（重新排版后仍按名字保留）');
   }
@@ -3205,11 +3805,15 @@ function savedImageBlob(target, callback) {
   const wanted = target === 'disk' ? source : outputPixels();
   const wantedLabels = target === 'disk' ? $('disk-annotated').checked : $('download-annotated').checked;
   const annotate = wantedLabels && state.labelsOn;
-  const plan = annotate ? planFor(view) : null;
+  const style = labelStyleForFrame(view);
+  let plan = annotate ? planFor(view) : null;
+  // Manual anchors travel into the file as part of the same annotation layer.
+  plan = annotate
+    ? withManualPlan(plan, view, style, source.width, source.height) : plan;
   const marks = target === 'disk' && wantedLabels && marksWanted()
     ? { fontPx: plan && plan.font_px ? plan.font_px : 12 } : null;
   const canvas = composeImage(source, wanted.width, wanted.height, plan,
-    labelStyleForFrame(view), target === 'proc' ? frameOrientation() : null,
+    style, target === 'proc' ? frameOrientation() : null,
     marks, target === 'proc');
   callback(canvasBlob(canvas, format), format);
 }
@@ -3347,8 +3951,17 @@ async function saveDisk() {
     plan = applyLabelEdits(plan, 'disk');
   }
   try {
+    const style = labelStyleForFrame('disk', width / Math.max(1, DISK.width));
+    // The export lays the manual anchors out at the export's own type size,
+    // scaled from the preview just as the landform plan is.
+    const exportFont = plan && plan.font_px
+      ? plan.font_px : labelFrameFontPx('disk') * (width / Math.max(1, DISK.width));
+    if (annotate) {
+      plan = withManualPlan(plan, 'disk', { ...style, fontPx: exportFont },
+                            width, width);
+    }
     const canvas = centred || composeImage(source.image, width, width, plan,
-      labelStyleForFrame('disk', width / Math.max(1, DISK.width)), null,
+      style, null,
       annotate ? { fontPx: plan ? plan.font_px : 12 } : null, false, smooth);
     if (hdr) {
       // The gain map comes from the render that made this frame.  If it is not
@@ -3861,10 +4474,10 @@ function polygonArea(points) {
  *
  * It was two arrows chasing each other round a circle.  A glyph has to be
  * taught -- "what does this circle do?" -- while the word says it before the
- * reader has to work anything out, and at 8 px it fits inside the same button
- * height the icon needed.  See `button.reset` in the stylesheet.
+ * reader has to work anything out.  复位 is the same word the sky window uses
+ * for "restore the view", so the page has one word for one gesture.
  */
-const RESET_LABEL = 'Reset';
+const RESET_LABEL = '复位';
 
 /** Every button that resets something. */
 const RESET_BUTTONS = ['label-reset', 'sel-reset-rot', 'output-reset', 'proc-reset'];
@@ -5503,8 +6116,30 @@ async function fetchLabels(frame, body) {
  * plan, so changing either is one more request and nothing else: the frame is
  * the same frame, and only the selection of names in it has moved.
  */
+function satelliteMode() {
+  const button = $('label-satellite');
+  return button && button.getAttribute('aria-pressed') === 'false'
+    ? 'letter' : 'full';
+}
+
+/** The current box, in the terms the annotation planner understands. */
+function focusPayload() {
+  const button = $('label-focus');
+  if (!button || button.getAttribute('aria-pressed') !== 'true') return null;
+  const s = state.selection;
+  if (!s || !state.geometry) return null;
+  return {
+    lon: s.lon,
+    lat: s.lat,
+    radius_deg: s.radiusFraction * (state.geometry.angular_diameter_deg / 2),
+    aspect: s.aspect || 1,
+    rotation_deg: s.rotationDeg || 0,
+  };
+}
+
 function labelRequestBase() {
   const density = densitySettings();
+  const overlap = $('label-overlap');
   return {
     labels: density.labels,
     min_radius_px: density.min_radius_px,
@@ -5512,6 +6147,9 @@ function labelRequestBase() {
     language: labelLanguage(),
     classes: activeClasses(),
     only_illuminated: !$('label-shadow').checked,
+    satellite: satelliteMode(),
+    avoid_overlap: !(overlap && overlap.checked),
+    focus: focusPayload(),
   };
 }
 
@@ -5774,6 +6412,11 @@ $('body-disk').addEventListener('pointerdown', (event) => {
   // on one of them is a press on a control, not the start of a selection box.
   const target = event.target;
   if (target && target.closest && target.closest('.view-tools, .zoom')) return;
+  // Ctrl / ⌘ + click drops a manual anchor instead of starting a box.
+  if ((event.ctrlKey || event.metaKey) && addManualMark('disk', event)) {
+    event.preventDefault();
+    return;
+  }
   if (wantsPan(event)) {
     state.panning = { x: event.clientX, y: event.clientY };
     $('body-disk').setPointerCapture(event.pointerId);
@@ -5957,6 +6600,21 @@ function endDrag(event) {
 $('body-disk').addEventListener('pointerup', endDrag);
 $('body-disk').addEventListener('pointercancel', endDrag);
 
+/* 经纬度随鼠标走：单独一条监听，不碰选框、平移和标注的拖拽。 */
+$('body-disk').addEventListener('pointermove', (event) => {
+  if (!state.geometry) return;
+  updateCoordFromEvent('disk', event);
+});
+$('body-disk').addEventListener('pointerleave', () => clearCoordReadout('disk'));
+// Ctrl+click is also the platform's context menu on some systems; the anchor
+// has already been placed by pointerdown, so suppress the menu that follows.
+$('body-disk').addEventListener('contextmenu', (event) => {
+  if (event.ctrlKey || event.metaKey) event.preventDefault();
+});
+$('body-disk').addEventListener('dblclick', (event) => {
+  editManualMark('disk', event);
+});
+
 /** *p* is in preview-image pixels; the comparison happens on screen, so the
  *  grab targets stay the same size however far the picture is zoomed. */
 function hitTest(p) {
@@ -6039,7 +6697,7 @@ function updateCursor(event) {
       rulerHit === 'ruler-move' ? 'move' : 'ew-resize';
     return;
   }
-  if (point && labelHitTest('disk', point)) {
+  if (point && (manualHitTest('disk', point) || labelHitTest('disk', point))) {
     $('body-disk').style.cursor = 'move';
     return;
   }
@@ -6159,12 +6817,30 @@ let diskRetry = false;
 
 async function refreshDisk() {
   const seq = ++diskSeq;
+  // A newer instant makes the frame being traced stale.  Abort the fetch and
+  // let the server's preempt flag stop the march at its next band: without
+  // this, a change of time during a high-resolution render left a queue of
+  // previews each being refused by the one before it.
+  if (state.diskAbort) state.diskAbort.abort();
+  // A close-up being traced is a close-up of the *old* instant once the page's
+  // time has moved; the server is about to preempt it for the preview anyway,
+  // so stop waiting for it and hand the two panes back to their idle state.
+  if (state.renderAbort) {
+    state.renderAbort.abort();
+    state.renderAbort = null;
+    busy('raw-busy', false);
+    busy('result-busy', false);
+    setGenerateLabel('更新模拟');
+  }
+  const controller = new AbortController();
+  state.diskAbort = controller;
   busy('disk-busy', true);
   setStatus('渲染月面…', 'busy');
   try {
     const when = whenPayload();
     const payload = await post('/api/disk', {
       when,
+      preempt: true,
       ...lightPayload(),
       ...computePayload(),
       preview: {
@@ -6172,7 +6848,7 @@ async function refreshDisk() {
         samples: previewSamples(),
         shadow_steps: 24,
       },
-    });
+    }, controller.signal);
     if (seq !== diskSeq) return;              // a newer request won
     state.geometry = payload.geometry;
     state.diskWhen = when;                    // labels describe *this* preview
@@ -6195,6 +6871,8 @@ async function refreshDisk() {
     setStatus('就绪');
     await refreshLabels();
   } catch (error) {
+    if (error && error.name === 'AbortError') return;
+    if (seq !== diskSeq) return;
     setStatus(String(error.message || error), 'error');
     // The first request of a session can meet a server that is still coming up
     // (a restart, a browser that opened on a stale tab).  One quiet retry is
@@ -6204,7 +6882,10 @@ async function refreshDisk() {
       setTimeout(refreshDisk, 2500);
     }
   } finally {
-    if (seq === diskSeq) busy('disk-busy', false);
+    if (seq === diskSeq) {
+      busy('disk-busy', false);
+      if (state.diskAbort === controller) state.diskAbort = null;
+    }
   }
 }
 
@@ -6701,6 +7382,10 @@ function collectSettings() {
   // and is recorded the way the old select recorded it.
   values['annotate'] = state.labelsOn;
   values['image-mirror'] = mirrorMode();
+  // Two more latches: the satellite A/a toggle and 针对选框标注.
+  values['label-satellite'] = satelliteMode();
+  values['label-focus'] = $('label-focus')
+    && $('label-focus').getAttribute('aria-pressed') === 'true';
   // The columns are not form fields, so they travel in their own block.
   values['layout'] = layoutSettings();
   return values;
@@ -6736,6 +7421,17 @@ function applySettings(values) {
   syncClassChips();
   syncMarkChips();
   setMirrorMode(values['image-mirror'] || 'none');
+  // The satellite toggle is a latch on a button; putting it back is a text and
+  // an aria-pressed, not an input value.
+  if (values['label-satellite'] !== undefined) {
+    const full = values['label-satellite'] !== 'letter';
+    $('label-satellite').setAttribute('aria-pressed', String(full));
+    $('label-satellite').textContent = full ? 'A' : 'a';
+  }
+  if (values['label-focus'] !== undefined) {
+    $('label-focus').setAttribute('aria-pressed',
+      String(Boolean(values['label-focus'])));
+  }
   syncEarthshineGain('earthshine-gain');
   syncResolutionPicker('preview-px', 'preview-preset');
   syncResolutionPicker('disk-px', 'disk-preset');
@@ -6994,7 +7690,8 @@ function applyZoom(view) {
 }
 
 function setZoom(name, value) {
-  const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
+  const min = name === 'disk' ? DISK_MIN_ZOOM : MIN_ZOOM;
+  const zoom = Math.max(min, Math.min(MAX_ZOOM, value));
   for (const view of zoomGroup(name)) {
     view.zoom = zoom;
     applyZoom(view);
@@ -7195,6 +7892,12 @@ function finishProcessProgress(handle) {
 
 async function runProcess() {
   const seq = ++processSeq;
+  // Only the newest processing pass is worth receiving: a slider drag can ask
+  // for half a dozen, and a multi-megapixel PNG that is already superseded
+  // still has to be decoded on the main thread.  Abort the old one first.
+  if (state.processAbort) state.processAbort.abort();
+  const controller = new AbortController();
+  state.processAbort = controller;
   const progress = startProcessProgress();
   try {
     const payload = await post('/api/process', {
@@ -7210,7 +7913,7 @@ async function runProcess() {
       // The geometry pane carries the same orientation, and re-asking for it
       // here is what keeps a rotation from being a re-render.
       raw: true,
-    });
+    }, controller.signal);
     if (seq !== processSeq) return;
     state.resultImage = await loadImage(payload.image);
     state.downloads.proc = payload.image;
@@ -7237,10 +7940,13 @@ async function runProcess() {
       ? '就绪'
       : `就绪（近景为${COMPONENT_NAMES[component]}，按它自己的范围单独曝光）`);
   } catch (error) {
+    if (error && error.name === 'AbortError') return;
+    if (seq !== processSeq) return;
     if (error.stale) { setStatus('参数已变，请点「更新模拟」', 'error'); return; }
     setStatus(String(error.message || error), 'error');
   } finally {
-    finishProcessProgress(progress);
+    if (state.processAbort === controller) state.processAbort = null;
+    if (seq === processSeq) finishProcessProgress(progress);
   }
 }
 
@@ -7289,8 +7995,10 @@ async function renderRegion(width, height, samples, label) {
     showProgress(false);
     throw error;
   } finally {
-    state.renderAbort = null;
-    setGenerateLabel('更新模拟');
+    if (state.renderAbort === controller) {
+      state.renderAbort = null;
+      setGenerateLabel('更新模拟');
+    }
   }
 }
 
@@ -7325,6 +8033,9 @@ async function renderOutput() {
     await acceptRender(payload);
     setStatus(`出图完成：${width}×${height} px，每像素 ${samples}×${samples} 条光线。`);
   } catch (error) {
+    // A time change aborts the close-up on purpose; the preview that
+    // superseded it already has its own status.
+    if (error && error.name === 'AbortError') return;
     setStatus(String(error.message || error), 'error');
   } finally {
     busy('result-busy', false);
@@ -7393,6 +8104,19 @@ function describeResult(info, ms) {
   // The instrument's own numbers are not printed anywhere any more; the plate
   // scale is kept because the derived hints use it.
   if (tr) state.trainScale = tr.plate_scale_arcsec;
+  // The close-up camera, kept for the pointer readout and the manual anchors.
+  // /api/process reports the same region block but not the roll, so the last
+  // known roll (or the box the frame was asked for) fills the gap.
+  if (r) {
+    state.regionInfo = {
+      ...r,
+      rotation_deg: Number.isFinite(Number(r.rotation_deg))
+        ? Number(r.rotation_deg)
+        : (Number(state.regionInfo && state.regionInfo.rotation_deg)
+           || Number(state.lastRenderSelection && state.lastRenderSelection.rotationDeg)
+           || 0),
+    };
+  }
   const shape = (info.image && info.image.shape) || [0, 0];
   const bits = shape[0] ? [`${shape[1]}×${shape[0]} px`] : [];
   // The server echoes which radiance the frame was drawn in; the readout says so
@@ -7428,7 +8152,8 @@ function describeResult(info, ms) {
             `锐化半径 ${fmt(inst.sharpen_sigma_px, 2)} px（${fmt(inst.sharpen_sigma_arcsec, 3)}″）`);
   if (ms !== null && ms !== undefined) bits.push(`前端 ${(ms / 1000).toFixed(1)} s`);
   if (info.process_seconds !== undefined) bits.push(`后期 ${(info.process_seconds * 1000).toFixed(0)} ms`);
-  $('result-info').textContent = bits.join('　');
+  state.resultInfoBase = bits.join('　');
+  paintCoordReadout('raw');
 }
 
 /* ── wiring ──────────────────────────────────────────────────────── */
@@ -7658,9 +8383,11 @@ function buildEventKinds() {
   if (!host) return;
   host.innerHTML = '';
   const kinds = [
-    ['full_moon', '满月'], ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
-    ['highest_full', '最高满月'], ['highest_quarter', '最高弦月'],
-    ['lunar_eclipse', '月食'], ['xvl', '月面 X/V'],
+    ['new_moon', '朔月'], ['first_quarter', '上弦月'],
+    ['full_moon', '满月'], ['last_quarter', '下弦月'],
+    ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
+    ['highest_moon', '最高月亮'],
+    ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
@@ -7916,19 +8643,97 @@ function afterEventRows() {
   renderEventWindowRows();
 }
 
+/** Date and time separately, so the table can give each its own column. */
+function eventLocalParts(iso, tz) {
+  const stamp = Date.parse(iso);
+  if (!Number.isFinite(stamp)) return { date: '—', time: '—' };
+  const local = new Date(stamp + tz * 3600 * 1000).toISOString();
+  return { date: local.slice(5, 10), time: local.slice(11, 16) };
+}
+
+/** The value a header sorts by.  Missing data sorts last in either direction. */
+function eventSortValue(row, key) {
+  if (key === 'altitude') {
+    const value = Number(row.altitude_deg);
+    return Number.isFinite(value) ? value : -Infinity;
+  }
+  if (key === 'window') {
+    const stamp = Date.parse(row.window_start_utc || row.when_utc);
+    return Number.isFinite(stamp) ? stamp : 0;
+  }
+  if (key === 'label') {
+    return String(row.label || row.kind || '');
+  }
+  if (key === 'detail') {
+    return String(row.detail || '');
+  }
+  // 日期 and 时刻 both order by the same instant; the two columns show it split.
+  const stamp = Date.parse(row.when_utc);
+  return Number.isFinite(stamp) ? stamp : 0;
+}
+
+function sortedEventRows() {
+  const sort = state.eventSort || { key: 'date', dir: 1 };
+  const rows = state.eventTable.slice();
+  rows.sort((left, right) => {
+    const a = eventSortValue(left, sort.key);
+    const b = eventSortValue(right, sort.key);
+    let order;
+    if (typeof a === 'string' || typeof b === 'string') {
+      order = String(a).localeCompare(String(b), 'zh-Hans-CN');
+    } else {
+      order = a - b;
+    }
+    return sort.dir < 0 ? -order : order;
+  });
+  return rows;
+}
+
+function syncEventSortMarks() {
+  const sort = state.eventSort || { key: 'date', dir: 1 };
+  for (const th of document.querySelectorAll('#event-window th[data-sort]')) {
+    const active = th.dataset.sort === sort.key;
+    if (active) {
+      th.dataset.order = sort.dir > 0 ? '↑' : '↓';
+      th.setAttribute('aria-sort', sort.dir > 0 ? 'ascending' : 'descending');
+    } else {
+      delete th.dataset.order;
+      th.setAttribute('aria-sort', 'none');
+    }
+  }
+}
+
+function wireEventSortHeaders() {
+  for (const th of document.querySelectorAll('#event-window th[data-sort]')) {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      const current = state.eventSort || { key: 'date', dir: 1 };
+      state.eventSort = {
+        key,
+        dir: current.key === key ? -current.dir : 1,
+      };
+      renderEventWindowRows();
+    });
+  }
+}
+
 /** Fill the floating table from `state.eventTable`. */
 function renderEventWindowRows() {
   const body = $('event-window-rows');
   if (!body) return;
   body.innerHTML = '';
   const tz = Number($('tz').value) || 0;
-  for (const row of state.eventTable) {
+  for (const row of sortedEventRows()) {
     const tr = document.createElement('tr');
     tr.dataset.observable = row.observable === false ? 'false' : 'true';
     tr.title = '双击把主界面时间设为这一刻';
-    const when = document.createElement('td');
-    when.className = 'when';
-    when.textContent = eventLocalText(row.when_utc, tz);
+    const parts = eventLocalParts(row.when_utc, tz);
+    const date = document.createElement('td');
+    date.className = 'date';
+    date.textContent = parts.date;
+    const time = document.createElement('td');
+    time.className = 'time';
+    time.textContent = parts.time;
     const kind = document.createElement('td');
     kind.className = 'kind';
     kind.textContent = row.label || row.kind || '事件';
@@ -7936,14 +8741,17 @@ function renderEventWindowRows() {
     height.className = 'height';
     height.textContent = row.altitude_deg === null || row.altitude_deg === undefined
       ? '—' : `${fmt(row.altitude_deg, 1)}°`;
+    const windowCell = document.createElement('td');
+    windowCell.className = 'window';
+    windowCell.textContent = eventRangeText(row, tz) || '—';
     const detail = document.createElement('td');
     detail.className = 'detail';
-    const range = eventRangeText(row, tz);
-    detail.textContent = (range ? `窗口 ${range}　` : '') + (row.detail || '');
-    tr.append(when, kind, height, detail);
+    detail.textContent = row.detail || '';
+    tr.append(date, time, kind, height, windowCell, detail);
     tr.addEventListener('dblclick', () => setMainTimeFromEventRow(row));
     body.appendChild(tr);
   }
+  syncEventSortMarks();
   const empty = $('event-window-empty');
   if (empty) empty.hidden = state.eventTable.length > 0;
   const count = $('event-window-count');
@@ -8458,6 +9266,8 @@ function animationAnnotationsPayload() {
     language: labelLanguage(),
     classes: activeClasses(),
     only_illuminated: !$('label-shadow').checked,
+    satellite: satelliteMode(),
+    avoid_overlap: !$('label-overlap').checked,
     labels: density.labels,
     min_radius_px: density.min_radius_px * scale,
     outline_min_radius_px: (Number(LIMITS.label_outline_px) || 9) * scale,
@@ -9032,6 +9842,7 @@ function setResultTab(tab) {
   }
   fitCanvas(views[state.resultTab]);
   drawAllLabels();
+  paintCoordReadout(state.resultTab);
   updateDownloadLink();
 }
 
@@ -9528,6 +10339,11 @@ function init() {
     body.classList.add('grabbable');
     let last = null;
     body.addEventListener('pointerdown', (event) => {
+      // Ctrl / ⌘ + click drops a manual anchor on either close-up too.
+      if ((event.ctrlKey || event.metaKey) && addManualMark(name, event)) {
+        event.preventDefault();
+        return;
+      }
       // The close-ups carry names too, and a name is dragged the same way here
       // as on the Moon: a press on one edits *it*, a press anywhere else pans.
       if (!event.shiftKey && overlayDown(name, event)) {
@@ -9545,6 +10361,9 @@ function init() {
       panBy(name, event.clientX - last.x, event.clientY - last.y);
       last = { x: event.clientX, y: event.clientY };
     });
+    body.addEventListener('pointermove', (event) => updateCoordFromEvent(name, event));
+    body.addEventListener('pointerleave', () => clearCoordReadout(name));
+    body.addEventListener('dblclick', (event) => editManualMark(name, event));
     const stop = () => {
       overlayUp();
       last = null;
@@ -9672,6 +10491,10 @@ function init() {
       if (box) box.checked = false;
     }
     resetClasses();
+    // The two latches in this panel are part of "标注设置" too.
+    $('label-satellite').setAttribute('aria-pressed', 'true');
+    $('label-satellite').textContent = 'A';
+    $('label-focus').setAttribute('aria-pressed', 'false');
     syncMarkChips();
     updateDensityLabel();
     refreshLabelPlans();
@@ -9750,6 +10573,7 @@ function init() {
   $('events-end-sync').addEventListener('click', () => {
     syncRangeTime('events-end', '结束', loadEvents);
   });
+  wireEventSortHeaders();
   $('event-window-open').addEventListener('click', openEventWindow);
   $('event-window-close').addEventListener('click', closeEventWindow);
   $('event-window-export').addEventListener('click', exportEventCsv);
@@ -9974,6 +10798,44 @@ function init() {
       ? '已解锁标注布局（当前这一版不动，下次条件变化时才重排）'
       : '已解锁标注布局');
   });
+  // A/a: the same layout question as the language -- "阿贝 B" and "B" are
+  // different widths -- so it is a re-layout, not a repaint.
+  $('label-satellite').addEventListener('click', () => {
+    const button = $('label-satellite');
+    const full = button.getAttribute('aria-pressed') !== 'false';
+    button.setAttribute('aria-pressed', String(!full));
+    button.textContent = full ? 'a' : 'A';
+    ensureLabelsOn();
+    refreshLabelPlans();
+    setStatus(full
+      ? '卫星坑标注：只显示字母（A → a）'
+      : '卫星坑标注：显示母坑名与字母（a → A）');
+  });
+  // 停用避让 is a layout input: it changes which names can be placed, not just
+  // where the existing ones sit, so it earns a fresh plan.
+  $('label-overlap').addEventListener('change', () => {
+    ensureLabelsOn();
+    refreshLabelPlans();
+    setStatus($('label-overlap').checked
+      ? '避让已停用：标注允许重叠，极高密度下可以看到全部名字'
+      : '避让已启用：文字互不相压');
+  });
+  // 针对选框标注: the box gets its own density and its own second budget.
+  $('label-focus').addEventListener('click', () => {
+    const button = $('label-focus');
+    const on = button.getAttribute('aria-pressed') !== 'true';
+    if (on && !state.selection) {
+      setStatus('先在全月面上拖一个选框，再针对选框标注', 'error');
+      return;
+    }
+    button.setAttribute('aria-pressed', String(on));
+    ensureLabelsOn();
+    refreshLabelPlans();
+    setStatus(on
+      ? '针对选框标注：只提高框内区域的密度与避让预算'
+      : '已关闭针对选框标注');
+  });
+  $('manual-clear').addEventListener('click', clearManualMarks);
   $('preview-px').addEventListener('change', () => {
     $('preview-px').value = String(previewPixels());
     setStatus('预览分辨率已改，点「更新月面」重渲染');
@@ -10229,6 +11091,9 @@ function init() {
   $('sky-lock-view').addEventListener('click', () => {
     setSkyViewLock(!state.skyViewLocked);
   });
+  // The default is on, and the button must say so on the first paint too --
+  // `aria-pressed` in the markup is not enough once the page has a state.
+  setSkyViewLock(state.skyViewLocked);
   $('sky-sync-main').addEventListener('click', syncSkyTimeToMain);
   $('sky-reset').addEventListener('click', () => {
     state.skyView = null;

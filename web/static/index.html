@@ -171,6 +171,10 @@
               <input type="checkbox" id="label-shadow">
               <span>暗面</span>
             </label>
+            <!-- 选框内单独排版：全月面预览里也允许给框住的那块地面更高密度的
+                 标注，做法和高分辨率模拟那扇窗一样（另算一套密度与避让）。 -->
+            <button class="ghost" id="label-focus" aria-pressed="false"
+                    title="只针对当前选框内的区域计算标注密度与避让：框内可以比整月面更密，框外保持原样">针对选框标注</button>
             <!-- 刷新字体不属于可折叠的外观设置：它是"放大看"时最常按的那一下，
                  而且它不改变布局，只把字号按当前视口重新算一遍。 -->
             <button class="ghost" id="label-refresh-font"
@@ -196,9 +200,13 @@
                   <option value="both">中英</option>
                 </select>
               </label>
-              <label class="check inline" title="拖到左边少而大，右边多而小；数字是标签上限与最小可见半径">
+              <!-- 卫星坑的写法：A = 母坑名 + 字母（阿贝 B），a = 只写字母（B）。 -->
+              <button class="ghost format-toggle" id="label-satellite"
+                      aria-pressed="true"
+                      title="卫星坑的标注写法：A 显示全名（如「阿贝 B」），a 只显示字母（如「B」）">A</button>
+              <label class="check inline" title="拖到左边少而大，右边多而小；数字是标签上限与最小可见半径。超过 100 后进入极高密度，标注会很密">
                 密度
-                <input type="range" id="label-density" min="0" max="1" step="0.01" value="0.5">
+                <input type="range" id="label-density" min="0" max="1.5" step="0.01" value="0.5">
                 <b id="density-value">30</b>
               </label>
               <label class="check inline"
@@ -246,6 +254,17 @@
                 <input type="checkbox" id="label-lock">
                 <span>锁定布局</span>
               </label>
+              <!-- 避让算法让文字互不相压，但极高密度下有些名字就永远排不进去；
+                   关掉它就能看到所有符合条件的地貌，代价是允许重叠。 -->
+              <label class="check inline"
+                     title="停用避让算法：每个标注仍画在它自己的地貌旁，但允许文字互相重叠；极高密度下这是看到全部标注的唯一办法">
+                <input type="checkbox" id="label-overlap">
+                <span>停用避让</span>
+              </label>
+              <!-- 手动标记是读者自己按 Ctrl 点出来的锚点，不是地名库的一部分；
+                   清空只清这些点，不动地貌标注的分类与位置。 -->
+              <button class="ghost" id="manual-clear"
+                      title="清除全部手动标记（Ctrl / ⌘ + 点击添加的锚点）">清空手动标记</button>
             </div>
 
           <!-- 左边是几何标注，右边是分类开关；搜索已经搬到上面那一行。 -->
@@ -374,6 +393,9 @@
           <span id="disk-info-size">—</span>
           <span id="disk-info-earthshine"></span>
           <span class="view-foot-hint">Shift 或中键拖动平移　·　滚轮缩放</span>
+          <!-- 经纬度读数放在信息栏最后：鼠标一动就更新；选中标注时改成
+               那个标记点的坐标，直到取消选中。 -->
+          <span id="disk-coord" class="coord-readout"></span>
         </p>
 
         <!-- 保存整月面：整月面自己的分辨率、格式与是否带地照，与右下两张近景图无关。
@@ -915,7 +937,7 @@
             <output id="gain-out">1.00</output>
           </div>
           <div class="slider-row wide">
-            <span class="slider-label">偏移</span>
+            <span class="slider-label">偏置</span>
             <input type="range" id="offset" min="-0.5" max="0.5" step="0.01" value="0">
             <output id="offset-out">0.00</output>
           </div>
@@ -1248,8 +1270,8 @@
            title="拖动标题栏移动窗口；拖动窗口的四边或四角改变大小">天空位置示意图 <span class="en">Sky position</span></div>
       <div class="sky-head-tools">
         <span class="sky-badge" id="sky-mode">地平线视图</span>
-        <button class="ghost" id="sky-lock-view" aria-pressed="false"
-                title="锁定当前显示范围：改时间、跨度或步长时不再自动重新取景；再按一次恢复">锁定当前视角</button>
+        <button class="ghost" id="sky-lock-view" aria-pressed="true"
+                title="视角已锁定：改时间、跨度或步长不会重新取景；再按一次解除">锁定当前视角</button>
         <button class="ghost" id="sky-refresh" title="按主界面的时间和地点重新计算">重新计算</button>
         <button class="ghost" id="sky-reset" title="把显示范围恢复到自动适配，并解除锁定">复位视角</button>
         <button class="ghost icon" id="sky-close" title="关闭天空位置图" aria-label="关闭">×</button>
@@ -1272,19 +1294,6 @@
       </label>
       <button class="ghost mini" id="sky-sync-main"
               title="把主界面的日期、时间与时区设为这张图当前显示的那一刻">将时间同步到主界面</button>
-      <!-- 时间步长按钮独占一行，放在日期/时间/时区下面：它们是“拨动这个时刻”的
-           手指，和“看哪一刻”的输入框不该挤在同一行里抢宽度。 -->
-      <span class="sky-nudge" id="sky-nudge">
-        <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
-        <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
-        <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
-        <button class="ghost mini" id="sky-nudge-back-minute" data-nudge="-1m" data-range="sky">-1m</button>
-        <button class="ghost mini" id="sky-now" title="跳到主界面当前的时刻">此刻</button>
-        <button class="ghost mini" id="sky-nudge-fwd-minute" data-nudge="+1m" data-range="sky">+1m</button>
-        <button class="ghost mini" id="sky-nudge-fwd-quarter" data-nudge="+15m" data-range="sky">+15m</button>
-        <button class="ghost mini" id="sky-nudge-fwd-hour" data-nudge="+1h" data-range="sky">+1h</button>
-        <button class="ghost mini" id="sky-nudge-fwd-day" data-nudge="+1d" data-range="sky">+1d</button>
-      </span>
       <label title="以当前时刻为中心，向前后各展开多少小时">时间跨度 ±
         <input type="number" id="sky-span" value="6" min="0.25" max="24" step="0.25">
         <span class="unit">h</span>
@@ -1323,6 +1332,19 @@
         <span class="unit">px</span>
         <button class="gold" id="sky-save">保存 PNG</button>
       </span>
+      <!-- 步长按钮仍是“拨钟”的手指，放在这一排设置的最后，独占一行：
+           它不是显示选项，挪到「将时间同步到主界面」右边会和“看什么”混在一起。 -->
+      <span class="sky-nudge" id="sky-nudge">
+        <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
+        <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
+        <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
+        <button class="ghost mini" id="sky-nudge-back-minute" data-nudge="-1m" data-range="sky">-1m</button>
+        <button class="ghost mini" id="sky-now" title="跳到主界面当前的时刻">此刻</button>
+        <button class="ghost mini" id="sky-nudge-fwd-minute" data-nudge="+1m" data-range="sky">+1m</button>
+        <button class="ghost mini" id="sky-nudge-fwd-quarter" data-nudge="+15m" data-range="sky">+15m</button>
+        <button class="ghost mini" id="sky-nudge-fwd-hour" data-nudge="+1h" data-range="sky">+1h</button>
+        <button class="ghost mini" id="sky-nudge-fwd-day" data-nudge="+1d" data-range="sky">+1d</button>
+      </span>
     </div>
 
     <div class="sky-plot" id="sky-plot">
@@ -1348,9 +1370,9 @@
         <span class="event-window-count" id="event-window-count">—</span>
       </div>
       <div class="event-window-tools">
-        <button class="ghost" id="event-window-export"
+        <button class="ghost event-tool" id="event-window-export"
                 title="把表格里的行导出为 CSV（UTF-8，首行是列名）">导出 CSV</button>
-        <label class="as-link" for="event-window-import"
+        <label class="event-tool" for="event-window-import"
                title="导入同格式 CSV；导入后这些行成为事件列表，双击一条即可模拟那一时刻">导入 CSV</label>
         <input type="file" id="event-window-import" accept=".csv,text/csv" hidden>
         <button class="ghost icon" id="event-window-close"
@@ -1361,10 +1383,12 @@
       <table class="event-table">
         <thead>
           <tr>
-            <th class="when">时刻</th>
-            <th class="kind">事件</th>
-            <th class="height">高度</th>
-            <th class="detail">详情</th>
+            <th class="date sortable" data-sort="date">日期</th>
+            <th class="time sortable" data-sort="time">时刻</th>
+            <th class="kind sortable" data-sort="label">事件</th>
+            <th class="height sortable" data-sort="altitude">高度</th>
+            <th class="window sortable" data-sort="window">窗口</th>
+            <th class="detail sortable" data-sort="detail">详情</th>
           </tr>
         </thead>
         <tbody id="event-window-rows"></tbody>
@@ -1372,8 +1396,7 @@
       <div class="event-window-empty" id="event-window-empty" hidden>还没有预报结果。</div>
     </div>
     <footer class="event-window-foot">
-      <span>双击一行把主界面时间设为该时刻。CSV 列：kind, label, when_utc,
-        altitude_deg, observable, window_start_utc, window_end_utc, detail</span>
+      <!-- 列名是导出的实现细节，不是读者要读的内容：底部只留状态。 -->
       <span id="event-window-status">—</span>
     </footer>
   </div>

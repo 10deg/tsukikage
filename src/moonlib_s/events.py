@@ -1,19 +1,21 @@
 """Event forecasts: what is worth putting in a diary.
 
-Six things, all of them answers to "when should I look?":
+Nine things, all of them answers to "when should I look?":
 
-``full_moon``
-    The principal phase instant itself, from :mod:`moonlib_s.phases`.
+``new_moon`` / ``first_quarter`` / ``full_moon`` / ``last_quarter``
+    The four principal phase instants, from :mod:`moonlib_s.phases`.
 ``supermoon`` / ``micromoon``
-    A full moon that happens near perigee or near apogee.  There is no official
+    A full moon that happens in the near or far band.  There is no official
     threshold -- the word was invented by an astrologer in 1979 -- so the two
-    used here are stated rather than implied: within 360 000 km and beyond
-    405 000 km of the Earth's centre at the instant of full moon, which is
-    roughly the nearest and farthest tenth of the orbit.
-``highest_full`` / ``highest_quarter``
-    The full moon, and the quarter moons, that climb highest for *this*
-    observer in the range.  Altitude at transit is a property of the observer's
-    latitude and the Moon's declination, so this one genuinely needs a site.
+    used here are stated rather than implied: within 363 000 km and beyond
+    405 000 km of the Earth's centre at the instant of full moon.  The near
+    band is deliberately wide enough to include several moons a year (2026 has
+    three), because "supermoon" is a range, not a ranking.
+``highest_moon``
+    One row for each principal phase -- 最高朔月, 最高上弦月, 最高满月,
+    最高下弦月 -- at the transit altitude that makes it highest for *this*
+    observer.  Altitude at transit is a property of the observer's latitude and
+    the Moon's declination, so this one genuinely needs a site.
 ``lunar_eclipse``
     Penumbral, partial or total, found from the geometry of the Earth's shadow
     rather than from a table of eclipses: the Moon is eclipsed when it passes
@@ -27,14 +29,15 @@ does not correct for the atmosphere's enlargement of the Earth's shadow, which
 is why the umbra radius carries the conventional 2% allowance.
 
 ``xvl``
-    The Moon's "X" and "V": sunlight grazing the rims near Blanchinus and
-    Ukert, a few hours after first quarter.  The simulation uses the published
-    observational anchor -- the eastern arm of the X, near Blanchinus B at
-    lon 1.8°, lat -25° -- and reports the interval in which the Sun stands
-    0°–1.5° above that point, after first checking that the colongitude is
-    within a couple of degrees of 358°.  The "L" of the same family is not yet
-    predicted; the row says so nowhere because it does not exist, which is the
-    honest state of that piece of work.
+    The Moon's "X", "V" and "L": sunlight grazing the rims near Blanchinus and
+    Ukert, a few hours after first quarter, and the bright L-shaped ridge west
+    of Zach G.  The X/V anchor is the eastern arm of the X near Blanchinus B
+    (lon 1.8°, lat -25°); the L anchor is the stated Zach G west point
+    (lon 0°, lat -58.54°).  A window is the interval in which the Sun stands
+    -0.5°–1.5° above that point, with 0.5° as the best moment; X/V keeps the
+    colongitude gate at 358°.  L is paired with the next X/V of the same
+    sunrise train, and an overlap is written into the X/V row as
+    "后半段可见 L".
 """
 
 from __future__ import annotations
@@ -63,8 +66,16 @@ __all__ = [
 ]
 
 #: Distance at which a full moon counts as a "supermoon", km.
-SUPERMOON_KM = 360_000.0
-#: ...and as a micromoon ("minimoon"), km.
+#:
+#: The word has no official threshold, so the number is chosen to make the
+#: range *useful* rather than to crown one moon a year: a 363 000 km cut-off
+#: includes both 2026-01-03 (362 313 km) and 2026-12-24 (356 738 km), and the
+#: 2026-11-24 full moon between them -- which is what "several full moons can
+#: all be supermoons" means.  The old 360 000 km line left January out and made
+#: the label look like a once-a-year title.
+SUPERMOON_KM = 363_000.0
+#: ...and as a micromoon ("minimoon"), km.  The mirror of the same choice: the
+#: far tenth of the orbit, not only the single farthest full moon.
 MICROMOON_KM = 405_000.0
 
 #: The Earth's umbra and penumbra, as angular radii at the Moon's distance,
@@ -90,20 +101,34 @@ XVL_ANCHOR_LAT_DEG = -25.0
 XVL_COLONGITUDE_DEG = 358.0
 XVL_COLONGITUDE_TOLERANCE_DEG = 2.0
 
-#: The Sun's altitude at the anchor during the window.  The upper edge is the
-#: observational rule of thumb the page's forecast is built on: the letters are
-#: gone once the rim shadows have climbed above about one and a half degrees.
-XVL_SUN_ALTITUDE_MIN_DEG = 0.0
+#: The Sun's altitude at the anchor during an X/V/L window.  The old upper
+#: edge was 1.5° and the window began at the horizon; the observing notes put
+#: the letters' best contrast near 0.5°, so the window is now the whole
+#: -0.5°…1.5° band and 0.5° is reported as the best moment.  Below the horizon
+#: the terminator is still close enough to catch the grazing light, which is
+#: why the start is negative rather than zero.
+XVL_SUN_ALTITUDE_MIN_DEG = -0.5
 XVL_SUN_ALTITUDE_MAX_DEG = 1.5
+XVL_SUN_ALTITUDE_BEST_DEG = 0.5
+
+#: The L of the same family: a bright L-shaped ridge just west of Zach G.
+#: The published descriptions place it on the crater's western rampart; the
+#: catalogue has Zach G at lon 0.46°, lat -58.54°, and the ridge sits about a
+#: degree west of that.  The forecast only needs a point on the ground, so this
+#: is the stated anchor -- provisional, as the request says.
+LXV_ANCHOR_LON_DEG = -0.5
+LXV_ANCHOR_LAT_DEG = -58.54
 
 KIND_LABELS = {
     "full_moon": "满月",
+    "new_moon": "朔月",
+    "first_quarter": "上弦月",
+    "last_quarter": "下弦月",
     "supermoon": "超级月亮",
     "micromoon": "最小月亮",
-    "highest_full": "最高满月",
-    "highest_quarter": "最高弦月",
+    "highest_moon": "最高月亮",
     "lunar_eclipse": "月食",
-    "xvl": "月面 X / V",
+    "xvl": "月面 X / V / L",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -116,9 +141,16 @@ ECLIPSE_TITLES = {
 
 #: Every kind the page can ask for, in the order it shows them.
 EVENT_KINDS: Tuple[str, ...] = (
-    "full_moon", "supermoon", "micromoon", "highest_full", "highest_quarter",
-    "lunar_eclipse", "xvl",
+    "new_moon", "first_quarter", "full_moon", "last_quarter",
+    "supermoon", "micromoon", "highest_moon", "lunar_eclipse", "xvl",
 )
+
+#: Old names kept as aliases so a bookmarked settings file or a saved request
+#: does not turn into a 400 when the two highest-moon kinds are merged.
+EVENT_KIND_ALIASES = {
+    "highest_full": "highest_moon",
+    "highest_quarter": "highest_moon",
+}
 
 
 def _diameter_text(radius_deg: float) -> str:
@@ -265,22 +297,34 @@ def _greatest_eclipse(et_full: float) -> Optional[Tuple[str, float, datetime]]:
     return kind_name, max(0.0, magnitude), to_utc(et)
 
 
-#: Unit normal of the X/V anchor, in MOON_ME.
-_XVL_ANCHOR_NORMAL = np.array([
-    math.cos(math.radians(XVL_ANCHOR_LAT_DEG))
-    * math.cos(math.radians(XVL_ANCHOR_LON_DEG)),
-    math.cos(math.radians(XVL_ANCHOR_LAT_DEG))
-    * math.sin(math.radians(XVL_ANCHOR_LON_DEG)),
-    math.sin(math.radians(XVL_ANCHOR_LAT_DEG)),
-])
+def _anchor_normal(lon_deg: float, lat_deg: float) -> np.ndarray:
+    return np.array([
+        math.cos(math.radians(lat_deg)) * math.cos(math.radians(lon_deg)),
+        math.cos(math.radians(lat_deg)) * math.sin(math.radians(lon_deg)),
+        math.sin(math.radians(lat_deg)),
+    ])
+
+
+#: Unit normals of the two anchors, in MOON_ME.
+_XVL_ANCHOR_NORMAL = _anchor_normal(XVL_ANCHOR_LON_DEG, XVL_ANCHOR_LAT_DEG)
+_LXV_ANCHOR_NORMAL = _anchor_normal(LXV_ANCHOR_LON_DEG, LXV_ANCHOR_LAT_DEG)
+
+
+def _sun_altitude_at(normal: np.ndarray, et: float) -> float:
+    sun = np.asarray(direction_in_moon_frame("SUN", float(et)), dtype=float)
+    return math.degrees(math.asin(float(np.clip(
+        np.dot(normal, sun), -1.0, 1.0
+    ))))
 
 
 def _xvl_sun_altitude_deg(et: float) -> float:
     """The Sun's altitude above the Blanchinus-B anchor, degrees."""
-    sun = np.asarray(direction_in_moon_frame("SUN", float(et)), dtype=float)
-    return math.degrees(math.asin(float(np.clip(
-        np.dot(_XVL_ANCHOR_NORMAL, sun), -1.0, 1.0
-    ))))
+    return _sun_altitude_at(_XVL_ANCHOR_NORMAL, et)
+
+
+def _lxv_sun_altitude_deg(et: float) -> float:
+    """The Sun's altitude above the Zach G west anchor, degrees."""
+    return _sun_altitude_at(_LXV_ANCHOR_NORMAL, et)
 
 
 def _xvl_colongitude_deg(et: float) -> float:
@@ -290,68 +334,136 @@ def _xvl_colongitude_deg(et: float) -> float:
     return (90.0 - subsolar_lon) % 360.0
 
 
-def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
-    """The X/V windows inside *window*.
+def _altitude_windows(altitude_fn, start: float, end: float) -> List[Tuple[float, float, float]]:
+    """``(start, end, best)`` for every -0.5°…1.5° solar-altitude window."""
+    if end <= start + 60.0:
+        return []
+    windows: List[Tuple[float, float, float]] = []
+    step = 3600.0
+    moment = start
+    previous = altitude_fn(moment)
+    while moment < end:
+        following = min(moment + step, end)
+        altitude = altitude_fn(following)
+        if previous <= XVL_SUN_ALTITUDE_MIN_DEG < altitude:
+            root = bisect_root(
+                lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_MIN_DEG,
+                moment, following, tol=1e-3,
+            )
+            limit = min(end, root + 12.0 * 3600.0)
+            upper = altitude_fn(limit)
+            if upper <= XVL_SUN_ALTITUDE_MAX_DEG:
+                # The requested range ends inside the window; report the part
+                # of it the reader asked for rather than inventing an end.
+                finish = limit
+            else:
+                finish = bisect_root(
+                    lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_MAX_DEG,
+                    root, limit, tol=1e-3,
+                )
+            if finish > root + 60.0:
+                # 0.5° is the best moment; bisect between the two crossings.
+                # If the band was already above 0.5° at the start (a very short
+                # window), the midpoint is the honest fallback.
+                best = 0.5 * (root + finish)
+                if altitude_fn(best) < XVL_SUN_ALTITUDE_BEST_DEG:
+                    best = bisect_root(
+                        lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_BEST_DEG,
+                        root, finish, tol=1e-3,
+                    )
+                windows.append((root, finish, best))
+        previous = altitude
+        moment = following
+    return windows
 
-    The search is a coarse scan for the sunrise at the anchor followed by a
-    bisection on the solar altitude.  The colongitude gate is applied to the
-    refined instant, so an unrelated sunrise elsewhere in the lunation cannot
-    become an X: only one morning per month puts the terminator on Blanchinus
-    at the right colongitude.
+
+def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
+    """The X/V and L windows inside *window*.
+
+    One coarse scan for each anchor's sunrise, a bisection on the solar
+    altitude, and a colongitude gate for X/V.  L is paired with the *next* X/V
+    of the same lunation: the published descriptions agree that L appears
+    later, so an L sunrise with no preceding X/V is not reported.  When the two
+    intervals overlap, the X/V row says that the second half of its window also
+    shows L.
     """
     start = float(window.start_et)
     end = float(window.end_et)
-    if end <= start + 60.0:
-        return []
     events: List[MoonEvent] = []
-    step = 3600.0
-    moment = start
-    previous = _xvl_sun_altitude_deg(moment)
-    while moment < end:
-        following = min(moment + step, end)
-        altitude = _xvl_sun_altitude_deg(following)
-        if previous <= XVL_SUN_ALTITUDE_MIN_DEG < altitude:
-            root = bisect_root(_xvl_sun_altitude_deg, moment, following,
-                               tol=1e-3)
-            colongitude = _xvl_colongitude_deg(root)
-            offset = wrap_angle(
-                colongitude - XVL_COLONGITUDE_DEG, period=360.0
-            )
-            if abs(offset) <= XVL_COLONGITUDE_TOLERANCE_DEG:
-                limit = min(end, root + 12.0 * 3600.0)
-                upper = _xvl_sun_altitude_deg(limit)
-                if upper <= XVL_SUN_ALTITUDE_MAX_DEG:
-                    # The requested range ends inside the window; report the
-                    # part of it the reader asked for rather than inventing an
-                    # end the file does not cover.
-                    finish = limit
-                else:
-                    finish = bisect_root(
-                        lambda et: _xvl_sun_altitude_deg(et)
-                        - XVL_SUN_ALTITUDE_MAX_DEG,
-                        root, limit, tol=1e-3,
-                    )
-                if finish > root + 60.0:
-                    middle = 0.5 * (root + finish)
-                    moon_altitude = _altitude(middle, observer)
-                    minutes = (finish - root) / 60.0
-                    events.append(MoonEvent(
-                        kind="xvl",
-                        when_utc=to_utc(root),
-                        altitude_deg=moon_altitude,
-                        title="月面 X / V（Blanchinus B）",
-                        detail=(
-                            f"太阳高度 0–{XVL_SUN_ALTITUDE_MAX_DEG:g}°　"
-                            f"持续 {minutes:.0f} min　"
-                            f"余经度 {colongitude:.1f}°　"
-                            f"{_altitude_text(moon_altitude)}"
-                        ),
-                        observable=moon_altitude > 0.0,
-                        window_start_utc=to_utc(root),
-                        window_end_utc=to_utc(finish),
-                    ))
-        previous = altitude
-        moment = following
+
+    xv_windows: List[Tuple[float, float, float]] = []
+    for root, finish, best in _altitude_windows(_xvl_sun_altitude_deg, start, end):
+        colongitude = _xvl_colongitude_deg(root)
+        offset = wrap_angle(colongitude - XVL_COLONGITUDE_DEG, period=360.0)
+        if abs(offset) <= XVL_COLONGITUDE_TOLERANCE_DEG:
+            xv_windows.append((root, finish, best))
+
+    l_windows = _altitude_windows(_lxv_sun_altitude_deg, start, end)
+    paired_l: List[Tuple[float, float, float]] = []
+    overlaps: Dict[float, float] = {}
+    used: set = set()
+    for root, finish, best in xv_windows:
+        for position, (l_root, l_finish, l_best) in enumerate(l_windows):
+            if position in used:
+                continue
+            # L belongs to the same sunrise train: a few hours later, never a
+            # whole lunation away.  Its -0.5° onset can precede X/V's by a few
+            # minutes late in the year (the high-southern anchor sees the
+            # terminator first), but its *best* moment is still the later one;
+            # that is the ordering the forecast promises.
+            if not (root - 6.0 * 3600.0 <= l_root <= finish + 30.0 * 3600.0):
+                continue
+            if l_best < best - 120.0:
+                continue
+            used.add(position)
+            overlaps[root] = max(0.0, min(finish, l_finish) - max(root, l_root))
+            paired_l.append((l_root, l_finish, l_best))
+            break
+
+    for xv_root, xv_finish, xv_best in xv_windows:
+        moon_altitude = _altitude(xv_best, observer)
+        minutes = (xv_finish - xv_root) / 60.0
+        overlap = overlaps.get(xv_root, 0.0)
+        overlap_note = ("；后半段可见 L" if overlap > 5.0 * 60.0 else "")
+        events.append(MoonEvent(
+            kind="xvl",
+            when_utc=to_utc(xv_best),
+            altitude_deg=moon_altitude,
+            title="月面 X / V（Blanchinus B）",
+            detail=(
+                f"太阳高度 {XVL_SUN_ALTITUDE_MIN_DEG:g}–"
+                f"{XVL_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
+                f"{XVL_SUN_ALTITUDE_BEST_DEG:g}°　"
+                f"持续 {minutes:.0f} min　"
+                f"余经度 {_xvl_colongitude_deg(xv_root):.1f}°　"
+                f"{_altitude_text(moon_altitude)}{overlap_note}"
+            ),
+            observable=moon_altitude > 0.0,
+            window_start_utc=to_utc(xv_root),
+            window_end_utc=to_utc(xv_finish),
+        ))
+
+    for l_root, l_finish, l_best in paired_l:
+        moon_altitude = _altitude(l_best, observer)
+        minutes = (l_finish - l_root) / 60.0
+        events.append(MoonEvent(
+            kind="xvl",
+            when_utc=to_utc(l_best),
+            altitude_deg=moon_altitude,
+            title="月面 L（Zach G 西侧）",
+            detail=(
+                f"太阳高度 {XVL_SUN_ALTITUDE_MIN_DEG:g}–"
+                f"{XVL_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
+                f"{XVL_SUN_ALTITUDE_BEST_DEG:g}°　"
+                f"持续 {minutes:.0f} min　"
+                f"锚点 {LXV_ANCHOR_LON_DEG:g}° / {LXV_ANCHOR_LAT_DEG:g}°　"
+                f"{_altitude_text(moon_altitude)}"
+            ),
+            observable=moon_altitude > 0.0,
+            window_start_utc=to_utc(l_root),
+            window_end_utc=to_utc(l_finish),
+        ))
+    events.sort(key=lambda event: event.when_utc)
     return events
 
 
@@ -366,26 +478,38 @@ def _transit_altitude(et: float, observer: Observer) -> float:
     return max(values)
 
 
-def _full_moon_events(observer: Observer, window) -> List[MoonEvent]:
-    """Full moons, super/mini moons, and the eclipses among them.
+def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
+    """All four principal phases, plus super/mini moons and eclipses.
 
     Every one of them carries the Moon's apparent diameter and the altitude it
     stands at: the diameter is what distinguishes a supermoon from a micromoon
     to the eye, and the altitude is what decides whether the reader can see it
     at all -- which the row's own greyed-out state only hints at.
+
+    Full moons are *also* reported as 超级月亮 / 最小月亮 whenever they fall in
+    the near or far band: several per year qualify, and the title is a range,
+    not a ranking.
     """
     events: List[MoonEvent] = []
-    for phase in find_phase_events(window, (PhaseKind.FULL_MOON,)):
+    for phase in find_phase_events(window):
         distance, radius_deg, _separation = _geometry(phase.et)
         altitude = _altitude(phase.et, observer)
         size = f"视直径 {_diameter_text(radius_deg)}"
         where = f"地心距 {distance:,.0f} km"
         height = _altitude_text(altitude)
+        if phase.kind is PhaseKind.FULL_MOON:
+            detail = f"{size}　{where}　{height}"
+        elif phase.kind is PhaseKind.NEW_MOON:
+            detail = f"{where}　{height}（新月不可见，这一行是日期的锚）"
+        else:
+            detail = f"{size}　{where}　{height}"
         events.append(MoonEvent(
-            kind="full_moon", when_utc=phase.when_utc, altitude_deg=altitude,
-            detail=f"{size}　{where}　{height}",
+            kind=phase.kind.value, when_utc=phase.when_utc,
+            altitude_deg=altitude, detail=detail,
             observable=altitude > 0.0,
         ))
+        if phase.kind is not PhaseKind.FULL_MOON:
+            continue
         if distance <= SUPERMOON_KM:
             events.append(MoonEvent(
                 kind="supermoon", when_utc=phase.when_utc, altitude_deg=altitude,
@@ -414,8 +538,8 @@ def _full_moon_events(observer: Observer, window) -> List[MoonEvent]:
     return events
 
 
-def _highest_event(observer: Observer, window,
-                   kind: PhaseKind, name: str, label: str) -> Optional[MoonEvent]:
+def _highest_phase_event(observer: Observer, window,
+                         kind: PhaseKind, title: str) -> Optional[MoonEvent]:
     """The highest transit of one phase in the range."""
     best: Optional[Tuple[float, float]] = None
     for phase in find_phase_events(window, (kind,)):
@@ -430,9 +554,29 @@ def _highest_event(observer: Observer, window,
     grid = np.linspace(et - 12 * 3600.0, et + 12 * 3600.0, 49)
     transit = max(grid, key=lambda item: _altitude(float(item), observer))
     return MoonEvent(
-        kind=name, when_utc=to_utc(float(transit)), altitude_deg=height,
-        detail=f"{label}　中天高度 {height:.1f}°", observable=height > 0.0,
+        kind="highest_moon", when_utc=to_utc(float(transit)),
+        altitude_deg=height, title=title,
+        detail=f"{title}　中天高度 {height:.1f}°", observable=height > 0.0,
     )
+
+
+def _highest_moon_events(observer: Observer, window) -> List[MoonEvent]:
+    """One highest-transit row for each principal phase.
+
+    最高满月 and 最高弦月 used to be two switches with three answers between
+    them; they are one category now, and 最高朔月 joins them, so the list is
+    four rows -- 朔月, 上弦月, 满月, 下弦月 -- each at the transit altitude that
+    makes it "highest" for this site.
+    """
+    events: List[MoonEvent] = []
+    for kind, title in ((PhaseKind.NEW_MOON, "最高朔月"),
+                        (PhaseKind.FIRST_QUARTER, "最高上弦月"),
+                        (PhaseKind.FULL_MOON, "最高满月"),
+                        (PhaseKind.LAST_QUARTER, "最高下弦月")):
+        found = _highest_phase_event(observer, window, kind, title)
+        if found is not None:
+            events.append(found)
+    return events
 
 
 def moon_events(
@@ -460,7 +604,8 @@ def moon_events(
         Chronological.
     """
     window = as_time_range((start, end))
-    wanted = tuple(kinds) if kinds is not None else EVENT_KINDS
+    requested = tuple(kinds) if kinds is not None else EVENT_KINDS
+    wanted = tuple(EVENT_KIND_ALIASES.get(kind, kind) for kind in requested)
     unknown = [kind for kind in wanted if kind not in EVENT_KINDS]
     if unknown:
         raise MoonlibError(
@@ -468,28 +613,18 @@ def moon_events(
             f"known: {', '.join(EVENT_KINDS)}."
         )
     observer = Observer.from_value(observer)
+    wanted_set = set(wanted)
 
     events: List[MoonEvent] = []
-    if {"full_moon", "supermoon", "micromoon", "lunar_eclipse"} & set(wanted):
-        events.extend(_full_moon_events(observer, window))
-    if "highest_full" in wanted:
-        found = _highest_event(observer, window, PhaseKind.FULL_MOON,
-                               "highest_full", "满月")
-        if found is not None:
-            events.append(found)
-    if "highest_quarter" in wanted:
-        # Both quarters: "the highest quarter" is a question with two answers,
-        # and a reader planning an evening wants to see whether it is the first
-        # or the last one that is up.
-        for phase_kind, label in ((PhaseKind.FIRST_QUARTER, "上弦"),
-                                  (PhaseKind.LAST_QUARTER, "下弦")):
-            found = _highest_event(observer, window, phase_kind,
-                                   "highest_quarter", label)
-            if found is not None:
-                events.append(found)
-    if "xvl" in wanted:
+    phase_kinds = {"new_moon", "first_quarter", "full_moon", "last_quarter",
+                   "supermoon", "micromoon", "lunar_eclipse"}
+    if phase_kinds & wanted_set:
+        events.extend(_principal_phase_events(observer, window))
+    if "highest_moon" in wanted_set:
+        events.extend(_highest_moon_events(observer, window))
+    if "xvl" in wanted_set:
         events.extend(_xvl_events(observer, window))
-    keep = set(wanted)
+    keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)
     return events

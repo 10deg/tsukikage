@@ -30,6 +30,8 @@ import json
 import math
 import os
 import re
+import select
+import socket
 import sys
 import tempfile
 import threading
@@ -39,7 +41,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -132,6 +134,31 @@ _KM_PER_DEGREE = math.radians(1.0) * 1737.4
 #: with 2x2 sampling takes a few seconds; a reader who presses 终止 and then
 #: 生成 should wait that out rather than be told to try again.
 _RENDER_HANDOVER_SECONDS = 20.0
+
+
+def _combined_cancel(
+    frame_cancel: threading.Event,
+    client_cancel: Optional[Callable[[], bool]],
+) -> Callable[[], bool]:
+    """One cancel predicate for the renderer: 终止 *or* a gone client.
+
+    A browser tab closed mid-render used to leave the frame marching to the end
+    of the image while a reloaded page was told "上一张还在渲染".  Publishing
+    the disconnect on the frame's own event is what lets the next request wait
+    for the handover instead of being refused by a frame nobody will ever see.
+    """
+    if client_cancel is None:
+        return frame_cancel.is_set
+
+    def cancelled() -> bool:
+        if frame_cancel.is_set():
+            return True
+        if client_cancel():
+            frame_cancel.set()
+            return True
+        return False
+
+    return cancelled
 
 #: last few are kept -- an animation is a file, not a session, so a handful is a
 #: courtesy and a hundred is a leak.
@@ -626,6 +653,9 @@ class MoonService:
         self._animations: Dict[str, Dict[str, Any]] = {}
         self._animation_seq = 0
         self._animation_lock = threading.Lock()
+        #: The running job's cancel flag, if any.  A preview must not preempt a
+        #: background animation: that would silently turn a film into a still.
+        self._animation_cancel: Optional[threading.Event] = None
         #: Region downloads (数据源 → 下载此区域).  Small, guarded by its own
         #: lock, and keyed the same way the animations are.
         self._patches: Dict[str, Dict[str, Any]] = {}
@@ -967,7 +997,8 @@ class MoonService:
             self._render_lock.release()
 
     def disk(self, request: Dict[str, Any], width: int, samples: int,
-             shadow_steps: int
+             shadow_steps: int,
+             cancel: Optional[Callable[[], bool]] = None,
              ) -> Tuple[np.ndarray, Dict[str, Any]]:
         if int(width) > MAX_DISK_PX:
             raise moonlib_s.MoonlibError(
@@ -1003,15 +1034,21 @@ class MoonService:
             **earth,
         )
         started = time.time()
+        # A preview is a request about *this* instant.  If an older render is
+        # still marching -- the usual case after a page reload or a time switch
+        # during a long close-up -- that frame is now stale, so stop it at its
+        # next band instead of refusing the preview for the next ten minutes.
+        if request.get("preempt") and self._animation_cancel is None:
+            self._cancel_event.set()
         # The slot first, then a fresh cancel flag: whether the frame holding
         # the slot was cancelled is only readable until `_rendering()` replaces
         # the flag with this frame's own, and that is what decides whether to
         # wait for the handover or refuse at once.
         with self._render_slot():
-            with self._rendering():
+            with self._rendering() as frame_cancel:
                 render = moonlib_s.render_moon(
                     view=view, settings=settings, terrain=self.terrain(),
-                    cancel=self._cancel_event.is_set,
+                    cancel=_combined_cancel(frame_cancel, cancel),
                 )
         geometry = moonlib_s.view_summary(render.view)
         geometry["report"] = self.report(
@@ -1076,7 +1113,8 @@ class MoonService:
 
     # -- close-up -------------------------------------------------------
     def region(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any],
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any], str, np.ndarray]:
         """Ray-march the selected area, cache its linear radiance, then process it.
 
@@ -1126,7 +1164,7 @@ class MoonService:
         )
         started = time.time()
         with self._render_slot():
-            with self._rendering():
+            with self._rendering() as frame_cancel:
                 render = moonlib_s.render_region(
                     view,
                     _f(selection, "lon", 0.0),
@@ -1136,7 +1174,7 @@ class MoonService:
                     arcsec_per_pixel=_opt_f(output, "arcsec_per_pixel"),
                     settings=settings,
                     terrain=self.terrain(),
-                    cancel=self._cancel_event.is_set,
+                    cancel=_combined_cancel(frame_cancel, cancel),
                 )
         exposure = float(render.stats["exposure_scale"])
         # The total is the sum of the two halves, and the halves are kept as
@@ -1170,8 +1208,20 @@ class MoonService:
             }
             # Kept so that /api/process can describe the frame as fully as
             # /api/region does; the page reads the same fields from both.
+            region_context = render.region.to_dict()
+            # The camera's roll and the observer's direction, for the page's
+            # pointer readout.  The disk preview may already be showing a
+            # different instant by the time a close-up is on screen, so the
+            # close-up has to carry its own geometry rather than borrow it.
+            region_context.update({
+                "rotation_deg": float(render.stats.get("rotation_deg") or 0.0),
+                "sub_observer_lon_deg": float(view.libration_lon_deg),
+                "sub_observer_lat_deg": float(view.libration_lat_deg),
+                "observer_distance_km": float(view.distance_km),
+                "angular_diameter_deg": float(view.angular_diameter_deg),
+            })
             self._linear_context = {
-                "region": render.region.to_dict(),
+                "region": region_context,
                 "train": train.to_dict(),
             }
         component = _component(request)
@@ -1187,6 +1237,15 @@ class MoonService:
         # the frame was produced reads the same fields from both endpoints.
         body["region"]["bands"] = int(render.stats.get("bands", 1))
         body["region"]["band_workers"] = int(render.stats.get("band_workers", 1))
+        # The camera's roll: the page needs it to turn a pointer position back
+        # into the selenographic coordinates the frame was aimed at.
+        body["region"]["rotation_deg"] = float(
+            render.stats.get("rotation_deg") or 0.0
+        )
+        body["region"]["sub_observer_lon_deg"] = float(view.libration_lon_deg)
+        body["region"]["sub_observer_lat_deg"] = float(view.libration_lat_deg)
+        body["region"]["observer_distance_km"] = float(view.distance_km)
+        body["region"]["angular_diameter_deg"] = float(view.angular_diameter_deg)
         # The page shows two pictures of the same frame: what the geometry
         # produced, and what the processing made of it.  Both come from the one
         # cached array, so producing them together costs one extra tone map --
@@ -1348,7 +1407,10 @@ class MoonService:
         end = str(request.get("end") or "")
         if not start or not end:
             raise moonlib_s.MoonlibError("事件预报需要开始与结束时间。")
-        if kind not in moonlib_s.EVENT_KINDS:
+        # The two old highest-moon names are accepted as aliases: a saved CSV
+        # or a settings file from 1.4.1 should still work after the merge.
+        known = set(moonlib_s.EVENT_KINDS) | {"highest_full", "highest_quarter"}
+        if kind not in known:
             raise moonlib_s.MoonlibError(
                 f"未知的事件类型 {kind!r}；可选：{', '.join(moonlib_s.EVENT_KINDS)}。"
             )
@@ -1637,6 +1699,7 @@ class MoonService:
         try:
             with self._animation_lock:
                 self._cancel_event = cancel
+                self._animation_cancel = cancel
                 self._animation_seq += 1
                 job_id = str(self._animation_seq)
                 self._animations[job_id] = {
@@ -1665,6 +1728,9 @@ class MoonService:
             )
             thread.start()
         except Exception:
+            with self._animation_lock:
+                if self._animation_cancel is cancel:
+                    self._animation_cancel = None
             self._render_lock.release()
             raise
         return {"id": job_id, "state": "running", "total": int(total)}
@@ -1861,6 +1927,9 @@ class MoonService:
                 if job is not None:
                     job.update(state="failed", message=str(error), error=str(error))
         finally:
+            with self._animation_lock:
+                if self._animation_cancel is cancel:
+                    self._animation_cancel = None
             self._render_lock.release()
 
     def animation_status(self, job_id: str) -> Dict[str, Any]:
@@ -1971,6 +2040,22 @@ class MoonService:
             if not isinstance(classes, (list, tuple)):
                 raise moonlib_s.MoonlibError("classes must be a list of class keys.")
             classes = [str(key) for key in classes]
+        satellite = str(request.get("satellite") or "full")
+        if satellite not in ("full", "letter"):
+            satellite = "full"
+        focus = request.get("focus")
+        if isinstance(focus, dict):
+            focus = {
+                "lon_deg": _f(focus, "lon", 0.0),
+                "lat_deg": _f(focus, "lat", 0.0),
+                "radius_deg": max(0.0, _f(focus, "radius_deg", 0.0)),
+                "aspect": max(0.05, _f(focus, "aspect", 1.0)),
+                "rotation_deg": _f(focus, "rotation_deg", 0.0),
+            }
+            if not focus["radius_deg"] > 0.0:
+                focus = None
+        else:
+            focus = None
         options = {
             "max_labels": max(0, int(_f(request, "labels", DEFAULT_LABELS))),
             "min_radius_px": max(0.0, _f(request, "min_radius_px", DEFAULT_MIN_RADIUS_PX)),
@@ -1981,6 +2066,9 @@ class MoonService:
             "outline_min_radius_px": max(
                 0.0, _f(request, "outline_min_radius_px", DEFAULT_OUTLINE_RADIUS_PX)
             ),
+            "satellite": satellite,
+            "avoid_overlap": bool(request.get("avoid_overlap", True)),
+            "focus": focus,
         }
         if frame_name == "disk":
             when = request.get("when") or {}
@@ -2019,6 +2107,9 @@ class MoonService:
             "classes": options["classes"],
             "outline_min_radius_px": options["outline_min_radius_px"],
             "center_on_rim": True,
+            "satellite": options["satellite"],
+            "avoid_overlap": options["avoid_overlap"],
+            "focus": options["focus"],
         }
         return payload
 
@@ -2361,6 +2452,9 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
     }
     style["uniform"] = bool(value.get("uniform"))
     style["bold"] = bool(value.get("bold"))
+    satellite = str(value.get("satellite") or "full")
+    if satellite not in ("full", "letter"):
+        satellite = "full"
     try:
         import PIL  # noqa: F401
     except ImportError as error:  # pragma: no cover - install dependent
@@ -2380,6 +2474,8 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
             0.0, _f(value, "outline_min_radius_px", DEFAULT_OUTLINE_RADIUS_PX)
         ),
         "font_px": max(6.0, min(400.0, _f(value, "font_px", DEFAULT_LABEL_FONT_PX))),
+        "satellite": satellite,
+        "avoid_overlap": bool(value.get("avoid_overlap", True)),
         "style": style,
     }
 
@@ -2410,6 +2506,8 @@ class _AnimationLabelPainter:
             "language": spec["language"],
             "classes": spec["classes"],
             "only_illuminated": spec["only_illuminated"],
+            "satellite": spec.get("satellite", "full"),
+            "avoid_overlap": spec.get("avoid_overlap", True),
         }
         self._frozen = None
 
@@ -2656,20 +2754,27 @@ class Handler(BaseHTTPRequestHandler):
     # -- helpers --------------------------------------------------------
     def _send(self, status: int, body: bytes, content_type: str,
               filename: Optional[str] = None) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        if filename:
-            # The animation is a file the reader asked for, so the browser must
-            # save it under a name rather than render it in a tab.
-            self.send_header(
-                "Content-Disposition", f'attachment; filename="{filename}"'
-            )
-        self.end_headers()
+        # The whole response is inside the guard, not only the body write: a
+        # page refresh between `send_response` and `end_headers` raises
+        # BrokenPipeError from `flush_headers`, which used to fall through to
+        # the generic handler and try to send a 500 to a dead socket.
         try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            if filename:
+                # The animation is a file the reader asked for, so the browser
+                # must save it under a name rather than render it in a tab.
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{filename}"'
+                )
+            self.end_headers()
             self.wfile.write(body)
-        except BrokenPipeError:  # pragma: no cover - browser went away
+        except ConnectionError:  # pragma: no cover - browser went away
+            # A page refresh while a large JSON or PNG is on the wire is not a
+            # server error: the peer closed the socket and there is nobody left
+            # to read a 500.  Treat it as the end of this request.
             pass
 
     def _json(self, status: int, payload: Dict[str, Any]) -> None:
@@ -2695,6 +2800,30 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except ValueError as error:
             raise moonlib_s.MoonlibError(f"Malformed JSON body: {error}") from error
+
+    def _client_gone(self, *, force: bool = False) -> bool:
+        """Whether the peer has closed the connection.
+
+        Polled by long renders through their cancel predicate.  A socket that
+        is readable with ``recv(MSG_PEEK) == b""`` has reached EOF; a readable
+        socket with data is a pipelined request and is not a disconnect.  The
+        check is throttled because it is a syscall on the render's hot path.
+        """
+        now = time.monotonic()
+        checked = getattr(self, "_client_gone_at", 0.0)
+        if not force and now - checked < 0.25:
+            return bool(getattr(self, "_client_gone_value", False))
+        self._client_gone_at = now
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                gone = False
+            else:
+                gone = self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            gone = True
+        self._client_gone_value = gone
+        return gone
 
     # -- routes ---------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
@@ -2747,8 +2876,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": f"missing {path.name}"})
         self._send(200, path.read_bytes(), content_type)
 
-    def do_POST(self) -> None:  # noqa: N802    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        self._client_gone_at = 0.0
+        self._client_gone_value = False
         try:
             request = self._body()
             if path == "/api/disk":
@@ -2758,10 +2889,13 @@ class Handler(BaseHTTPRequestHandler):
                     int(_f(preview, "width", PREVIEW_WIDTH)),
                     int(_f(preview, "samples", PREVIEW_SAMPLES)),
                     int(_f(preview, "shadow_steps", PREVIEW_SHADOW_STEPS)),
+                    cancel=self._client_gone,
                 )
                 return self._json(200, disk_payload(image, geometry))
             if path == "/api/region":
-                image, info, render_id, raw = self.service.region(request)
+                image, info, render_id, raw = self.service.region(
+                    request, cancel=self._client_gone
+                )
                 return self._json(
                     200,
                     {"info": info, "render_id": render_id,
@@ -2819,10 +2953,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.settings.list())
             return self._json(404, {"error": f"no route {path}"})
         except StaleRender as error:
+            if self._client_gone(force=True):
+                return
             return self._json(409, {"error": str(error), "stale": True})
         except moonlib_s.MoonlibError as error:
+            # A cancellation caused by the peer closing is not a 400 to send to
+            # that peer; there is no peer left.
+            if self._client_gone(force=True):
+                return
             return self._json(400, {"error": str(error)})
+        except ConnectionError:
+            # The response could not be written because the browser went away.
+            return
         except Exception as error:  # pragma: no cover - surfaced to the page
+            if self._client_gone(force=True):
+                return
             traceback.print_exc()
             return self._json(500, {"error": f"{type(error).__name__}: {error}"})
 

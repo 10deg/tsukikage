@@ -243,20 +243,46 @@ check('the sky window has a canvas, a close button and its own save row',
 check('the sky button is drawn in the accent blue',
   /h2 \.mini\.sky-open\s*\{[^}]*border-color:\s*var\(--accent\)[^}]*color:\s*var\(--accent\)/
     .test(css));
-/* 折叠箭头是几何标注那一块唯一的入口，16 px 才在 18 px 行里看得见。 */
-check('the landform fold caret is large enough',
-  /\.label-bar \.caret\s*\{[^}]*font-size:\s*16px/.test(css));
+/* 折叠箭头是几何标注那一块唯一的入口：20 px，且 flex 居中。 */
+check('the landform fold caret is large and centred',
+  /\.label-bar \.caret\s*\{[^}]*display:\s*inline-flex/.test(css) &&
+  /\.label-bar \.caret\s*\{[^}]*align-items:\s*center/.test(css) &&
+  /\.label-bar \.caret\s*\{[^}]*justify-content:\s*center/.test(css) &&
+  /\.label-bar \.caret\s*\{[^}]*font-size:\s*20px/.test(css));
 /* 天空位置的新控制：锁定视角、同步主界面，步长按钮独占一行。 */
 check('the sky window has a view lock and a main-clock sync',
   htmlIds.has('sky-lock-view') && htmlIds.has('sky-sync-main') &&
-  /id="sky-lock-view"[^>]*aria-pressed="false"/.test(html));
+  /id="sky-lock-view"[^>]*aria-pressed="true"/.test(html));
 check('the sky time-step row is on its own line',
   /\.sky-nudge\s*\{[^}]*flex:\s*1 0 100%/.test(css));
+check('the sky display options follow 同步到主界面, not a row of their own',
+  (() => {
+    const sync = html.indexOf('id="sky-sync-main"');
+    const span = html.indexOf('id="sky-span"');
+    const step = html.indexOf('id="sky-label-step"');
+    const save = html.indexOf('id="sky-save"');
+    const nudge = html.indexOf('id="sky-nudge"');
+    return sync >= 0 && span > sync && step > span && save > step && nudge > save;
+  })());
 /* 事件预报的表格窗口与 CSV 出入口。 */
 check('the event table window has rows and CSV controls',
   htmlIds.has('event-window-backdrop') && htmlIds.has('event-window-rows') &&
   htmlIds.has('event-window-export') && htmlIds.has('event-window-import') &&
   htmlIds.has('event-window-open'));
+check('the CSV import and export share one button size',
+  /<button class="ghost event-tool" id="event-window-export"/.test(html) &&
+  /<label class="event-tool" for="event-window-import"/.test(html) &&
+  /\.event-window-tools \.event-tool\s*\{[^}]*min-width:/.test(css) &&
+  /* Same explicit height and no label margin: min-height alone left the two
+     one pixel apart, and the label's global margin-bottom lifted it. */
+  /\.event-window-tools \.event-tool\s*\{[^}]*height:\s*27px/.test(css) &&
+  /\.event-window-tools \.event-tool\s*\{[^}]*margin:\s*0/.test(css));
+/* The CSV column list was implementation notes, not a readout. */
+check('the event table footer does not print the CSV schema',
+  !html.includes('CSV 列') && /\.event-window-foot\s*\{[^}]*justify-content:\s*flex-end/
+    .test(css));
+check('every event table heading is a sort control',
+  (html.match(/<th class="[^"]*sortable" data-sort="/g) || []).length === 6);
 /* The close-up save row is meant to be the same row as the full disk's: its two
    resolution menus and the number all sit inside the 保存分辨率 label, and the
    unit span carries the scale.  Spread out again, the row grows taller than the
@@ -278,9 +304,13 @@ check('the close-up save row keeps its resolution controls in one label',
    library's own finish_image() was extended to honour it. */
 check('saturation can be boosted above 1',
   /id="saturation"[^>]*max="3"/.test(html));
-/* The reset glyph became the word Reset.  It has to stay within the height the
-   13 px icon needed: same line box, smaller type. */
-check('reset buttons are the word Reset, set small',
+/* 后期处理里的 offset 是亮度偏置，不是空间上的偏移。 */
+check('the processing offset is called 偏置',
+  /<span class="slider-label">偏置<\/span>/.test(html) &&
+  !/<span class="slider-label">偏移<\/span>/.test(html));
+/* The reset glyph became the word 复位.  It has to stay within the height the
+   13 px icon needed: same line box, smaller type and a tighter width. */
+check('reset buttons are the word 复位, set small',
   /button\.reset\s*\{[^}]*font-size:\s*9px/.test(css) &&
   /button\.reset\s*\{[^}]*line-height:\s*17px/.test(css) &&
   !/button\.reset\s*\{[^}]*width:\s*100%/.test(css));

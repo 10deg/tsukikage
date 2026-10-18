@@ -153,11 +153,11 @@ CLASS_LABELS: Dict[str, Tuple[str, str]] = {
     "catena": ("坑链", "Catena"),
     "promontorium": ("海角", "Promontorium"),
     "statio": ("着陆点", "Statio"),
-    "dome": ("穹丘 (Domes)", "Dome"),
+    "dome": ("穹丘", "Dome"),
     "pit": ("Lunar pits", "Lunar pit"),
-    "pyroclastic": ("火成碎屑 (Pyroclastic)", "Pyroclastic"),
-    "imp": ("不规则月海斑块 (IMP)", "Irregular mare patch"),
-    "impact": ("撞击闪光 (NELIOTA)", "NELIOTA impact"),
+    "pyroclastic": ("火成碎屑", "Pyroclastic"),
+    "imp": ("不规则月海斑块", "Irregular mare patch"),
+    "impact": ("撞击闪光", "NELIOTA impact"),
     "albedo": ("反射率特征点", "Albedo feature"),
     "other": ("其他", "Other"),
 }
@@ -1142,15 +1142,49 @@ def estimate_text_width(text: str, font_px: float) -> float:
     return total * float(font_px)
 
 
-def _display_label(feature: SurfaceFeature, language: str) -> str:
+#: LPND writes a plain crater as "…坑" and a satellite as "…坑A"; the page
+#: prints just "…" and "… A".  The class word is already in the category colour
+#: and switch, so repeating it on every caption is noise -- and on a dense frame
+#: it is a character of width that could have been a second name.
+_CRATER_WORD_SUFFIX = re.compile(r"坑\s*([A-Z])?\s*$")
+
+
+def _crater_caption(text: str) -> str:
+    """Drop the trailing 坑, turning "阿贝坑H" into "阿贝 H"."""
+    if not text:
+        return text
+    match = _CRATER_WORD_SUFFIX.search(text)
+    if not match:
+        return text
+    letter = match.group(1)
+    base = text[: match.start()].rstrip()
+    return f"{base} {letter}" if letter else base
+
+
+def _satellite_letter(name_en: str) -> Optional[str]:
+    match = re.search(r"\s([A-Z])$", str(name_en or "").strip())
+    return match.group(1) if match else None
+
+
+def _display_label(feature: SurfaceFeature, language: str,
+                   satellite: str = "full") -> str:
     """What the page writes for one feature, in the language it asked for.
 
     ``zh`` falls back to English rather than drawing nothing: the official
     table covers 98.7% of the gazetteer, and an unnamed crater in a labelled
     picture reads as a bug.  ``both`` puts the official name first, which is
     the one a Chinese-language page is read for.
+
+    *satellite* is the page's A/a switch: ``"full"`` keeps the parent name and
+    the letter, ``"letter"`` writes only the letter.  It applies to lettered
+    satellite craters, which are the only features that have one.
     """
     chinese, english = feature.name_zh, feature.name_en
+    letter = _satellite_letter(english)
+    if satellite == "letter" and letter:
+        return letter
+    if feature_class(feature.kind, feature.diameter_km) == "crater":
+        chinese = _crater_caption(chinese)
     if language == "en" or not chinese:
         return english
     if language == "zh":
@@ -1248,6 +1282,9 @@ def plan_annotations(
     outline_min_radius_px: float = 9.0,
     outline_points: int = 48,
     center_on_rim: bool = False,
+    satellite: str = "full",
+    avoid_overlap: bool = True,
+    focus: Optional[Dict[str, float]] = None,
 ) -> AnnotationPlan:
     """Choose the labels for one frame and lay them out.
 
@@ -1312,12 +1349,29 @@ def plan_annotations(
         that pixel.  Off by default, because most callers arrived before the
         height field did and the historical pixel is their contract; the web
         page asks for it.
+    satellite
+        ``"full"`` writes a satellite crater's parent and letter (``阿贝 B``);
+        ``"letter"`` writes only the letter (``B``).  Plain craters lose LPND's
+        trailing 坑 either way.
+    avoid_overlap
+        When false, every chosen name gets its nearest slot without testing it
+        against the others.  The result may overlap, which is what the highest
+        densities need; the default keeps the collision-free layout.
+    focus
+        Optional box in sky space -- ``lon_deg``, ``lat_deg``, ``radius_deg``,
+        ``aspect``, ``rotation_deg`` -- that gets a finer size floor and a
+        second label budget.  This is 针对选框标注: the rest of the frame keeps
+        its normal density.
     """
     if max_labels < 0:
         raise MoonlibError("max_labels cannot be negative.")
     if language not in LANGUAGES:
         raise MoonlibError(
             f"language must be one of {', '.join(LANGUAGES)}; got {language!r}."
+        )
+    if satellite not in ("full", "letter"):
+        raise MoonlibError(
+            f"satellite must be 'full' or 'letter'; got {satellite!r}."
         )
     # Everything below is in "label heights": the frame's own pixel count is an
     # implementation detail of whoever asked for the plan, so a plan at another
@@ -1400,6 +1454,31 @@ def plan_annotations(
     centre_y = 0.5 * (frame.height - 1)
     half_diagonal = max(1.0, math.hypot(centre_x, centre_y))
 
+    # 针对选框标注: the box is a sky-space rectangle around a point, and the
+    # features inside it get their own, much finer size floor and a second
+    # budget.  Membership is measured in frame pixels, so it follows the same
+    # projection the names do; a circle and a rectangle differ only by aspect.
+    in_focus = np.zeros(len(features), dtype=bool)
+    if focus and focus.get("radius_deg", 0.0) > 0.0:
+        focus_at = frame.project([focus["lat_deg"]], [focus["lon_deg"]], 0.0)
+        focus_x = float(focus_at["x"][0])
+        focus_y = float(focus_at["y"][0])
+        focus_radius = math.radians(float(focus["radius_deg"])) / max(
+            frame.pixel_scale, 1e-12
+        )
+        focus_aspect = max(0.05, float(focus.get("aspect", 1.0)))
+        turn = math.radians(float(focus.get("rotation_deg", 0.0)))
+        cos_turn, sin_turn = math.cos(turn), math.sin(turn)
+        dx = x - focus_x
+        dy = y - focus_y
+        u = dx * cos_turn + dy * sin_turn
+        v = -dx * sin_turn + dy * cos_turn
+        in_focus = (
+            (u / max(focus_radius, 1e-9)) ** 2
+            + (v / max(focus_radius * focus_aspect, 1e-9)) ** 2
+            <= 1.0
+        )
+
     candidates: List[Tuple[float, int, str]] = []
     groups: Dict[int, str] = {}
     unlit = too_small = in_frame = 0
@@ -1414,8 +1493,12 @@ def plan_annotations(
             continue
         # Landing sites are exempt from the size floor: a 1 km site is a dot on
         # a full disk, and it is still the thing the reader is looking for.
+        # Inside the focus box the floor is much lower -- that is what "更高密度
+        # 的标注" means, and the second budget below turns it into names.
+        focus_here = bool(in_focus[index])
+        floor = min_radius_px * (0.35 if focus_here else 1.0)
         if not is_landing_site(feature) and (
-            feature.diameter_km < min_diameter_km or radius[index] < min_radius_px
+            feature.diameter_km < min_diameter_km or radius[index] < floor
         ):
             too_small += 1
             continue
@@ -1445,6 +1528,17 @@ def plan_annotations(
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
     chosen, over_budget = _select_by_family(candidates, max_labels)
+    # 针对选框标注: a second budget spent only inside the box, so the box can be
+    # denser without changing how many names the rest of the Moon gets.
+    if focus is not None:
+        already = {index for _score, index, _family in chosen}
+        focus_candidates = [
+            item for item in candidates
+            if in_focus[item[1]] and item[1] not in already
+        ]
+        focus_budget = max(8, int(round(max_labels * 0.8)))
+        focus_chosen, _focus_over = _select_by_family(focus_candidates, focus_budget)
+        chosen.extend(focus_chosen)
     # Sites were taken first and are not counted against the budget.
     over_budget = max(0, over_budget)
     # Landmarks first: the highlighted showpieces, and each family's leader.
@@ -1533,20 +1627,36 @@ def plan_annotations(
             "key": index,
             "anchor": (float(x[index]), float(y[index])),
             "radius_px": min(float(radius[index]), max_marker),
-            "width": estimate_text_width(_display_label(features[index], language), font_px)
+            "width": estimate_text_width(
+                _display_label(features[index], language, satellite), font_px)
             + 2.0 * padding,
             "height": label_height,
             "priority": order,
             "important": index in important_indices,
         })
-    placements, _arranged_leaders, _omitted = arrange_labels(
-        wanted, frame.width, frame.height, gap=gap)
+    if avoid_overlap:
+        placements, _arranged_leaders, _omitted = arrange_labels(
+            wanted, frame.width, frame.height, gap=gap)
+    else:
+        # 停用避让: every chosen name gets its nearest slot regardless of what
+        # is already there.  The result can overlap, which is the point -- at
+        # the highest densities the alternative is names that never appear.
+        placements = {}
+        for entry in wanted:
+            box = _place_label(
+                float(entry["anchor"][0]), float(entry["anchor"][1]),
+                float(entry["radius_px"]), float(entry["width"]),
+                float(entry["height"]), frame.width, frame.height,
+                (), 0.0, unit=1.0,
+            )
+            if box is not None:
+                placements[entry["key"]] = box
 
     items: List[Annotation] = []
     unplaced = 0
     for score, index, _family_name in chosen:
         feature = features[index]
-        text = _display_label(feature, language)
+        text = _display_label(feature, language, satellite)
         width = estimate_text_width(text, font_px) + 2.0 * padding
         marker = min(float(radius[index]), max_marker)
         rect = placements.get(index)

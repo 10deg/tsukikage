@@ -297,6 +297,14 @@ input:disabled, select:disabled { opacity: .45; }
   padding-left: 8px;
   color: #6b7280;
 }
+/* 经纬度：信息栏的最后一格，等宽数字，不随窗口宽度跳动。 */
+.coord-readout {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.coord-readout:empty { display: none; }
+#disk-info .coord-readout { padding-left: 8px; }
 
 /* One button instead of bilingual labels everywhere: every English gloss is a
    `.en` span, so hiding them is a class on the body, not a second stylesheet. */
@@ -847,10 +855,16 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
   min-width: 0;
 }
 .label-bar .caret {
-  padding: 0 8px;
-  line-height: 18px;
-  /* 三角形是这一块唯一的展开入口，小一号的 ▸ 在 18 px 的行里几乎看不见。 */
-  font-size: 16px;
+  /* 三角形是这一块唯一的展开入口：比一行字更大，且用 flex 居中——glyph 自身
+     有左右边距，只放大 font-size 会看着偏左。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
+  padding: 0;
+  line-height: 20px;
+  font-size: 20px;
   color: var(--ink-dim);
 }
 /* The geometric switches start the fold now that the search lives above: no
@@ -1024,17 +1038,17 @@ input.num-inline {
   padding: 1px 4px;
   text-align: right;
 }
-/* A reset button: the word Reset, small enough to stay inside the height the
+/* A reset button: the word 复位, small enough to stay inside the height the
    icon used to take.  The glyph was 13 px tall with the button's own 1 px of
    padding; 8 px type on the same 17 px line box keeps that height exactly, so
    a row of controls does not grow around it.  The width is the one thing that
    may grow, and it is allowed to. */
 button.reset {
-  padding: 1px 6px;
+  padding: 1px 4px;
   font-size: 9px;
   line-height: 17px;
   letter-spacing: .02em;
-  min-width: 2.7em;
+  min-width: 2.15em;
   text-align: center;
 }
 button.reset:hover { color: var(--accent); border-color: var(--accent); }
@@ -1278,18 +1292,42 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   gap: 6px;
   flex-wrap: wrap;
 }
-.event-window-tools .as-link {
+/* 导入是 <label for=file>，导出是 <button>：两种元素必须画成同一个尺寸，
+   否则并排的两个“文件操作”一个是高一点的按钮、一个是矮一点的链接。 */
+.event-window-tools .event-tool {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 88px;
+  /* One explicit height for both the <button> and the <label>: min-height plus
+     padding left the two boxes a pixel apart, and the label's global
+     margin-bottom pulled it up inside the flex row. */
+  height: 27px;
+  min-height: 27px;
+  margin: 0;
+  padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
   color: var(--ink);
   font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
-.event-window-tools .as-link:hover { border-color: var(--accent); }
+.event-window-tools .event-tool:hover { border-color: var(--accent); }
+/* 表头即排序手柄。 */
+.event-table thead th.sortable { cursor: pointer; user-select: none; }
+.event-table thead th.sortable:hover { color: var(--ink); }
+.event-table thead th.sortable[data-order]::after {
+  content: " " attr(data-order);
+  font-size: 9px;
+  color: var(--accent);
+}
+.event-table .date { white-space: nowrap; }
+.event-table .time { white-space: nowrap; }
+.event-table .window { white-space: nowrap; color: var(--ink-dim); }
 .event-window-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -1335,14 +1373,14 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 .event-window-foot {
   flex: 0 0 auto;
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: flex-end;
   gap: 14px;
   padding: 6px 12px;
   border-top: 1px solid var(--line);
   font-size: 10px;
   color: var(--ink-dim);
 }
-.event-window-foot span:first-child { flex: 1 1 auto; }
 .event-window-foot #event-window-status { flex: 0 0 auto; }
 
 /* A folded-away block of advanced settings (高级设置). */
@@ -1908,8 +1946,10 @@ h2 .mini.sky-open:hover {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 5px 12px;
-  padding: 6px 12px;
+  /* 设置项多了以后，12 px 的横向空隙会把“同一排”折成两三排；8 px 仍分得开
+     相邻控件，但让时间跨度、标注间隔和三个复选框跟同步按钮留在一条线上。 */
+  gap: 4px 8px;
+  padding: 5px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
   font-size: 11px;
@@ -2040,3 +2080,13 @@ h2 .mini.sky-open:hover {
 }
 
 .sky-controls .unit, .sky-save .unit { color: var(--ink-dim); }
+
+/* 卫星坑的 A/a 格式开关：一个带边框的字母按钮，和旁边的名称菜单同高。 */
+.format-toggle {
+  flex: 0 0 auto;
+  min-width: 2em;
+  padding: 1px 6px;
+  line-height: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}

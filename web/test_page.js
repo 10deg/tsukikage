@@ -43,7 +43,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
-  'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast'];
+  'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
+  'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
+  'manualHitTest', 'clearManualMarks', 'overlay'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -1505,10 +1507,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 7 event kinds plus 极低照明度, which shares the range boxes and the list but
+  /* 9 event kinds plus 极低照明度, which shares the range boxes and the list but
      is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 8 && T.state.eventKind === 'full_moon',
+    kindChips().length === 10 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
   /* 极低照明度: same range boxes, a different report -- sessions ranked by how
      thin they are, not instants ranked by date. */
@@ -1617,12 +1619,28 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const body = document.getElementById('event-window-rows');
     check('one row per event',
       body.children.length === 2, String(body.children.length));
-    check('the X/V row carries its window and altitude',
-      body.children[0].children[3].textContent.includes('窗口')
-      && body.children[0].children[2].textContent.includes('31.5'),
+    const xvRow = [...body.children].find(
+      (row) => row.children[2].textContent.includes('X / V'));
+    check('the X/V row is split into date, time, kind, height and window',
+      !!xvRow && xvRow.children[0].textContent === '05-21'
+      && xvRow.children[1].textContent === '03:00'
+      && xvRow.children[3].textContent.includes('31.5')
+      && xvRow.children[4].textContent.includes('05-21'),
+      xvRow ? [...xvRow.children].map((cell) => cell.textContent).join(' | ') : 'no row');
+    T.state.eventSort = { key: 'altitude', dir: 1 };
+    T.renderEventWindowRows();
+    check('clicking a column sorts by it',
+      body.children[0].children[3].textContent.includes('-12.0'),
       body.children[0].children[3].textContent);
+    T.state.eventSort = { key: 'altitude', dir: -1 };
+    T.renderEventWindowRows();
+    check('and the same column flips direction',
+      body.children[0].children[3].textContent.includes('31.5'),
+      body.children[0].children[3].textContent);
+    T.state.eventSort = { key: 'date', dir: 1 };
+    T.renderEventWindowRows();
     const before = document.getElementById('when').value;
-    body.children[0].fire('dblclick', { type: 'dblclick' });
+    xvRow.fire('dblclick', { type: 'dblclick' });
     check('double-clicking a table row sets the main time',
       document.getElementById('when').value !== before
       && document.getElementById('when').value === '2026-05-21T03:00',
@@ -1955,10 +1973,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     `${document.getElementById('roughness').value} / ` +
     `${document.getElementById('noise-poisson').value} / ` +
     `${document.getElementById('photometric-model').value}`);
-  check('and every reset button is the word Reset, not a glyph',
+  check('and every reset button is the word 复位, not a glyph',
     [...document.querySelectorAll('button.reset')].length >= 4 &&
     [...document.querySelectorAll('button.reset')]
-      .every((button) => button.textContent.trim() === 'Reset' &&
+      .every((button) => button.textContent.trim() === '复位' &&
         !/<svg/.test(button.innerHTML)),
     [...document.querySelectorAll('button.reset')]
       .map((button) => button.textContent).join('|'));
@@ -1996,6 +2014,71 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('moving the pointer does not change it',
     document.getElementById('magnify-info').textContent === captionBefore,
     document.getElementById('magnify-info').textContent);
+  /* 经纬度：the footer's last cell follows the pointer, and a selected
+     landform pins it to that feature's own marker until the selection goes. */
+  body.fire('pointermove', { clientX: 280, clientY: 280, preventDefault() {} });
+  const coordCell = document.getElementById('disk-coord');
+  check('the full-disk footer shows the pointer coordinate',
+    /经度 \d+\.\d+°[EW]/.test(coordCell.textContent) &&
+    /纬度 \d+\.\d+°[NS]/.test(coordCell.textContent),
+    coordCell.textContent);
+  {
+    const plan = T.state.labels.disk;
+    const item = plan && plan.items && plan.items.find((entry) =>
+      Number.isFinite(Number(entry.lon_deg)));
+    if (item) {
+      T.overlay.selected = { kind: 'label', view: 'disk', key: T.labelKey(item) };
+      T.paintCoordReadout('disk');
+      const pinned = coordCell.textContent;
+      body.fire('pointermove', { clientX: 100, clientY: 100, preventDefault() {} });
+      check('a selected landform pins the footer to its marker',
+        /选中地貌/.test(pinned) &&
+        coordCell.textContent === pinned &&
+        coordCell.textContent.includes(Math.abs(Number(item.lon_deg)).toFixed(2)),
+        pinned + ' / ' + coordCell.textContent);
+      T.overlay.selected = null;
+      T.paintCoordReadout('disk');
+      check('and the pointer coordinate returns after deselecting',
+        !/选中地貌/.test(coordCell.textContent), coordCell.textContent);
+    }
+  }
+  /* Ctrl+click anchors: a red caption, a number, and one clear button. */
+  {
+    const before = T.state.manualMarks.length;
+    T.addManualMark('disk', { clientX: 280, clientY: 280,
+                              preventDefault() {} });
+    check('Ctrl+click adds a manual anchor',
+      T.state.manualMarks.length === before + 1 &&
+      T.state.manualMarks[T.state.manualMarks.length - 1].text === '标记点1',
+      JSON.stringify(T.state.manualMarks.slice(-1)));
+    document.getElementById('manual-clear').fire('click');
+    check('清空手动标记 removes them all',
+      T.state.manualMarks.length === 0 && T.state.manualSeq === 0,
+      JSON.stringify(T.state.manualMarks));
+  }
+  /* The A/a switch and 针对选框标注 are latches, not form fields. */
+  {
+    const toggle = document.getElementById('label-satellite');
+    check('the satellite switch starts on A', toggle.textContent === 'A' &&
+      toggle.getAttribute('aria-pressed') === 'true', toggle.textContent);
+    toggle.fire('click');
+    check('and becomes a lower-case a', toggle.textContent === 'a' &&
+      toggle.getAttribute('aria-pressed') === 'false', toggle.textContent);
+    toggle.fire('click');
+    const savedSelection = T.state.selection;
+    T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.1,
+                          rotationDeg: 0, aspect: 1 };
+    document.getElementById('label-focus').fire('click');
+    check('针对选框标注 turns on for a box',
+      document.getElementById('label-focus').getAttribute('aria-pressed') === 'true');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const last = fetchCalls.filter((c) => c.url === '/api/annotations').pop();
+    check('and the request carries the focus box',
+      !!last && !!last.body.focus && last.body.focus.radius_deg > 0,
+      JSON.stringify(last && last.body.focus));
+    document.getElementById('label-focus').fire('click');
+    T.state.selection = savedSelection;
+  }
   /* The window frames the whole box whatever the render's own scale, which is
      the one mode left: a 200 px window over a box 100 image pixels across is
      two screen pixels per image pixel, and the caption has to say so. */
@@ -2194,6 +2277,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('and the other way round',
     T.views.raw.zoom === 1 && T.views.proc.zoom === 1);
   check('the full disk keeps its own zoom', T.views.disk.zoom === 1);
+  T.setZoom('disk', 0.05);
+  check('the full disk can zoom out to 10%',
+    T.views.disk.zoom === 0.1, String(T.views.disk.zoom));
+  T.setZoom('disk', 1);
+  T.setZoom('raw', 0.05);
+  check('the close-ups still stop at 100%',
+    T.views.raw.zoom === 1, String(T.views.raw.zoom));
+  T.setZoom('raw', 1);
 
   console.log('');
   console.log('the mini phase');
@@ -3094,6 +3185,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       && document.getElementById('sky-mode').textContent === '地平线视图',
       `${document.getElementById('sky-closeup').checked} / `
       + document.getElementById('sky-mode').textContent);
+    check('the view starts locked',
+      document.getElementById('sky-lock-view').getAttribute('aria-pressed') === 'true',
+      String(document.getElementById('sky-lock-view').getAttribute('aria-pressed'))
+      + ' / ' + String(T.state.skyViewLocked));
     set('sky-closeup', true);
     fire('sky-closeup', 'change');
     check('turning it on gives the close-up chart',
@@ -3131,18 +3226,15 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('sky-elongation', true);
     fire('sky-elongation', 'change');
 
-    // 锁定视角: a nudge may move the Moon, not the frame.
+    // 锁定视角 is on by default: a nudge may move the Moon, not the frame.
     const lockedView = JSON.stringify(T.state.skyView);
-    fire('sky-lock-view', 'click');
-    check('the view lock latches',
-      document.getElementById('sky-lock-view').getAttribute('aria-pressed') === 'true');
     fire('sky-nudge-fwd-hour', 'click');
     await tick(); await tick();
     check('a locked view survives a time step',
       JSON.stringify(T.state.skyView) === lockedView,
       `${lockedView} -> ${JSON.stringify(T.state.skyView)}`);
     fire('sky-lock-view', 'click');
-    check('unlocking returns the chart to its own fit',
+    check('the view lock can be released',
       document.getElementById('sky-lock-view').getAttribute('aria-pressed') === 'false'
       && T.state.skyView !== null);
     set('sky-time', document.getElementById('when').value.slice(11, 16));

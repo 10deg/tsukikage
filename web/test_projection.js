@@ -115,7 +115,8 @@ const EXPORTS = ['state', 'pixelToLonLat', 'lonLatToPixel', 'projectSelenographi
   'polygonArea', 'activeClasses', 'magnifierView', 'SETTING_FIELDS',
   'setMirrorMode', 'mirrorMode', 'resizeByEdge', 'moonVector', 'lonLatFromVector',
   'cameraBasis', 'diskSmoothPx', 'smoothImage', 'rulerGeometry', 'rulerText', 'defaultRulerKm',
-  'applyLabelEdits', 'labelKey', 'labelEdits', 'labelHidden', 'diskKmPerFramePixel'];
+  'applyLabelEdits', 'labelKey', 'labelEdits', 'labelHidden', 'diskKmPerFramePixel',
+  'regionLonLatToPixel', 'regionPixelToLonLat', 'regionCamera'];
 
 const { check, near, finish } = createRunner();
 const T = loadApp(sandbox, EXPORTS);
@@ -181,6 +182,38 @@ check('a point outside the disk radius returns null',
 check('the far side returns null', T.lonLatToPixel(180, 0) === null);
 check('just inside the limb still projects',
   T.lonLatToPixel(geometry.libration_lon_deg, geometry.libration_lat_deg + 80) !== null);
+
+/* The close-up has its own camera.  Its inverse is what the pointer readout
+   and the manual anchors use, so a point near the frame centre must round-trip
+   exactly -- the same contract as the disk's pixelToLonLat. */
+{
+  T.state.regionInfo = {
+    lon_deg: geometry.libration_lon_deg, lat_deg: geometry.libration_lat_deg,
+    span_km: 200, width: 800, height: 600, rotation_deg: 12,
+  };
+  const cam = T.regionCamera();
+  check('the close-up camera is rebuilt from the region block',
+    !!cam && cam.width === 800 && cam.height === 600,
+    JSON.stringify(cam && { width: cam.width, height: cam.height }));
+  let regionWorst = 0;
+  for (const dlon of [-2, -0.5, 0, 0.5, 2]) {
+    for (const dlat of [-1.5, -0.5, 0, 0.5, 1.5]) {
+      const lon = geometry.libration_lon_deg + dlon;
+      const lat = geometry.libration_lat_deg + dlat;
+      const p = T.regionLonLatToPixel(lon, lat);
+      if (!p) { regionWorst = Infinity; continue; }
+      const q = T.regionPixelToLonLat(p.x, p.y);
+      if (!q) { regionWorst = Infinity; continue; }
+      regionWorst = Math.max(regionWorst, Math.abs(q.lon - lon),
+                             Math.abs(q.lat - lat));
+    }
+  }
+  check('close-up lon/lat -> pixel -> lon/lat round-trips',
+    regionWorst < 1e-6, 'worst ' + regionWorst);
+  check('a ray that misses the Moon returns null',
+    T.regionPixelToLonLat(-100000, -100000) === null);
+  T.state.regionInfo = null;
+}
 
 console.log('');
 console.log('selection sizing');
@@ -695,17 +728,17 @@ console.log('');
   const slider = document.getElementById('label-density');
   slider.value = '0';
   const sparse = T.densitySettings();
-  slider.value = '1';
+  slider.value = '1.5';
   const dense = T.densitySettings();
   slider.value = '0.5';
   const middle = T.densitySettings();
-  check('density is one continuous axis, not three presets',
-    sparse.labels === 12 && dense.labels === 60 && middle.labels === 36 &&
+  check('density is one continuous axis with a very high top end',
+    sparse.labels === 12 && dense.labels === 300 && middle.labels === 30 &&
     sparse.min_radius_px > middle.min_radius_px && middle.min_radius_px > dense.min_radius_px,
     JSON.stringify([sparse, middle, dense]));
   T.updateDensityLabel();
   check('the readout shows the label budget',
-    document.getElementById('density-value').textContent === '36',
+    document.getElementById('density-value').textContent === '30',
     document.getElementById('density-value').textContent);
 }
 
