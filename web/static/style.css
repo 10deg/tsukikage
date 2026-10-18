@@ -847,9 +847,10 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
   min-width: 0;
 }
 .label-bar .caret {
-  padding: 0 7px;
+  padding: 0 8px;
   line-height: 18px;
-  font-size: 11px;
+  /* 三角形是这一块唯一的展开入口，小一号的 ▸ 在 18 px 的行里几乎看不见。 */
+  font-size: 16px;
   color: var(--ink-dim);
 }
 /* The geometric switches start the fold now that the search lives above: no
@@ -1205,6 +1206,144 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* 事件预报的表格入口：列表本身仍是回答，这个按钮只是把同一批行搬到一张
+   可以导出/导入的表格里。 */
+.event-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+}
+#event-window-open { float: none; align-self: center; }
+.event-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 事件表格窗口 ───────────────────────────────────────────────────────
+   A modal rather than a fourth column: the table is a view of the forecast,
+   not another place to keep settings, and it is allowed to be wider than the
+   right-hand pane it came from. */
+.event-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 6, 10, .62);
+}
+.event-window {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 94vw);
+  max-height: min(76vh, 760px);
+  overflow: hidden;
+  border: 1px solid #39404e;
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, .62);
+}
+.event-window-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  row-gap: 5px;
+}
+.event-window-heading {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.event-window-count {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.event-window-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.event-window-tools .as-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 11px;
+  cursor: pointer;
+}
+.event-window-tools .as-link:hover { border-color: var(--accent); }
+.event-window-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--viewport);
+}
+.event-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.event-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 9px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--ink-dim);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.event-table tbody td {
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: baseline;
+}
+.event-table tbody tr { cursor: pointer; }
+.event-table tbody tr:hover { background: var(--panel-2); }
+.event-table tbody tr[data-observable="false"] { color: var(--ink-dim); opacity: .55; }
+.event-table .when { color: var(--ink); font-weight: 600; white-space: nowrap; }
+.event-table .kind { white-space: nowrap; }
+.event-table .height { white-space: nowrap; color: var(--ink-dim); }
+.event-table .detail { color: var(--ink-dim); }
+.event-window-empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.event-window-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--ink-dim);
+}
+.event-window-foot span:first-child { flex: 1 1 auto; }
+.event-window-foot #event-window-status { flex: 0 0 auto; }
 
 /* A folded-away block of advanced settings (高级设置). */
 details.fold { margin-top: 7px; }
@@ -1792,7 +1931,11 @@ h2 .mini.sky-open:hover {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  /* 时间步长是“拨钟”的动作，独占一行放在日期/时间/时区下面；和输入框挤在
+     一行里时，窄窗口会把 ± 拆成两截。 */
+  flex: 1 0 100%;
 }
+#sky-sync-main { flex: 0 0 auto; }
 .sky-nudge button.mini {
   float: none;
   padding: 0 5px;

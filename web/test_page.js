@@ -42,7 +42,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
-  'skyPaintEclipseMoon'];
+  'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
+  'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -1591,6 +1592,76 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       `${before} -> ${document.getElementById('when').value}`);
     document.getElementById('when').value = before;
   }
+  console.log('');
+  console.log('the event table window and its CSV');
+  {
+    const eventTable = [
+      T.eventRowFromForecast({
+        kind: 'xvl', label: '月面 X / V（Blanchinus B）',
+        when_utc: '2026-05-20T19:00:00+00:00', altitude_deg: 31.5,
+        detail: '太阳高度 0–1.5°　持续 196 min　高度 +31.5°', observable: true,
+        window_start_utc: '2026-05-20T19:00:00+00:00',
+        window_end_utc: '2026-05-20T22:16:00+00:00',
+      }),
+      T.eventRowFromForecast({
+        kind: 'full_moon', label: '满月',
+        when_utc: '2026-05-01T12:00:00+00:00', altitude_deg: -12.0,
+        detail: '地心距 400,000 km', observable: false,
+      }),
+    ];
+    T.state.eventTable = eventTable;
+    T.state.eventImported = false;
+    T.openEventWindow();
+    check('the table window opens',
+      document.getElementById('event-window-backdrop').hidden === false);
+    const body = document.getElementById('event-window-rows');
+    check('one row per event',
+      body.children.length === 2, String(body.children.length));
+    check('the X/V row carries its window and altitude',
+      body.children[0].children[3].textContent.includes('窗口')
+      && body.children[0].children[2].textContent.includes('31.5'),
+      body.children[0].children[3].textContent);
+    const before = document.getElementById('when').value;
+    body.children[0].fire('dblclick', { type: 'dblclick' });
+    check('double-clicking a table row sets the main time',
+      document.getElementById('when').value !== before
+      && document.getElementById('when').value === '2026-05-21T03:00',
+      document.getElementById('when').value);
+    document.getElementById('when').value = before;
+
+    const csv = T.eventCsvText(eventTable);
+    check('the CSV starts with the documented header',
+      csv.startsWith('kind,label,when_utc,altitude_deg,observable,'));
+    const back = T.eventsFromCsv(csv);
+    check('the CSV round-trips',
+      back.length === 2 && back[0].kind === 'xvl'
+      && back[0].window_end_utc === '2026-05-20T22:16:00.000Z'
+      && back[1].observable === false,
+      JSON.stringify(back[0]));
+    const quoted = T.eventsFromCsv(
+      'kind,label,when_utc,altitude_deg,observable,window_start_utc,'
+      + 'window_end_utc,detail\r\n'
+      + 'xvl,"X, V",2026-05-20T19:00:00Z,0,true,,,'
+      + '"太阳高度 0–1.5°，持续 196 min"\r\n');
+    check('quoted commas and Chinese survive the import',
+      quoted.length === 1 && quoted[0].label === 'X, V'
+      && quoted[0].detail.includes('，'),
+      JSON.stringify(quoted));
+    const broken = (() => {
+      try { T.eventsFromCsv('date,title\n2026-01-01,x'); return 'no throw'; }
+      catch (error) { return String(error.message); }
+    })();
+    check('a file without when_utc is refused', /when_utc/.test(broken), broken);
+
+    fire('event-window-export', 'click');
+    check('exporting reports the file',
+      document.getElementById('event-window-status').textContent.includes('已导出'),
+      document.getElementById('event-window-status').textContent);
+    fire('event-window-close', 'click');
+    check('and the table closes',
+      document.getElementById('event-window-backdrop').hidden === true);
+  }
+
   fire('proc-tab-events', 'click');
   check('and switching back brings the forecast out again',
     document.getElementById('proc-events').hidden === false &&
@@ -3018,9 +3089,16 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       set('sky-time', mainWhen.slice(11, 16));
     }
     check('the floating window opens', document.getElementById('sky-backdrop').hidden === false);
-    check('a high Moon far from the Sun is a close-up by itself',
-      document.getElementById('sky-closeup').checked === true);
-    check('and the badge says so', document.getElementById('sky-mode').textContent === '轨迹特写');
+    check('the close-up is off until the reader asks for it',
+      document.getElementById('sky-closeup').checked === false
+      && document.getElementById('sky-mode').textContent === '地平线视图',
+      `${document.getElementById('sky-closeup').checked} / `
+      + document.getElementById('sky-mode').textContent);
+    set('sky-closeup', true);
+    fire('sky-closeup', 'change');
+    check('turning it on gives the close-up chart',
+      document.getElementById('sky-mode').textContent === '轨迹特写',
+      document.getElementById('sky-mode').textContent);
     const view = T.state.skyView;
     const layout = T.state.skyLayout;
     check('the chart keeps the same scale in both axes',
@@ -3053,6 +3131,24 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('sky-elongation', true);
     fire('sky-elongation', 'change');
 
+    // 锁定视角: a nudge may move the Moon, not the frame.
+    const lockedView = JSON.stringify(T.state.skyView);
+    fire('sky-lock-view', 'click');
+    check('the view lock latches',
+      document.getElementById('sky-lock-view').getAttribute('aria-pressed') === 'true');
+    fire('sky-nudge-fwd-hour', 'click');
+    await tick(); await tick();
+    check('a locked view survives a time step',
+      JSON.stringify(T.state.skyView) === lockedView,
+      `${lockedView} -> ${JSON.stringify(T.state.skyView)}`);
+    fire('sky-lock-view', 'click');
+    check('unlocking returns the chart to its own fit',
+      document.getElementById('sky-lock-view').getAttribute('aria-pressed') === 'false'
+      && T.state.skyView !== null);
+    set('sky-time', document.getElementById('when').value.slice(11, 16));
+    fire('sky-time', 'change');
+    await tick();
+
     // The close-up is a checked choice, not a command: switching it off brings
     // the horizon back for the same samples.
     set('sky-closeup', false);
@@ -3061,6 +3157,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       document.getElementById('sky-mode').textContent === '地平线视图'
       && ctx.drawn.texts.some((text) => text.text === '地平线'),
       document.getElementById('sky-mode').textContent);
+
+    // 同步到主界面: both the wall clock and the offset have to move.
+    const savedMain = document.getElementById('when').value;
+    const savedTz = document.getElementById('tz').value;
+    set('sky-time', '21:45');
+    fire('sky-sync-main', 'click');
+    check('同步到主界面 copies the sky instant and zone',
+      document.getElementById('when').value
+        === document.getElementById('sky-date').value + 'T21:45'
+      && Number(document.getElementById('tz').value)
+        === Number(document.getElementById('sky-tz').value),
+      `${document.getElementById('when').value} / ${document.getElementById('tz').value}`);
+    document.getElementById('when').value = savedMain;
+    document.getElementById('tz').value = savedTz;
 
     T.saveSkyPng();
     check('the whole window can be saved as a PNG',

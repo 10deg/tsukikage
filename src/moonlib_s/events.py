@@ -26,9 +26,15 @@ contact times to the second -- that needs the full Besselian treatment -- and it
 does not correct for the atmosphere's enlargement of the Earth's shadow, which
 is why the umbra radius carries the conventional 2% allowance.
 
-``xvl`` is listed as a kind and returns nothing but a note: the Moon's "X" and
-"V" are lighting effects on a handful of craters near the terminator, and
-predicting them properly is a piece of work of its own.
+``xvl``
+    The Moon's "X" and "V": sunlight grazing the rims near Blanchinus and
+    Ukert, a few hours after first quarter.  The simulation uses the published
+    observational anchor -- the eastern arm of the X, near Blanchinus B at
+    lon 1.8°, lat -25° -- and reports the interval in which the Sun stands
+    0°–1.5° above that point, after first checking that the colongitude is
+    within a couple of degrees of 358°.  The "L" of the same family is not yet
+    predicted; the row says so nowhere because it does not exist, which is the
+    honest state of that piece of work.
 """
 
 from __future__ import annotations
@@ -41,9 +47,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .errors import MoonlibError
-from .frames import az_el
+from .frames import az_el, direction_in_moon_frame
 from .kernels import kernel_session
 from .moon import geocentric_phase_angle_deg
+from .numerics import bisect_root, wrap_angle
 from .observer import Observer
 from .phases import PhaseKind, find_phase_events
 from .timeutil import as_time_range, to_et, to_utc
@@ -70,6 +77,25 @@ MICROMOON_KM = 405_000.0
 UMBRA_ENLARGEMENT = 1.02
 SUN_ANGULAR_RADIUS_DEG = 0.2666
 
+#: The X/V anchor: the eastern arm of the X, near Blanchinus B.  The published
+#: observing notes put it at lon 1.8°, lat -25°, which is a few arcminutes east
+#: of the catalogue position of Blanchinus B itself; the X is the intersection
+#: of two rim shadows, not the crater's centre.
+XVL_ANCHOR_LON_DEG = 1.8
+XVL_ANCHOR_LAT_DEG = -25.0
+
+#: The X and V live near first quarter, when the colongitude is about 358°.
+#: Two degrees is a coarse gate, not the prediction itself -- the prediction is
+#: the solar altitude at the anchor.
+XVL_COLONGITUDE_DEG = 358.0
+XVL_COLONGITUDE_TOLERANCE_DEG = 2.0
+
+#: The Sun's altitude at the anchor during the window.  The upper edge is the
+#: observational rule of thumb the page's forecast is built on: the letters are
+#: gone once the rim shadows have climbed above about one and a half degrees.
+XVL_SUN_ALTITUDE_MIN_DEG = 0.0
+XVL_SUN_ALTITUDE_MAX_DEG = 1.5
+
 KIND_LABELS = {
     "full_moon": "满月",
     "supermoon": "超级月亮",
@@ -77,7 +103,7 @@ KIND_LABELS = {
     "highest_full": "最高满月",
     "highest_quarter": "最高弦月",
     "lunar_eclipse": "月食",
-    "xvl": "月面X / V / L",
+    "xvl": "月面 X / V",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -128,13 +154,17 @@ class MoonEvent:
     #: Display name when the *kind* is not the whole answer -- a lunar eclipse
     #: is 月偏食, not "月食" with the type tacked on after it.
     title: Optional[str] = None
+    #: Optional interval: the X/V window and a crescent session are ranges, and
+    #: a single instant would throw away the thing the reader is planning around.
+    window_start_utc: Optional[datetime] = None
+    window_end_utc: Optional[datetime] = None
 
     @property
     def label(self) -> str:
         return self.title or KIND_LABELS.get(self.kind, self.kind)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "kind": self.kind,
             "label": self.label,
             "when_utc": self.when_utc.isoformat(),
@@ -142,6 +172,11 @@ class MoonEvent:
             "detail": self.detail,
             "observable": self.observable,
         }
+        if self.window_start_utc is not None:
+            payload["window_start_utc"] = self.window_start_utc.isoformat()
+        if self.window_end_utc is not None:
+            payload["window_end_utc"] = self.window_end_utc.isoformat()
+        return payload
 
 
 def _geometry(et: float) -> Tuple[float, float, float]:
@@ -228,6 +263,96 @@ def _greatest_eclipse(et_full: float) -> Optional[Tuple[str, float, datetime]]:
     else:  # pragma: no cover - the umbra is never negative at the Moon
         magnitude = 0.0
     return kind_name, max(0.0, magnitude), to_utc(et)
+
+
+#: Unit normal of the X/V anchor, in MOON_ME.
+_XVL_ANCHOR_NORMAL = np.array([
+    math.cos(math.radians(XVL_ANCHOR_LAT_DEG))
+    * math.cos(math.radians(XVL_ANCHOR_LON_DEG)),
+    math.cos(math.radians(XVL_ANCHOR_LAT_DEG))
+    * math.sin(math.radians(XVL_ANCHOR_LON_DEG)),
+    math.sin(math.radians(XVL_ANCHOR_LAT_DEG)),
+])
+
+
+def _xvl_sun_altitude_deg(et: float) -> float:
+    """The Sun's altitude above the Blanchinus-B anchor, degrees."""
+    sun = np.asarray(direction_in_moon_frame("SUN", float(et)), dtype=float)
+    return math.degrees(math.asin(float(np.clip(
+        np.dot(_XVL_ANCHOR_NORMAL, sun), -1.0, 1.0
+    ))))
+
+
+def _xvl_colongitude_deg(et: float) -> float:
+    """Selenographic colongitude of the Sun, in [0, 360)."""
+    sun = np.asarray(direction_in_moon_frame("SUN", float(et)), dtype=float)
+    subsolar_lon = math.degrees(math.atan2(float(sun[1]), float(sun[0])))
+    return (90.0 - subsolar_lon) % 360.0
+
+
+def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
+    """The X/V windows inside *window*.
+
+    The search is a coarse scan for the sunrise at the anchor followed by a
+    bisection on the solar altitude.  The colongitude gate is applied to the
+    refined instant, so an unrelated sunrise elsewhere in the lunation cannot
+    become an X: only one morning per month puts the terminator on Blanchinus
+    at the right colongitude.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    if end <= start + 60.0:
+        return []
+    events: List[MoonEvent] = []
+    step = 3600.0
+    moment = start
+    previous = _xvl_sun_altitude_deg(moment)
+    while moment < end:
+        following = min(moment + step, end)
+        altitude = _xvl_sun_altitude_deg(following)
+        if previous <= XVL_SUN_ALTITUDE_MIN_DEG < altitude:
+            root = bisect_root(_xvl_sun_altitude_deg, moment, following,
+                               tol=1e-3)
+            colongitude = _xvl_colongitude_deg(root)
+            offset = wrap_angle(
+                colongitude - XVL_COLONGITUDE_DEG, period=360.0
+            )
+            if abs(offset) <= XVL_COLONGITUDE_TOLERANCE_DEG:
+                limit = min(end, root + 12.0 * 3600.0)
+                upper = _xvl_sun_altitude_deg(limit)
+                if upper <= XVL_SUN_ALTITUDE_MAX_DEG:
+                    # The requested range ends inside the window; report the
+                    # part of it the reader asked for rather than inventing an
+                    # end the file does not cover.
+                    finish = limit
+                else:
+                    finish = bisect_root(
+                        lambda et: _xvl_sun_altitude_deg(et)
+                        - XVL_SUN_ALTITUDE_MAX_DEG,
+                        root, limit, tol=1e-3,
+                    )
+                if finish > root + 60.0:
+                    middle = 0.5 * (root + finish)
+                    moon_altitude = _altitude(middle, observer)
+                    minutes = (finish - root) / 60.0
+                    events.append(MoonEvent(
+                        kind="xvl",
+                        when_utc=to_utc(root),
+                        altitude_deg=moon_altitude,
+                        title="月面 X / V（Blanchinus B）",
+                        detail=(
+                            f"太阳高度 0–{XVL_SUN_ALTITUDE_MAX_DEG:g}°　"
+                            f"持续 {minutes:.0f} min　"
+                            f"余经度 {colongitude:.1f}°　"
+                            f"{_altitude_text(moon_altitude)}"
+                        ),
+                        observable=moon_altitude > 0.0,
+                        window_start_utc=to_utc(root),
+                        window_end_utc=to_utc(finish),
+                    ))
+        previous = altitude
+        moment = following
+    return events
 
 
 def _altitude(et: float, observer: Observer) -> float:
@@ -363,11 +488,7 @@ def moon_events(
             if found is not None:
                 events.append(found)
     if "xvl" in wanted:
-        events.append(MoonEvent(
-            kind="xvl", when_utc=to_utc(window.start_et), altitude_deg=0.0,
-            detail="月面 X / V / L：这一项还没有实现（只占位，不给出时间）",
-            observable=False,
-        ))
+        events.extend(_xvl_events(observer, window))
     keep = set(wanted)
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)

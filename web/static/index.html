@@ -996,6 +996,11 @@
                       title="把「结束」设为全月面当前模拟的那个时刻">同步所选时间</button>
             </div>
             <span class="mark-bar" id="event-kinds"></span>
+            <div class="event-actions">
+              <button class="ghost mini" id="event-window-open"
+                      title="把当前预报结果放进一个可导出/导入 CSV 的表格窗口">在新窗口查看表格</button>
+              <span class="event-count" id="event-count">—</span>
+            </div>
             <div class="event-list" id="event-list"></div>
           </div>
 
@@ -1243,8 +1248,10 @@
            title="拖动标题栏移动窗口；拖动窗口的四边或四角改变大小">天空位置示意图 <span class="en">Sky position</span></div>
       <div class="sky-head-tools">
         <span class="sky-badge" id="sky-mode">地平线视图</span>
+        <button class="ghost" id="sky-lock-view" aria-pressed="false"
+                title="锁定当前显示范围：改时间、跨度或步长时不再自动重新取景；再按一次恢复">锁定当前视角</button>
         <button class="ghost" id="sky-refresh" title="按主界面的时间和地点重新计算">重新计算</button>
-        <button class="ghost" id="sky-reset" title="把显示范围恢复到自动适配">复位视角</button>
+        <button class="ghost" id="sky-reset" title="把显示范围恢复到自动适配，并解除锁定">复位视角</button>
         <button class="ghost icon" id="sky-close" title="关闭天空位置图" aria-label="关闭">×</button>
       </div>
     </header>
@@ -1263,6 +1270,10 @@
         <input type="number" id="sky-tz" step="0.5" min="-12" max="14" value="8">
         <span class="unit">h</span>
       </label>
+      <button class="ghost mini" id="sky-sync-main"
+              title="把主界面的日期、时间与时区设为这张图当前显示的那一刻">将时间同步到主界面</button>
+      <!-- 时间步长按钮独占一行，放在日期/时间/时区下面：它们是“拨动这个时刻”的
+           手指，和“看哪一刻”的输入框不该挤在同一行里抢宽度。 -->
       <span class="sky-nudge" id="sky-nudge">
         <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
         <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
@@ -1322,6 +1333,48 @@
     <footer class="sky-foot" id="sky-foot">
       <span id="sky-summary">—</span>
       <span class="sky-hint">拖动图框边缘调范围（两轴等比） · 滚轮缩放 · 双击复位</span>
+    </footer>
+  </div>
+</div>
+
+<!-- ── 事件预报的表格窗口：可导出 CSV，也可导入同格式的 CSV 作为事件列表。
+     导入后的行和预报行一样双击把主界面时间设到那一刻。 ─────────────────── -->
+<div class="event-backdrop" id="event-window-backdrop" hidden>
+  <div class="event-window" id="event-window" role="dialog" aria-modal="true"
+       aria-labelledby="event-window-heading">
+    <header class="event-window-head">
+      <div class="event-window-heading" id="event-window-heading">事件预报结果
+        <span class="en">Events</span>
+        <span class="event-window-count" id="event-window-count">—</span>
+      </div>
+      <div class="event-window-tools">
+        <button class="ghost" id="event-window-export"
+                title="把表格里的行导出为 CSV（UTF-8，首行是列名）">导出 CSV</button>
+        <label class="as-link" for="event-window-import"
+               title="导入同格式 CSV；导入后这些行成为事件列表，双击一条即可模拟那一时刻">导入 CSV</label>
+        <input type="file" id="event-window-import" accept=".csv,text/csv" hidden>
+        <button class="ghost icon" id="event-window-close"
+                title="关闭事件表格" aria-label="关闭">×</button>
+      </div>
+    </header>
+    <div class="event-window-body">
+      <table class="event-table">
+        <thead>
+          <tr>
+            <th class="when">时刻</th>
+            <th class="kind">事件</th>
+            <th class="height">高度</th>
+            <th class="detail">详情</th>
+          </tr>
+        </thead>
+        <tbody id="event-window-rows"></tbody>
+      </table>
+      <div class="event-window-empty" id="event-window-empty" hidden>还没有预报结果。</div>
+    </div>
+    <footer class="event-window-foot">
+      <span>双击一行把主界面时间设为该时刻。CSV 列：kind, label, when_utc,
+        altitude_deg, observable, window_start_utc, window_end_utc, detail</span>
+      <span id="event-window-status">—</span>
     </footer>
   </div>
 </div>

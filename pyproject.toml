@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # contain "-", and pip normalises the two spellings to the same project anyway,
 # so the two forms never disagree about which package this is.
 name = "moonlib-s"
-version = "1.4.0"
+version = "1.4.1"
 description = "Offline lunar computation library: position, phases, rise/set, libration, crescents and limb-target prediction from local JPL SPICE kernels"
 readme = "README.md"
 requires-python = ">=3.9"

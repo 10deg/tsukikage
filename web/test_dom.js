@@ -243,6 +243,20 @@ check('the sky window has a canvas, a close button and its own save row',
 check('the sky button is drawn in the accent blue',
   /h2 \.mini\.sky-open\s*\{[^}]*border-color:\s*var\(--accent\)[^}]*color:\s*var\(--accent\)/
     .test(css));
+/* 折叠箭头是几何标注那一块唯一的入口，16 px 才在 18 px 行里看得见。 */
+check('the landform fold caret is large enough',
+  /\.label-bar \.caret\s*\{[^}]*font-size:\s*16px/.test(css));
+/* 天空位置的新控制：锁定视角、同步主界面，步长按钮独占一行。 */
+check('the sky window has a view lock and a main-clock sync',
+  htmlIds.has('sky-lock-view') && htmlIds.has('sky-sync-main') &&
+  /id="sky-lock-view"[^>]*aria-pressed="false"/.test(html));
+check('the sky time-step row is on its own line',
+  /\.sky-nudge\s*\{[^}]*flex:\s*1 0 100%/.test(css));
+/* 事件预报的表格窗口与 CSV 出入口。 */
+check('the event table window has rows and CSV controls',
+  htmlIds.has('event-window-backdrop') && htmlIds.has('event-window-rows') &&
+  htmlIds.has('event-window-export') && htmlIds.has('event-window-import') &&
+  htmlIds.has('event-window-open'));
 /* The close-up save row is meant to be the same row as the full disk's: its two
    resolution menus and the number all sit inside the 保存分辨率 label, and the
    unit span carries the scale.  Spread out again, the row grows taller than the

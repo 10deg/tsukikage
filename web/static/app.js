@@ -50,7 +50,10 @@ const state = {
   skyProjection: null, // az/el <-> canvas mapping of the last paint
   skySeq: 0,           // guards a stale /api/sky reply
   skyOpen: false,
-  skyCloseupTouched: false, // the reader has overruled the automatic close-up
+  skyCloseupTouched: false, // the reader has chosen the close-up mode themselves
+  skyViewLocked: false, // keep the current axes while time and span change
+  eventTable: [],      // rows currently shown by the forecast (and its window)
+  eventImported: false, // the rows came from a CSV, not from the server
   skyWindow: null,     // {left, top, width, height} of the floating window
   skyDrag: null,       // in-progress window or plot drag
   skyHoverEdge: null,  // plot edge under the pointer, for the cursor and grips
@@ -4989,6 +4992,48 @@ function skyWhenPayload() {
   };
 }
 
+/** Freeze or release the chart's current axes.
+ *
+ *  Without the lock every new request hands the chart back to the automatic fit:
+ *  nudge the time by fifteen minutes and the Moon's track, the azimuth range and
+ *  possibly the close-up mode all change at once.  The lock is the difference
+ *  between "show me this instant" and "keep the frame, move the Moon through
+ *  it", and the second is the one a reader uses to step through an evening. */
+function setSkyViewLock(locked) {
+  state.skyViewLocked = !!locked;
+  const button = $('sky-lock-view');
+  if (button) {
+    button.setAttribute('aria-pressed', String(state.skyViewLocked));
+    button.title = state.skyViewLocked
+      ? '视角已锁定：改时间、跨度或步长不会重新取景；再按一次解除'
+      : '锁定当前显示范围：改时间、跨度或步长时不再自动重新取景';
+  }
+  if (!state.skyViewLocked) {
+    // Unlocking is an explicit request for the automatic fit again.
+    state.skyView = null;
+  }
+  drawSky();
+}
+
+/** Copy the sky window's instant into the main page's date/time and zone.
+ *
+ *  Both the wall clock *and* the offset have to move: copying only the clock
+ *  would silently reinterpret the instant in the page's old zone. */
+function syncSkyTimeToMain() {
+  const local = skyFieldsValue();
+  if (!local) {
+    setStatus('天空位置图还没有有效的日期与时间', 'error');
+    return;
+  }
+  const offset = Number($('sky-tz').value);
+  const zone = Number.isFinite(offset) ? offset : 0;
+  $('when').value = local;
+  $('tz').value = (zone >= 0 ? '+' : '') + String(zone);
+  autoRefresh();
+  setStatus(`主界面时间已同步为 ${local.replace('T', ' ')}（UTC`
+    + `${zone >= 0 ? '+' : ''}${zone}）`);
+}
+
 /** Walk the window's instant by one nudge step, then redraw. */
 function nudgeSky(step) {
   const next = shiftInstant(skyFieldsValue() || $('when').value, step);
@@ -5013,10 +5058,9 @@ async function refreshSky() {
     if (sequence !== state.skySeq) return;
     state.sky = payload;
     state.skySeries = skySeries(payload);
-    if (!state.skyCloseupTouched) {
-      $('sky-closeup').checked = skyAutoCloseup(payload);
-    }
-    state.skyView = null;
+    // 轨迹特写是读者的选择，不再"月亮高就自动切过去"：自动取景会在拨时间时
+    // 把画面和坐标轴一起跳走，而锁定的意义正是让时间轴独自移动。
+    if (!state.skyViewLocked) state.skyView = null;
     drawSky();
   } catch (error) {
     if (sequence !== state.skySeq) return;
@@ -7616,7 +7660,7 @@ function buildEventKinds() {
   const kinds = [
     ['full_moon', '满月'], ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
     ['highest_full', '最高满月'], ['highest_quarter', '最高弦月'],
-    ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
+    ['lunar_eclipse', '月食'], ['xvl', '月面 X/V'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
@@ -7672,12 +7716,17 @@ async function loadEvents() {
       const payload = await post('/api/crescents', {
         when: whenPayload(), start, end, limit: 15,
       });
+      state.eventTable = (payload.items || []).map(crescentEventRow);
+      state.eventImported = false;
       renderCrescents(payload.items || []);
+      afterEventRows();
     } catch (error) {
       const row = document.createElement('div');
       row.className = 'event-row';
       row.textContent = '极低照明度预报失败：' + String(error.message || error);
       host.appendChild(row);
+      state.eventTable = [];
+      afterEventRows();
     }
     return;
   }
@@ -7685,13 +7734,56 @@ async function loadEvents() {
     const payload = await post('/api/events', {
       when: whenPayload(), kind: state.eventKind, start, end,
     });
+    state.eventTable = (payload.events || []).map(eventRowFromForecast);
+    state.eventImported = false;
     renderEvents(payload.events || []);
+    afterEventRows();
   } catch (error) {
     const row = document.createElement('div');
     row.className = 'event-row';
     row.textContent = '事件预报失败：' + String(error.message || error);
     host.appendChild(row);
+    state.eventTable = [];
+    afterEventRows();
   }
+}
+
+/** One forecast row in the shape both the table and the CSV use.
+ *
+ * `label` is already the type-specific name (月偏食, not 月食), and the window
+ * fields are the optional range an X/V event or a crescent session carries. */
+function eventRowFromForecast(event) {
+  return {
+    kind: String(event.kind || 'event'),
+    label: String(event.label || event.kind || '事件'),
+    when_utc: event.when_utc,
+    altitude_deg: Number.isFinite(Number(event.altitude_deg))
+      ? Number(event.altitude_deg) : null,
+    observable: event.observable !== false,
+    detail: String(event.detail || ''),
+    window_start_utc: event.window_start_utc || null,
+    window_end_utc: event.window_end_utc || null,
+  };
+}
+
+/** A crescent session is a range, but the table and the CSV share one shape;
+ *  the best instant becomes `when_utc` and the session range is preserved. */
+function crescentEventRow(item) {
+  const illuminate = Number(item.illumination_percent);
+  const elongation = Number(item.elongation_deg);
+  const elevation = Number(item.moon_elevation_deg);
+  return {
+    kind: 'crescent',
+    label: '极低照明度',
+    when_utc: item.best_utc,
+    altitude_deg: Number.isFinite(elevation) ? elevation : null,
+    observable: !Number.isFinite(elevation) || elevation > 0.0,
+    detail: `照亮 ${Number.isFinite(illuminate) ? illuminate.toFixed(2) : '—'}%`
+      + `　距角 ${Number.isFinite(elongation) ? elongation.toFixed(1) : '—'}°`
+      + `　${item.night || ''}${item.session === 'sunset' ? ' 日落时段' : ' 日出时段'}`,
+    window_start_utc: item.window_start_utc || null,
+    window_end_utc: item.window_end_utc || null,
+  };
 }
 
 /** 极低照明度: one row per crescent session, thinnest first.
@@ -7761,16 +7853,272 @@ function renderEvents(events) {
     // The altitude is one of the numbers in the detail and the row is greyed
     // when it is below the horizon, so a sentence saying so as well was a
     // third copy of the same fact.
-    detail.textContent = `${event.label}　${event.detail}`;
+    const range = eventRangeText(eventRowFromForecast(event), tz);
+    detail.textContent = `${event.label}　${range ? `窗口 ${range}　` : ''}${event.detail}`;
     row.append(when, detail);
     row.addEventListener('dblclick', () => {
-      $('when').value = shape.toISOString().slice(0, 16);
+      setMainTimeFromEventRow(eventRowFromForecast(event));
       state.eventKind = event.kind;
       syncEventKinds();
-      if ($('auto-refresh').checked) refreshDisk();
-      setStatus(`时间已设为 ${$('when').value}（${event.label}）`);
     });
     host.appendChild(row);
+  }
+}
+
+/* ── the event table window and CSV ───────────────────────────────────
+ *
+ * The sidebar list is the answer to "when"; this window is the same rows with
+ * columns, a file on disk and an import.  The imported rows are not second
+ * class: they replace the list and double-click drives the simulation exactly
+ * as a forecast row does.
+ */
+
+/** One instant as local wall clock, from a UTC ISO string. */
+function eventLocalText(iso, tz, withDate = true) {
+  const stamp = Date.parse(iso);
+  if (!Number.isFinite(stamp)) return '—';
+  const local = new Date(stamp + tz * 3600 * 1000).toISOString();
+  return withDate ? local.slice(5, 16).replace('T', ' ')
+    : local.slice(11, 16);
+}
+
+/** The optional start–end range a X/V or crescent row carries. */
+function eventRangeText(row, tz) {
+  if (!row || !row.window_start_utc || !row.window_end_utc) return '';
+  const start = eventLocalText(row.window_start_utc, tz);
+  const end = eventLocalText(row.window_end_utc, tz);
+  if (start === '—' || end === '—') return '';
+  return `${start}–${end}`;
+}
+
+/** Point the main simulation at one row's instant. */
+function setMainTimeFromEventRow(row) {
+  const stamp = Date.parse(row && row.when_utc);
+  if (!Number.isFinite(stamp)) {
+    setStatus('这一行没有可用的时间', 'error');
+    return;
+  }
+  const tz = Number($('tz').value) || 0;
+  $('when').value = new Date(stamp + tz * 3600 * 1000)
+    .toISOString().slice(0, 16);
+  if ($('auto-refresh').checked) refreshDisk();
+  const label = (row && row.label) || '事件';
+  setStatus(`时间已设为 ${$('when').value.replace('T', ' ')}（${label}）`);
+  const status = $('event-window-status');
+  if (status) status.textContent = `已设为 ${$('when').value.replace('T', ' ')}`;
+}
+
+/** Refresh the count and the table after a forecast or an import. */
+function afterEventRows() {
+  const count = $('event-count');
+  if (count) count.textContent = state.eventTable.length
+    ? `${state.eventTable.length} 条` : '无结果';
+  renderEventWindowRows();
+}
+
+/** Fill the floating table from `state.eventTable`. */
+function renderEventWindowRows() {
+  const body = $('event-window-rows');
+  if (!body) return;
+  body.innerHTML = '';
+  const tz = Number($('tz').value) || 0;
+  for (const row of state.eventTable) {
+    const tr = document.createElement('tr');
+    tr.dataset.observable = row.observable === false ? 'false' : 'true';
+    tr.title = '双击把主界面时间设为这一刻';
+    const when = document.createElement('td');
+    when.className = 'when';
+    when.textContent = eventLocalText(row.when_utc, tz);
+    const kind = document.createElement('td');
+    kind.className = 'kind';
+    kind.textContent = row.label || row.kind || '事件';
+    const height = document.createElement('td');
+    height.className = 'height';
+    height.textContent = row.altitude_deg === null || row.altitude_deg === undefined
+      ? '—' : `${fmt(row.altitude_deg, 1)}°`;
+    const detail = document.createElement('td');
+    detail.className = 'detail';
+    const range = eventRangeText(row, tz);
+    detail.textContent = (range ? `窗口 ${range}　` : '') + (row.detail || '');
+    tr.append(when, kind, height, detail);
+    tr.addEventListener('dblclick', () => setMainTimeFromEventRow(row));
+    body.appendChild(tr);
+  }
+  const empty = $('event-window-empty');
+  if (empty) empty.hidden = state.eventTable.length > 0;
+  const count = $('event-window-count');
+  if (count) count.textContent = state.eventTable.length
+    ? `${state.eventTable.length} 条` : '无结果';
+}
+
+/** The imported rows become the sidebar list too, not a separate world. */
+function renderImportedEventList() {
+  const host = $('event-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const tz = Number($('tz').value) || 0;
+  for (const row of state.eventTable) {
+    const line = document.createElement('div');
+    line.className = 'event-row';
+    line.dataset.observable = row.observable === false ? 'false' : 'true';
+    line.title = '双击把时间设到这一刻';
+    const when = document.createElement('b');
+    when.textContent = eventLocalText(row.when_utc, tz);
+    const detail = document.createElement('span');
+    const range = eventRangeText(row, tz);
+    detail.textContent = `${row.label || row.kind || '事件'}　`
+      + `${range ? `窗口 ${range}　` : ''}${row.detail || ''}`;
+    line.append(when, detail);
+    line.addEventListener('dblclick', () => setMainTimeFromEventRow(row));
+    host.appendChild(line);
+  }
+}
+
+async function openEventWindow() {
+  const backdrop = $('event-window-backdrop');
+  if (!backdrop) return;
+  if (!state.eventTable.length && !state.eventImported) {
+    // The pane may never have been opened; the window is a way in, so it fills
+    // the same range the pane would.
+    fillEventRange();
+    await loadEvents();
+  }
+  renderEventWindowRows();
+  backdrop.hidden = false;
+  $('event-window-status').textContent = state.eventImported
+    ? '导入的事件列表' : '当前预报';
+  $('event-window-close').focus();
+}
+
+function closeEventWindow() {
+  const backdrop = $('event-window-backdrop');
+  if (backdrop) backdrop.hidden = true;
+}
+
+/** Quote one CSV field only when it needs it. */
+function csvField(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+const EVENT_CSV_COLUMNS = ['kind', 'label', 'when_utc', 'altitude_deg',
+                           'observable', 'window_start_utc', 'window_end_utc',
+                           'detail'];
+
+/** The table as CSV text: header, one row per event, CRLF line endings. */
+function eventCsvText(rows) {
+  const lines = [EVENT_CSV_COLUMNS.join(',')];
+  for (const row of rows) {
+    lines.push(EVENT_CSV_COLUMNS.map((key) => {
+      if (key === 'observable') return row.observable === false ? 'false' : 'true';
+      if (key === 'altitude_deg') {
+        return Number.isFinite(Number(row.altitude_deg)) ? String(row.altitude_deg) : '';
+      }
+      return csvField(row[key]);
+    }).join(','));
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
+/** Parse RFC-4180-ish CSV into rows; quoted commas and newlines included. */
+function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  const source = String(text || '').replace(/^\ufeff/, '');
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      if (char === '"') {
+        if (source[index + 1] === '"') { field += '"'; index += 1; }
+        else quoted = false;
+      } else {
+        field += char;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(field); field = '';
+    } else if (char === '\n') {
+      row.push(field); rows.push(row); row = []; field = '';
+    } else if (char !== '\r') {
+      field += char;
+    }
+  }
+  row.push(field);
+  if (row.length > 1 || row[0].trim()) rows.push(row);
+  return rows.filter((line) => line.some((cell) => String(cell).trim() !== ''));
+}
+
+/** Import rows in the exported format; throws a sentence for a bad file. */
+function eventsFromCsv(text) {
+  const rows = parseCsvText(text);
+  if (!rows.length) throw new Error('CSV 是空的。');
+  const header = rows[0].map((cell) => String(cell).trim().toLowerCase());
+  const at = {};
+  for (const key of EVENT_CSV_COLUMNS) at[key] = header.indexOf(key);
+  if (at.when_utc < 0) {
+    throw new Error('CSV 首行缺少 when_utc 列；请使用导出的同格式文件。');
+  }
+  const pick = (cells, key) => (at[key] >= 0 ? String(cells[at[key]] ?? '').trim() : '');
+  const utc = (value) => {
+    const stamp = Date.parse(value);
+    return Number.isFinite(stamp) ? new Date(stamp).toISOString() : null;
+  };
+  const events = [];
+  for (const cells of rows.slice(1)) {
+    if (events.length >= 5000) break;
+    const when = utc(pick(cells, 'when_utc'));
+    if (!when) continue;
+    const altitude = Number(pick(cells, 'altitude_deg'));
+    const observableText = pick(cells, 'observable').toLowerCase();
+    events.push({
+      kind: pick(cells, 'kind') || 'imported',
+      label: pick(cells, 'label') || pick(cells, 'kind') || '导入事件',
+      when_utc: when,
+      altitude_deg: Number.isFinite(altitude) ? altitude : null,
+      observable: !['false', '0', 'no', '否'].includes(observableText),
+      detail: pick(cells, 'detail'),
+      window_start_utc: utc(pick(cells, 'window_start_utc')),
+      window_end_utc: utc(pick(cells, 'window_end_utc')),
+    });
+  }
+  if (!events.length) throw new Error('CSV 里没有可读的事件行（when_utc 需为 ISO 时间）。');
+  return events;
+}
+
+function exportEventCsv() {
+  if (!state.eventTable.length) {
+    setStatus('还没有事件可以导出', 'error');
+    return;
+  }
+  const text = eventCsvText(state.eventTable);
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '');
+  const name = `moon-events-${stamp}.csv`;
+  downloadUrl(URL.createObjectURL(new Blob(['\ufeff' + text],
+    { type: 'text/csv;charset=utf-8' })), name);
+  setStatus(`已导出 ${state.eventTable.length} 条事件到 ${name}`);
+  const status = $('event-window-status');
+  if (status) status.textContent = `已导出 ${name}`;
+}
+
+async function importEventCsv(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const events = eventsFromCsv(text);
+    state.eventTable = events;
+    state.eventImported = true;
+    renderImportedEventList();
+    afterEventRows();
+    setStatus(`已导入 ${events.length} 条事件；双击行可把时间设到那一刻`);
+    const status = $('event-window-status');
+    if (status) status.textContent = `已导入 ${events.length} 条`;
+  } catch (error) {
+    setStatus('CSV 导入失败：' + String((error && error.message) || error), 'error');
+    const status = $('event-window-status');
+    if (status) status.textContent = '导入失败';
   }
 }
 
@@ -9402,6 +9750,19 @@ function init() {
   $('events-end-sync').addEventListener('click', () => {
     syncRangeTime('events-end', '结束', loadEvents);
   });
+  $('event-window-open').addEventListener('click', openEventWindow);
+  $('event-window-close').addEventListener('click', closeEventWindow);
+  $('event-window-export').addEventListener('click', exportEventCsv);
+  $('event-window-import').addEventListener('change', (event) => {
+    const file = event.target.files && event.target.files[0];
+    importEventCsv(file);
+    // Clearing lets the same file be chosen twice; a file input that keeps its
+    // value fires no change event the second time.
+    event.target.value = '';
+  });
+  $('event-window-backdrop').addEventListener('click', (event) => {
+    if (event.target === $('event-window-backdrop')) closeEventWindow();
+  });
   $('anim-start-sync').addEventListener('click', () => {
     syncRangeTime('anim-start', '动画开始');
     refreshAnimationPlan();
@@ -9865,9 +10226,13 @@ function init() {
   $('sky-open').addEventListener('click', openSky);
   $('sky-close').addEventListener('click', closeSky);
   $('sky-refresh').addEventListener('click', refreshSky);
+  $('sky-lock-view').addEventListener('click', () => {
+    setSkyViewLock(!state.skyViewLocked);
+  });
+  $('sky-sync-main').addEventListener('click', syncSkyTimeToMain);
   $('sky-reset').addEventListener('click', () => {
     state.skyView = null;
-    drawSky();
+    setSkyViewLock(false);
   });
   $('sky-span').addEventListener('change', refreshSky);
   // 这张图有自己的时刻：日期、时间、时区改了就重算，± 一组按钮把它当钟表走。
@@ -9886,7 +10251,9 @@ function init() {
   }
   $('sky-closeup').addEventListener('change', () => {
     state.skyCloseupTouched = true;
-    state.skyView = null;
+    // A locked view keeps its axes even when the kind of chart changes; the
+    // reader asked for the frame to stay put.
+    if (!state.skyViewLocked) state.skyView = null;
     drawSky();
   });
   $('sky-save').addEventListener('click', saveSkyPng);
