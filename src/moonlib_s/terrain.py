@@ -930,6 +930,17 @@ class RasterPyramid:
             base = np.floor(x).astype(np.int64)
             return np.mod(base, width) + (x - np.floor(x))
         lon_min, lon_max, _lat_min, _lat_max = self.bounds
+        # Convert into *this* raster's convention before indexing it.  A window
+        # cut from a product stored 0..360 (SLDEM2015, LOLA GDS) has bounds like
+        # 343.5..357.9 while the renderer works in -180..180, and comparing the
+        # two directly put every sample at column 0: the frame became one
+        # column of terrain smeared across the picture, which at a grazing sun
+        # reads as horizontal banding.
+        # ...and pick the *nearest* representation: the offset is taken on the
+        # circle, so a query 20 degrees west of the window clamps to its left
+        # edge instead of being wrapped all the way round to its right one.
+        delta = np.mod(np.asarray(lon, dtype=np.float64) - lon_min + 180.0, 360.0) - 180.0
+        lon = lon_min + delta
         dlon = (lon_max - lon_min) / width
         return np.clip((lon - lon_min) / dlon - 0.5, 0.0, width - 1.0)
 

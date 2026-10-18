@@ -2944,12 +2944,17 @@ def _footprint_fits(
     if footprint is None or bounds is None:
         return True  # a global raster covers everything
     lon_min, lon_max, lat_min, lat_max = bounds
-    return not (
-        footprint["lon_min"] < lon_min
-        or footprint["lon_max"] > lon_max
-        or footprint["lat_min"] < lat_min
-        or footprint["lat_max"] > lat_max
-    )
+    if footprint["lat_min"] < lat_min or footprint["lat_max"] > lat_max:
+        return False
+    # Longitude on a circle: a window stored 0..360 covers a footprint measured
+    # -180..180 if the *span* fits on the circle, and comparing the two numbers
+    # directly refuses every such window (and, worse, accepts windows that do
+    # not cover the frame).
+    span = float(footprint["lon_max"]) - float(footprint["lon_min"])
+    if span >= 360.0:
+        return True
+    offset = (float(footprint["lon_min"]) - lon_min) % 360.0
+    return offset + span <= (float(lon_max) - lon_min) + 1e-9
 
 
 def _target_vector(
