@@ -38,7 +38,10 @@
     "image-mirror": "none",
     "noise-poisson": "0.35",
     "noise-gaussian": "0.2",
-    "back-focus": "1.05"
+    "back-focus": "1.05",
+    "parallel": "4",
+    "sky-span": "6",
+    "sky-label-step": "30"
   }
 }
 ```

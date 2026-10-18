@@ -1278,7 +1278,8 @@ def _occlusion(
     or one direction per point (the Earth).  Steps grow geometrically, so the
     near field keeps pixel-scale resolution while a 200 km graze is still
     covered in a few dozen samples, and each sample reads the pyramid level that
-    matches its own footprint.
+    matches the spacing between samples -- the scale the march actually
+    resolves -- rather than its distance from the ray's origin.
     """
     count = points.shape[0]
     blocked = np.zeros(count, dtype=bool)
@@ -1318,19 +1319,44 @@ def _occlusion(
     if steps >= 2:
         dt_cap = min(dt_cap, reach / float(steps - 1))
 
-    growth = 1.30
+    # Spread the samples over *reach* rather than over the full ``max_range``:
+    # the old fixed 1.30 growth spent the first dozen samples crawling out of
+    # the near field and then took kilometre-wide strides through the middle
+    # distance, which is where a low Sun casts most of the shadows a reader
+    # actually sees.  Sizing the growth from the reach the Sun allows restores
+    # the older, denser mid-field march while keeping the rise-limited far
+    # field.  ``dt_cap`` still decides the largest step any ray may take.
+    growth = (reach / scale) ** (1.0 / float(steps - 1))
     distances: List[float] = []
     t = scale
     while t < reach and len(distances) < _MAX_SHADOW_SAMPLES:
         distances.append(t)
         t += max(min(t * (growth - 1.0), dt_cap), scale * 0.25)
+    if distances and len(distances) < _MAX_SHADOW_SAMPLES and distances[-1] < reach:
+        # A tiny ``steps`` (2 or 3) makes the growth so large that the loop can
+        # stop one stride short of the reach it was sized for.  Keep the end
+        # sample: the old fixed-count march always included the range limit,
+        # and without it a two-step request sampled only the near field.
+        distances.append(reach)
     reference = MOON_REFERENCE_RADIUS_KM
-    # The pyramid level of every step depends only on the distance schedule, so
-    # it is resolved once instead of once per step.
-    levels = [
-        terrain.dem.level_for_ground_scale(max(distance, pixel_km))
-        for distance in distances
-    ]
+    # The pyramid level has to match the *distance between samples* -- the
+    # scale at which the ray actually queries the terrain -- not the distance
+    # from where the ray started.  Choosing by distance was the 1.3.0
+    # regression: a sample 100 km out read a level tens of kilometres wide, so
+    # the far half of a shadow was carved from a handful of bilinear facets and
+    # long shadow boundaries became polygons (worst at samples_per_pixel=1,
+    # where the level floor is already the coarser one).
+    levels: List[int] = []
+    for index, distance in enumerate(distances):
+        if index + 1 < len(distances):
+            spacing = distances[index + 1] - distance
+        elif index:
+            spacing = distance - distances[index - 1]
+        else:
+            spacing = scale
+        levels.append(
+            terrain.dem.level_for_ground_scale(max(spacing, scale))
+        )
     ceiling = _dem_ceiling_km(terrain.dem)
     remaining = np.ones(subset.size, dtype=bool)
     for step, distance in enumerate(distances):
@@ -1416,15 +1442,21 @@ def _estimate_ray_steps(
     )
 
 
-def _band_workers(band_count: int) -> int:
+def _band_workers(band_count: int, requested: int = 0) -> int:
     """How many bands to trace at once.
 
     Chosen from the machine, capped so that small renders do not pay thread
     startup for nothing, and overridable with ``MOONLIB_BAND_WORKERS`` (set it
     to 1 to force the serial path, which is also what the tests use).
+
+    *requested* is the caller's own ceiling -- the page's 并行数 control.  A
+    positive value wins over the environment, because it is a statement about
+    this render rather than about the process; ``0`` keeps the old decision.
     """
     if band_count <= 1:
         return 1
+    if requested and requested > 0:
+        return max(1, min(int(requested), band_count))
     override = os.environ.get("MOONLIB_BAND_WORKERS")
     if override:
         try:
@@ -1756,7 +1788,7 @@ def _render_bands(
         (start, min(start + band_rows, fine_height))
         for start in range(0, fine_height, band_rows)
     ]
-    workers = _band_workers(len(bands))
+    workers = _band_workers(len(bands), int(options.band_workers or 0))
     if workers > 1:
         # Bands are independent by construction -- every constant the shading
         # uses is computed frame-wide before the loop -- so they can be traced

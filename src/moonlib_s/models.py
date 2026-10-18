@@ -1308,6 +1308,14 @@ class MoonRenderSettings:
     the handful of rays still looking for a surface.
     """
     bisection_steps: int = 8
+    band_workers: int = 0
+    """How many horizontal bands may be traced at once.
+
+    ``0`` keeps the historical behaviour: one worker per CPU (capped by the
+    number of bands), or whatever ``MOONLIB_BAND_WORKERS`` says.  A positive
+    value is a hard ceiling from the caller, which is how the page's 并行数
+    control keeps a render from taking the whole machine.
+    """
     samples_per_pixel: int = 2
     """Sub-pixel samples per axis, so 4 rays per pixel at the default.
 
@@ -1318,8 +1326,16 @@ class MoonRenderSettings:
     pixel has to darken part of a pixel, not all or none of it.
     """
     shadow_steps: int = 48
+    """Soft floor on the number of samples along a shadow ray.
+
+    The march spreads its samples over the distance the Sun can actually
+    illuminate (the relief-limited reach, never more than ``shadow_range_km``)
+    in roughly this many geometric steps, then caps each step by the height it
+    may rise.  A larger value therefore samples more densely; a small one is
+    still bounded by that rise cap and by the renderer's own sample ceiling.
+    """
     shadow_range_km: float = 220.0
-    """How far a shadow caster is searched for along the sun ray."""
+    """Upper bound on how far a shadow caster is searched for along the sun ray."""
     shadow_skip_elevation_deg: float = 30.0
     """Sun elevations above the local horizontal skip the shadow march."""
     sun_samples: int = 1

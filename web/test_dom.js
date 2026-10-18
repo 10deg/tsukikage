@@ -207,6 +207,34 @@ check('单帧预览 comes right after 终止',
 check('数据源 is the first field in the advanced block',
   /<summary>高级设置[\s\S]{0,900}?id="data-source"/.test(html) &&
   /id="data-source-note"/.test(html));
+/* 下载 is two characters, not a paragraph: the button keeps its own width and
+   its text on one line, and the product menu beside it gives ground instead. */
+check('区域高清补片的下载 button cannot be squeezed into a vertical label',
+  /#patch-download\s*\{[^}]*flex:\s*0 0 auto/.test(css) &&
+  /#patch-download\s*\{[^}]*white-space:\s*nowrap/.test(css) &&
+  /#patch-product\s*\{[^}]*flex:\s*1 1 auto/.test(css));
+/* 并行数: a real per-render ceiling, not a label.  It is the same kind of
+   number as 每像素采样, so it shares that grid row instead of getting a
+   full-width row whose explanatory paragraph cost another line. */
+check('the advanced block carries a CPU worker control',
+  htmlIds.has('parallel') && /id="parallel"[^>]*min="1"/.test(html));
+check('并行数 shares the 每像素采样 row',
+  (() => {
+    const from = html.indexOf('id="out-samples"');
+    const to = html.indexOf('id="parallel"');
+    const between = from >= 0 && to > from ? html.slice(from, to) : '';
+    return between.length > 0 && !between.includes('</div>')
+      && !between.includes('wide-field');
+  })());
+check('the 并行数 explanation is a tooltip, not a paragraph',
+  /<label title="[^"]*渲染按横带分给多个线程[^"]*">\s*并行数/
+    .test(html) &&
+  !html.includes('<p class="hint">渲染按横带分给多个线程'));
+/* The sky window is a real canvas with a close button in its own header. */
+check('the sky window has a canvas, a close button and its own save row',
+  htmlIds.has('sky-canvas') && htmlIds.has('sky-close') &&
+  htmlIds.has('sky-save') && htmlIds.has('sky-label-step') &&
+  /id="sky-open"[^>]*>模拟天空位置</.test(html));
 /* 饱和度 may now be pushed above 1; the cap is 3 in the markup, and the
    library's own finish_image() was extended to honour it. */
 check('saturation can be boosted above 1',

@@ -136,6 +136,13 @@
       </div>
     </div>
 
+    <!-- 天空位置示意图的入口：放在月相栏下面，和它读的是同一时刻、同一地点。
+         蓝框与「更新图像」同一套样式，宽度按文字给足，不折行。 -->
+    <div class="sky-launch">
+      <button class="outline" id="sky-open"
+              title="按当前时间和地点，画出月亮与太阳在天空中的方位—高度轨迹">模拟天空位置</button>
+    </div>
+
   </aside>
 
   <div class="splitter" data-target="left"></div>
@@ -738,6 +745,16 @@
                   <option value="3">3</option>
                 </select>
               </label>
+              <!-- 并行数: how much of the machine one render may take.  It is the
+                   same kind of number as 每像素采样 (a quality/cost trade), so
+                   it sits beside it; the explanation is the tooltip rather than
+                   a paragraph that would take a row of its own.  The render is
+                   band-parallel, so this is a real ceiling, not a priority hint;
+                   blank means "let the library use every core". -->
+              <label title="渲染按横带分给多个线程；调小可以给主机留出余量，调大则更快。">
+                并行数 <span class="en">CPU workers</span>
+                <input type="number" id="parallel" min="1" max="64" step="1" value="4">
+              </label>
             </div>
           </details>
         </section>
@@ -1191,6 +1208,86 @@
     </div>
   </aside>
 </main>
+
+<!-- ── 天空位置示意图：一个可缩放、可拖动的浮窗 ────────────────────────
+     它不是一张 matplotlib 图，而是同一套 az_el 采样的交互页面：时间标注、
+     距角连线、轨迹特写和显示范围都由读者自己调，最后可以整窗存成 PNG。 -->
+<div class="sky-backdrop" id="sky-backdrop" hidden>
+  <div class="sky-window" id="sky-window" role="dialog" aria-modal="true"
+       aria-labelledby="sky-heading">
+    <!-- 八个边框手柄：四条边、四个角，都可以拖动改窗口大小。 -->
+    <div class="sky-resize" data-sky-resize="n"></div>
+    <div class="sky-resize" data-sky-resize="s"></div>
+    <div class="sky-resize" data-sky-resize="e"></div>
+    <div class="sky-resize" data-sky-resize="w"></div>
+    <div class="sky-resize" data-sky-resize="ne"></div>
+    <div class="sky-resize" data-sky-resize="nw"></div>
+    <div class="sky-resize" data-sky-resize="se"></div>
+    <div class="sky-resize" data-sky-resize="sw"></div>
+
+    <header class="sky-head" id="sky-head">
+      <div class="sky-heading" id="sky-heading"
+           title="拖动标题栏移动窗口；拖动窗口的四边或四角改变大小">天空位置示意图 <span class="en">Sky position</span></div>
+      <div class="sky-head-tools">
+        <span class="sky-badge" id="sky-mode">地平线视图</span>
+        <button class="ghost" id="sky-refresh" title="按主界面的时间和地点重新计算">重新计算</button>
+        <button class="ghost" id="sky-reset" title="把显示范围恢复到自动适配">复位视角</button>
+        <button class="ghost icon" id="sky-close" title="关闭天空位置图" aria-label="关闭">×</button>
+      </div>
+    </header>
+
+    <div class="sky-controls">
+      <label title="以当前时刻为中心，向前后各展开多少小时">时间跨度 ±
+        <input type="number" id="sky-span" value="6" min="0.25" max="24" step="0.25">
+        <span class="unit">h</span>
+      </label>
+      <label title="时间标注之间的间隔；标注会自动避让，挤不下时按倍数抽稀">标注间隔
+        <select id="sky-label-step">
+          <option value="5">5 min</option>
+          <option value="10">10 min</option>
+          <option value="15">15 min</option>
+          <option value="30" selected>30 min</option>
+          <option value="60">1 h</option>
+          <option value="90">1.5 h</option>
+          <option value="120">2 h</option>
+        </select>
+      </label>
+      <label class="check inline" title="显示月亮轨迹上的时刻">
+        <input type="checkbox" id="sky-labels" checked>
+        <span>时间标注</span>
+      </label>
+      <label class="check inline" title="在月亮与太阳之间连线，并标出该时刻的距角">
+        <input type="checkbox" id="sky-elongation" checked>
+        <span>距角连线</span>
+      </label>
+      <label class="check inline" title="月亮较高、离太阳很远时，只画月亮的一段轨迹；太阳用箭头指方向">
+        <input type="checkbox" id="sky-closeup">
+        <span>轨迹特写</span>
+      </label>
+      <span class="sky-save">
+        <label title="按长边或短边给保存的图片定分辨率">保存
+          <select id="sky-save-ref">
+            <option value="long" selected>长边</option>
+            <option value="short">短边</option>
+          </select>
+        </label>
+        <input type="number" id="sky-save-px" value="2400" min="320" max="10000" step="10">
+        <span class="unit">px</span>
+        <button class="gold" id="sky-save">保存 PNG</button>
+      </span>
+    </div>
+
+    <div class="sky-plot" id="sky-plot">
+      <canvas id="sky-canvas"></canvas>
+      <div class="sky-empty" id="sky-empty">正在计算天空位置…</div>
+    </div>
+
+    <footer class="sky-foot" id="sky-foot">
+      <span id="sky-summary">—</span>
+      <span class="sky-hint">拖动图框边缘调范围（两轴等比） · 滚轮缩放 · 双击复位</span>
+    </footer>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

@@ -43,6 +43,17 @@ const state = {
   moonLang: 'zh',      // the Moon readout's own language
   animationId: null,   // the background animation job being polled, if any
   animationRunning: false, // the job is still producing frames
+  sky: null,           // last /api/sky payload
+  skySeries: null,     // samples with azimuth unwrapped for drawing
+  skyView: null,       // {azMin, azMax, elMin, elMax} or null for auto-fit
+  skyLayout: null,     // plot rectangle of the last paint, in canvas pixels
+  skyProjection: null, // az/el <-> canvas mapping of the last paint
+  skySeq: 0,           // guards a stale /api/sky reply
+  skyOpen: false,
+  skyCloseupTouched: false, // the reader has overruled the automatic close-up
+  skyWindow: null,     // {left, top, width, height} of the floating window
+  skyDrag: null,       // in-progress window or plot drag
+  skyHoverEdge: null,  // plot edge under the pointer, for the cursor and grips
 };
 
 /* One zoom state per view, in CSS transform units.  Zooming is a transform on
@@ -381,6 +392,21 @@ function lightPayload() {
     earthshine: earthshinePayload(),
   };
 }
+
+/** The compute budget, carried beside the light block in every render request.
+ *
+ * It is not a light setting, so it has its own block: the server reads it as a
+ * per-request ceiling on the band threads, which lets two requests with
+ * different budgets run without either one writing an environment variable
+ * the other can see.  Blank means "let the library decide".
+ */
+function computePayload() {
+  const value = num('parallel');
+  return {
+    parallel: value === null || !Number.isFinite(value) || value < 1
+      ? null : Math.round(value),
+  };
+}
 /** One line describing the earthshine a frame was actually drawn with.
  *
  *  *block* is either the ephemeris block the last render reported (which
@@ -484,7 +510,7 @@ const RESETTABLE_SLIDERS = [
 const OUTPUT_FIELDS = [
   'out-kmpx-preset', 'out-kmpx', 'out-scale', 'photometric-model', 'sun-samples',
   'roughness', 'sky-ambient', 'earthshine-gain', 'earth-geometric-albedo',
-  'earth-samples', 'earthshine-tint', 'out-samples', 'light-advanced',
+  'earth-samples', 'earthshine-tint', 'out-samples', 'parallel', 'light-advanced',
 ];
 
 /** 后期处理: the atmosphere, the instrument and the sensor. */
@@ -1121,6 +1147,9 @@ const LIMITS = {
   //: Frames one animation may hold; the server refuses more, so the span line
   //: says so before the button is pressed.
   animation_max_frames: 4000,
+  //: What the host reports, so the 并行数 field cannot promise more threads
+  //: than the machine has.  Filled in from /api/health.
+  cpu_count: 8,
   //: What /api/health said about the elevation products (see dataSources.js
   //: section below).  Null until the first reply.
   data_sources: null,
@@ -3187,13 +3216,14 @@ async function saveDisk() {
   $('disk-px').value = String(width);
   const when = whenPayload();
   const light = lightPayload();
+  const compute = computePayload();
   const component = diskComponent();
   const hdr = diskHdrRequest();
-  // The cache key is every input the render depends on -- the moment, the size
-  // and the light.  Keying only on the moment used to mean that switching the
-  // Earth off and pressing save handed back the *old* preview's bytes, because
-  // "nothing had changed".
-  const key = JSON.stringify([width, when, light, component, hdr]);
+  // The cache key is every input the render depends on -- the moment, the size,
+  // the light and the compute budget.  Keying only on the moment used to mean
+  // that switching the Earth off and pressing save handed back the *old*
+  // preview's bytes, because "nothing had changed".
+  const key = JSON.stringify([width, when, light, compute, component, hdr]);
   let source = state.diskExport && state.diskExport.key === key ? state.diskExport : null;
   if (!source) {
     busy('disk-busy', true);
@@ -3204,6 +3234,7 @@ async function saveDisk() {
       const payload = await post('/api/disk', {
         when,
         ...light,
+        ...compute,
         component,
         ...(hdr ? { hdr } : {}),
         preview: { width, samples: 1, shadow_steps: 64 },
@@ -3947,6 +3978,1281 @@ function drawPhaseStrip() {
   fillPhaseFacts();
 }
 
+
+/* ── 天空位置示意图 ────────────────────────────────────────────────────────
+ *
+ * The window is a canvas rather than a second matplotlib figure: every track,
+ * label and axis limit has to answer the mouse, and a page that already knows
+ * how to draw on a canvas has no reason to ship a picture of a chart.  The
+ * data is the same ``az_el`` the library's own plot uses; the server returns
+ * the samples, this code decides how to read them.
+ *
+ * Equal scale in both axes is the one geometric promise the view makes.  A
+ * degree of azimuth and a degree of altitude are the same size on the page,
+ * so a track's shape is true wherever it is dragged to.
+ */
+
+const SKY_MIN_WIDTH = 520;
+const SKY_MIN_HEIGHT = 400;
+const SKY_MARGIN = { left: 58, right: 16, top: 16, bottom: 42 };
+const SKY_DEFAULT_STEP_SECONDS = 120;
+
+/** The short way round the circle, in degrees: [-180, 180). */
+function skyWrap180(degrees) {
+  return ((Number(degrees) + 180) % 360 + 360) % 360 - 180;
+}
+
+function skyClamp(value, low, high) {
+  return Math.max(low, Math.min(high, value));
+}
+
+/** The chart's own box, inside whatever area the canvas has. */
+function skyPlotLayout(area) {
+  const width = Math.max(10, area.w - SKY_MARGIN.left - SKY_MARGIN.right);
+  const height = Math.max(10, area.h - SKY_MARGIN.top - SKY_MARGIN.bottom);
+  return {
+    x: area.x + SKY_MARGIN.left,
+    y: area.y + SKY_MARGIN.top,
+    w: width,
+    h: height,
+  };
+}
+
+function skyCanvasMetrics() {
+  const canvas = $('sky-canvas');
+  const rect = canvas && canvas.getBoundingClientRect
+    ? canvas.getBoundingClientRect() : null;
+  return {
+    canvas,
+    width: Math.max(320, (rect && rect.width) || 760),
+    height: Math.max(240, (rect && rect.height) || 520),
+    dpr: window.devicePixelRatio || 1,
+  };
+}
+
+function skyOptions() {
+  const step = Number($('sky-label-step').value);
+  return {
+    labels: $('sky-labels').checked,
+    labelStep: Number.isFinite(step) && step > 0 ? step : 30,
+    elongation: $('sky-elongation').checked,
+    closeup: $('sky-closeup').checked,
+  };
+}
+
+/** Does the Sun belong in the frame at all? */
+function skySunRelevant(data, closeup) {
+  if (closeup || !data || !data.sun || !data.moon) return false;
+  const sun = data.sun;
+  const gap = Math.abs(skyWrap180(sun.azimuth_deg - data.moon.azimuth_deg));
+  return sun.elevation_deg > -18.0 && gap < 125.0;
+}
+
+/** Would a full horizon view be the wrong picture?
+ *
+ * The case the reader named: a high Moon far from the Sun makes the pair span
+ * most of the sky, and drawing both forces the Moon's own track into a thin
+ * band.  A close-up of the Moon's track, with the Sun reduced to a direction
+ * arrow, is more use than a technically complete chart.
+ */
+function skyAutoCloseup(data) {
+  const samples = (data && data.samples) || [];
+  if (!samples.length) return false;
+  const geometry = (data && data.geometry) || {};
+  const elongation = Number(geometry.elongation_deg) || 0;
+  const moon = (data && data.moon) || { azimuth_deg: 0, elevation_deg: 0 };
+  const sun = (data && data.sun) || { azimuth_deg: 0, elevation_deg: 0 };
+  const gap = Math.abs(skyWrap180(sun.azimuth_deg - moon.azimuth_deg));
+  // The *current* altitude is what decides whether the full horizon view is
+  // useful.  Using the minimum over the whole span would turn the close-up off
+  // as soon as the Moon sets later in the window, even while it is high now.
+  return (moon.elevation_deg > 28.0 && (elongation > 65.0 || gap > 110.0))
+    || (moon.elevation_deg > 14.0 && gap > 150.0);
+}
+
+/** The samples, with azimuth unwrapped around the Moon's own anchor.
+ *
+ * A track that crosses north is continuous data with a 359 -> 1 jump in it.
+ * Unwrapping against the anchor keeps the plotted line joined; the tick labels
+ * put the compass names back on the numbers. */
+function skyUnwrapAround(values, centre, anchor) {
+  const out = new Array(values.length);
+  if (!values.length) return out;
+  const index = Math.max(0, Math.min(values.length - 1, centre));
+  out[index] = anchor;
+  for (let i = index + 1; i < values.length; i += 1) {
+    out[i] = out[i - 1] + skyWrap180(values[i] - values[i - 1]);
+  }
+  for (let i = index - 1; i >= 0; i -= 1) {
+    out[i] = out[i + 1] + skyWrap180(values[i] - values[i + 1]);
+  }
+  return out;
+}
+
+function skySeries(data) {
+  const samples = (data && data.samples) || [];
+  if (!samples.length) return [];
+  const centre = Math.floor((samples.length - 1) / 2);
+  const moonRaw = samples.map((sample) => sample.moon_azimuth_deg);
+  const sunRaw = samples.map((sample) => sample.sun_azimuth_deg);
+  const moonAz = skyUnwrapAround(
+    moonRaw, centre, data.moon ? data.moon.azimuth_deg : moonRaw[centre]);
+  const sunAz = skyUnwrapAround(
+    sunRaw, centre, data.sun ? data.sun.azimuth_deg : sunRaw[centre]);
+  return samples.map((sample, index) => ({
+    t: Date.parse(sample.when_utc),
+    moonAz: moonAz[index],
+    moonEl: sample.moon_elevation_deg,
+    sunAz: sunAz[index],
+    sunEl: sample.sun_elevation_deg,
+  }));
+}
+
+function skyTargetView(data, closeup) {
+  const series = state.skySeries && state.skySeries.length
+    ? state.skySeries : skySeries(data);
+  if (!series.length) {
+    return { azMin: 0, azMax: 90, elMin: 0, elMax: 60 };
+  }
+  // A close-up is about the part of the track the Moon is actually above the
+  // horizon for.  If the whole span is below it (or the Moon never rises),
+  // fall back to the whole series rather than drawing an empty frame.
+  let visible = series;
+  if (closeup) {
+    const above = series.filter((sample) => sample.moonEl > 0.0);
+    if (above.length) visible = above;
+  }
+  let azMin = Infinity, azMax = -Infinity;
+  let elMin = Infinity, elMax = -Infinity;
+  for (const sample of visible) {
+    azMin = Math.min(azMin, sample.moonAz);
+    azMax = Math.max(azMax, sample.moonAz);
+    elMin = Math.min(elMin, sample.moonEl);
+    elMax = Math.max(elMax, sample.moonEl);
+  }
+  if (!closeup && skySunRelevant(data, false)) {
+    for (const sample of series) {
+      azMin = Math.min(azMin, sample.sunAz);
+      azMax = Math.max(azMax, sample.sunAz);
+    }
+    elMin = Math.min(elMin, 0.0);
+    elMax = Math.max(elMax, 10.0);
+  } else if (!closeup) {
+    // The horizon is worth keeping even when the Sun is far away or well below
+    // it: without it the chart stops being a horizon view.
+    elMin = Math.min(elMin, 0.0);
+    elMax = Math.max(elMax, 10.0);
+  }
+  let azSpan = Math.max(0.5, azMax - azMin);
+  let elSpan = Math.max(0.5, elMax - elMin);
+  const azPad = Math.max(2.0, azSpan * 0.08);
+  const elPad = Math.max(2.0, elSpan * 0.10);
+  azMin -= azPad;
+  azMax += azPad;
+  elMin -= elPad;
+  elMax += elPad;
+  if (azMax - azMin < 10.0) {
+    const middle = 0.5 * (azMin + azMax);
+    azMin = middle - 5.0;
+    azMax = middle + 5.0;
+  }
+  if (elMax - elMin < 8.0) {
+    const middle = 0.5 * (elMin + elMax);
+    elMin = middle - 4.0;
+    elMax = middle + 4.0;
+  }
+  return { azMin, azMax, elMin, elMax };
+}
+
+/** Make the view aspect match the plot by *growing* the short axis.
+ *
+ * Used when a view is first fitted: growing cannot crop a track that was just
+ * measured. */
+function skyGrowAspect(view, aspect) {
+  const ratio = Math.max(1e-4, aspect);
+  const azSpan = Math.max(1e-4, view.azMax - view.azMin);
+  const elSpan = Math.max(1e-4, view.elMax - view.elMin);
+  if (azSpan / elSpan > ratio) {
+    const middle = 0.5 * (view.elMin + view.elMax);
+    const wanted = azSpan / ratio;
+    view.elMin = middle - 0.5 * wanted;
+    view.elMax = middle + 0.5 * wanted;
+  } else {
+    const middle = 0.5 * (view.azMin + view.azMax);
+    const wanted = elSpan * ratio;
+    view.azMin = middle - 0.5 * wanted;
+    view.azMax = middle + 0.5 * wanted;
+  }
+}
+
+/** Set the vertical span from the horizontal one, keeping the centre. */
+function skyFitAspectFromAz(view, aspect) {
+  const ratio = Math.max(1e-4, aspect);
+  const azSpan = Math.max(0.5, view.azMax - view.azMin);
+  const elSpan = Math.max(0.5, azSpan / ratio);
+  const middle = 0.5 * (view.elMin + view.elMax);
+  view.elMin = middle - 0.5 * elSpan;
+  view.elMax = middle + 0.5 * elSpan;
+}
+
+/** Set the horizontal span from the vertical one, keeping the centre. */
+function skyFitAspectFromEl(view, aspect) {
+  const ratio = Math.max(1e-4, aspect);
+  const elSpan = Math.max(0.5, view.elMax - view.elMin);
+  const azSpan = Math.max(0.5, elSpan * ratio);
+  const middle = 0.5 * (view.azMin + view.azMax);
+  view.azMin = middle - 0.5 * azSpan;
+  view.azMax = middle + 0.5 * azSpan;
+}
+
+function skyEnsureView(plot, data, options) {
+  let view = state.skyView;
+  const aspect = Math.max(0.1, plot.w / Math.max(1, plot.h));
+  if (!view) {
+    view = skyTargetView(data, options.closeup);
+    skyGrowAspect(view, aspect);
+    state.skyView = view;
+  } else if (Math.abs((view.azMax - view.azMin)
+                      / Math.max(1e-6, view.elMax - view.elMin) - aspect) > 1e-3) {
+    // A window resize changes the plot's shape, not the reader's choice of
+    // centre.  Grow the short axis rather than fitting from one of them: a
+    // fit would crop whichever track this resized view was framing.
+    skyGrowAspect(view, aspect);
+  }
+  return view;
+}
+
+function skyProjection(plot, view) {
+  const azSpan = Math.max(1e-6, view.azMax - view.azMin);
+  const elSpan = Math.max(1e-6, view.elMax - view.elMin);
+  return {
+    x: (az) => plot.x + (az - view.azMin) / azSpan * plot.w,
+    y: (el) => plot.y + (view.elMax - el) / elSpan * plot.h,
+    az: (px) => view.azMin + (px - plot.x) / Math.max(1, plot.w) * azSpan,
+    el: (py) => view.elMax - (py - plot.y) / Math.max(1, plot.h) * elSpan,
+  };
+}
+
+function niceSkyStep(span, target) {
+  const raw = Math.max(1e-6, span / Math.max(2, target));
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const scaled = raw / power;
+  const multiplier = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+  return multiplier * power;
+}
+
+function skyAzText(degrees) {
+  const normal = ((Math.round(degrees) % 360) + 360) % 360;
+  const words = { 0: '北', 90: '东', 180: '南', 270: '西' };
+  return words[normal] ? `${normal}° ${words[normal]}` : `${normal}°`;
+}
+
+function skyElText(degrees) {
+  return `${Math.round(degrees)}°`;
+}
+
+function skyTwilight(data) {
+  const sunEl = data && data.sun ? data.sun.elevation_deg : -18.0;
+  return skyClamp((sunEl + 18.0) / 18.0, 0.0, 1.0);
+}
+
+function skyBandColor(elevation, twilight) {
+  if (elevation < 0.0) return '#080a0f';
+  const high = skyClamp(elevation / 70.0, 0.0, 1.0);
+  const warm = skyClamp(twilight, 0.0, 1.0);
+  const red = Math.round((16 + 34 * warm) * (1 - high) + 7 * high);
+  const green = Math.round((20 + 18 * warm) * (1 - high) + 11 * high);
+  const blue = Math.round((32 + 12 * warm) * (1 - high) + 23 * high);
+  return `rgb(${red},${green},${blue})`;
+}
+
+/** A clock label in the page's own time zone. */
+function skyClockText(localMilliseconds) {
+  const date = new Date(localMilliseconds);
+  const hours = String(date.getUTCHours()).padStart(2, '0');
+  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function skyLocalText(iso, offsetHours, withDate) {
+  const stamp = Date.parse(iso);
+  if (!Number.isFinite(stamp)) return '—';
+  const date = new Date(stamp + (Number(offsetHours) || 0) * 3600000);
+  const clock = `${String(date.getUTCHours()).padStart(2, '0')}:`
+    + `${String(date.getUTCMinutes()).padStart(2, '0')}`;
+  if (!withDate) return clock;
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${month}-${day} ${clock}`;
+}
+
+function skyInterpolate(series, stamp) {
+  if (!series.length) return null;
+  if (stamp <= series[0].t) return series[0];
+  const last = series[series.length - 1];
+  if (stamp >= last.t) return last;
+  let low = 0;
+  let high = series.length - 1;
+  while (high - low > 1) {
+    const middle = (low + high) >> 1;
+    if (series[middle].t <= stamp) low = middle;
+    else high = middle;
+  }
+  const a = series[low];
+  const b = series[high];
+  const fraction = (stamp - a.t) / Math.max(1, b.t - a.t);
+  const mix = (left, right) => left + (right - left) * fraction;
+  return {
+    moonAz: mix(a.moonAz, b.moonAz),
+    moonEl: mix(a.moonEl, b.moonEl),
+    sunAz: mix(a.sunAz, b.sunAz),
+    sunEl: mix(a.sunEl, b.sunEl),
+  };
+}
+
+/** Times worth labelling, aligned to round local clock times. */
+function skyLabelItems(data, options, view, projection, plot) {
+  if (!options.labels) return [];
+  const series = state.skySeries && state.skySeries.length
+    ? state.skySeries : skySeries(data);
+  if (!series.length) return [];
+  const stepMilliseconds = Math.max(1, options.labelStep) * 60000;
+  const offset = (Number(data.tz_offset_hours) || 0) * 3600000;
+  const start = series[0].t;
+  const end = series[series.length - 1].t;
+  let moment = Math.ceil((start + offset) / stepMilliseconds) * stepMilliseconds - offset;
+  const raw = [];
+  for (; moment <= end + 1; moment += stepMilliseconds) {
+    const point = skyInterpolate(series, moment);
+    const x = projection.x(point.moonAz);
+    const y = projection.y(point.moonEl);
+    if (x < plot.x + 2 || x > plot.x + plot.w - 2
+        || y < plot.y + 2 || y > plot.y + plot.h - 2) continue;
+    raw.push({ x, y, text: skyClockText(moment + offset) });
+  }
+  // A five-minute interval across a long span is a wall of numbers; keep the
+  // requested interval when it fits and thin by a whole multiple when it does
+  // not.  The labels still tell the truth about the instant under them.
+  const stride = Math.max(1, Math.ceil(raw.length / 24));
+  return raw.filter((item, index) => index % stride === 0);
+}
+
+function skyBoxOverlap(a, b) {
+  const width = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const height = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  return width * height;
+}
+
+/** Place each label near its point, avoiding every box already placed. */
+function skyPlaceLabels(ctx, items, plot, obstacles) {
+  const boxes = (obstacles || []).slice();
+  const placed = [];
+  const offsets = [
+    [0, -14], [0, 15], [18, 0], [-18, 0],
+    [16, -13], [-16, -13], [16, 13], [-16, 13],
+    [0, -28], [0, 29], [34, 0], [-34, 0],
+    [0, -42], [0, 43], [50, 0], [-50, 0],
+  ];
+  for (const item of items) {
+    const width = ctx.measureText(item.text).width + 8;
+    const height = 15;
+    let best = null;
+    for (const [dx, dy] of offsets) {
+      const box = {
+        x: item.x + dx - width / 2,
+        y: item.y + dy - height / 2,
+        w: width,
+        h: height,
+      };
+      let outside = 0;
+      outside += Math.max(0, plot.x + 2 - box.x);
+      outside += Math.max(0, box.x + box.w - (plot.x + plot.w - 2));
+      outside += Math.max(0, plot.y + 2 - box.y);
+      outside += Math.max(0, box.y + box.h - (plot.y + plot.h - 2));
+      let score = outside * 1000 + Math.hypot(dx, dy) * 0.15;
+      for (const other of boxes) score += skyBoxOverlap(box, other);
+      if (!best || score < best.score) best = { box, score };
+      if (score < 0.5) break;
+    }
+    if (!best) continue;
+    boxes.push(best.box);
+    placed.push({ text: item.text, x: item.x, y: item.y, box: best.box });
+  }
+  return placed;
+}
+
+function skyPaintMoon(ctx, x, y, radius, fraction, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = '#151a23';
+  ctx.fill();
+  if (fraction > 1e-4) {
+    ctx.beginPath();
+    phaseShape(fraction, angle, radius, 30).forEach(([px, py], index) => {
+      if (index) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    });
+    ctx.closePath();
+    ctx.fillStyle = '#e8ecf5';
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(230,232,238,.38)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function skyRayLength(x, y, dx, dy, plot) {
+  let distance = Infinity;
+  if (dx > 1e-9) distance = Math.min(distance, (plot.x + plot.w - x) / dx);
+  if (dx < -1e-9) distance = Math.min(distance, (plot.x - x) / dx);
+  if (dy > 1e-9) distance = Math.min(distance, (plot.y + plot.h - y) / dy);
+  if (dy < -1e-9) distance = Math.min(distance, (plot.y - y) / dy);
+  return Math.max(0, distance);
+}
+
+function skyPaintEdgeHandles(ctx, plot, hovered) {
+  const edges = [
+    { name: 'left', x1: plot.x, y1: plot.y + plot.h / 2 - 13,
+      x2: plot.x, y2: plot.y + plot.h / 2 + 13 },
+    { name: 'right', x1: plot.x + plot.w, y1: plot.y + plot.h / 2 - 13,
+      x2: plot.x + plot.w, y2: plot.y + plot.h / 2 + 13 },
+    { name: 'top', x1: plot.x + plot.w / 2 - 13, y1: plot.y,
+      x2: plot.x + plot.w / 2 + 13, y2: plot.y },
+    { name: 'bottom', x1: plot.x + plot.w / 2 - 13, y1: plot.y + plot.h,
+      x2: plot.x + plot.w / 2 + 13, y2: plot.y + plot.h },
+  ];
+  for (const edge of edges) {
+    ctx.beginPath();
+    ctx.moveTo(edge.x1, edge.y1);
+    ctx.lineTo(edge.x2, edge.y2);
+    ctx.strokeStyle = hovered === edge.name
+      ? 'rgba(122,162,247,.95)' : 'rgba(122,162,247,.45)';
+    ctx.lineWidth = hovered === edge.name ? 3 : 2;
+    ctx.stroke();
+  }
+}
+
+/** Everything inside the canvas.  Returns the plot rectangle. */
+function paintSkyChart(ctx, area, data, view, options) {
+  const plot = skyPlotLayout(area);
+  const projection = skyProjection(plot, view);
+  const series = state.skySeries && state.skySeries.length
+    ? state.skySeries : skySeries(data);
+  const twilight = skyTwilight(data);
+  const closeup = options.closeup;
+
+  ctx.save();
+  ctx.fillStyle = '#07090d';
+  ctx.fillRect(area.x, area.y, area.w, area.h);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plot.x, plot.y, plot.w, plot.h);
+  ctx.clip();
+
+  // Sky above the horizon, ground below it.  The bands are drawn rather than a
+  // gradient because the page's own twilight colours are a ladder of a few
+  // stages, not a linear ramp.
+  const bands = 96;
+  for (let index = 0; index < bands; index += 1) {
+    const low = view.elMin + (view.elMax - view.elMin) * index / bands;
+    const high = view.elMin + (view.elMax - view.elMin) * (index + 1) / bands;
+    const top = projection.y(high);
+    const bottom = projection.y(low);
+    ctx.fillStyle = skyBandColor(0.5 * (low + high), twilight);
+    ctx.fillRect(plot.x, top, plot.w, Math.max(1, bottom - top + 0.6));
+  }
+  // A close-up deliberately has no horizon: its whole point is the Moon's own
+  // arc, and a ground line would claim a context the reader asked to drop.
+  if (!closeup) {
+    if (view.elMin < 0 && view.elMax > 0) {
+      const horizon = projection.y(0);
+      ctx.fillStyle = 'rgba(4,6,10,.88)';
+      ctx.fillRect(plot.x, horizon, plot.w, plot.y + plot.h - horizon);
+    }
+
+    // Twilight and horizon lines.
+    for (const level of [-18, -12, -6]) {
+      if (level <= view.elMin || level >= view.elMax) continue;
+      const y = projection.y(level);
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.strokeStyle = 'rgba(136,153,170,.22)';
+      ctx.lineWidth = 0.7;
+      ctx.setLineDash([2, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (view.elMin < 0 && view.elMax > 0) {
+      const y = projection.y(0);
+      ctx.beginPath();
+      ctx.moveTo(plot.x, y);
+      ctx.lineTo(plot.x + plot.w, y);
+      ctx.strokeStyle = 'rgba(150,165,185,.58)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(170,184,204,.68)';
+      ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('地平线', plot.x + 5, y - 3);
+    }
+  }
+
+  // Grid.
+  const azStep = niceSkyStep(view.azMax - view.azMin, Math.max(3, plot.w / 95));
+  const elStep = niceSkyStep(view.elMax - view.elMin, Math.max(3, plot.h / 58));
+  ctx.lineWidth = 0.6;
+  for (let az = Math.ceil(view.azMin / azStep) * azStep;
+       az <= view.azMax + 1e-9; az += azStep) {
+    const x = projection.x(az);
+    const normal = ((Math.round(az) % 360) + 360) % 360;
+    const cardinal = normal % 90 === 0;
+    ctx.strokeStyle = cardinal ? 'rgba(140,158,184,.26)' : 'rgba(120,134,156,.14)';
+    ctx.beginPath();
+    ctx.moveTo(x, plot.y);
+    ctx.lineTo(x, plot.y + plot.h);
+    ctx.stroke();
+  }
+  for (let el = Math.ceil(view.elMin / elStep) * elStep;
+       el <= view.elMax + 1e-9; el += elStep) {
+    const y = projection.y(el);
+    ctx.strokeStyle = Math.abs(el) < 1e-9
+      ? 'rgba(150,165,185,.32)' : 'rgba(120,134,156,.14)';
+    ctx.beginPath();
+    ctx.moveTo(plot.x, y);
+    ctx.lineTo(plot.x + plot.w, y);
+    ctx.stroke();
+  }
+
+  // Sun's track.  It is a dashed line because it is context, not the subject.
+  const sunRelevant = skySunRelevant(data, closeup);
+  if (sunRelevant && series.length > 1) {
+    ctx.beginPath();
+    series.forEach((sample, index) => {
+      const x = projection.x(sample.sunAz);
+      const y = projection.y(sample.sunEl);
+      if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(255,176,64,.72)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Moon's track: a wide, faint halo under a thin bright line.
+  if (series.length > 1) {
+    for (const pass of [{ width: 7, colour: 'rgba(223,228,238,.12)' },
+                        { width: 2, colour: '#dfe4ee' }]) {
+      ctx.beginPath();
+      series.forEach((sample, index) => {
+        const x = projection.x(sample.moonAz);
+        const y = projection.y(sample.moonEl);
+        if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = pass.colour;
+      ctx.lineWidth = pass.width;
+      ctx.stroke();
+    }
+  }
+
+  const moonPoint = {
+    x: projection.x(data.moon.azimuth_deg),
+    y: projection.y(data.moon.elevation_deg),
+  };
+  const sunPoint = {
+    x: projection.x(data.sun.azimuth_deg),
+    y: projection.y(data.sun.elevation_deg),
+  };
+  const elongation = Number((data.geometry || {}).elongation_deg) || 0;
+  const fraction = skyClamp(
+    (Number((data.geometry || {}).illumination_percent_topo) || 0) / 100, 0, 1);
+  const sunAngle = Math.atan2(sunPoint.x - moonPoint.x, -(sunPoint.y - moonPoint.y));
+
+  // The line between the two bodies: one line at the chart's own instant,
+  // labelled with the separation it measures.  It is deliberately the only
+  // one -- a line per tick would be a comb, not an annotation.
+  let elongationBox = null;
+  if (options.elongation) {
+    ctx.beginPath();
+    ctx.moveTo(moonPoint.x, moonPoint.y);
+    ctx.lineTo(sunPoint.x, sunPoint.y);
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = 'rgba(122,162,247,.62)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const middle = {
+      x: 0.5 * (moonPoint.x + sunPoint.x),
+      y: 0.5 * (moonPoint.y + sunPoint.y),
+    };
+    if (middle.x > plot.x + 4 && middle.x < plot.x + plot.w - 4
+        && middle.y > plot.y + 4 && middle.y < plot.y + plot.h - 4) {
+      const text = `距角 ${elongation.toFixed(1)}°`;
+      ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+      const width = ctx.measureText(text).width + 10;
+      const height = 15;
+      elongationBox = { x: middle.x - width / 2, y: middle.y - height / 2,
+                        w: width, h: height };
+      ctx.fillStyle = 'rgba(9,12,18,.74)';
+      ctx.fillRect(elongationBox.x, elongationBox.y, width, height);
+      ctx.fillStyle = 'rgba(160,187,240,.95)';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, middle.x, middle.y);
+    }
+  }
+
+  // Sun marker, when it is in the view; otherwise the direction arrow.
+  if (sunRelevant && sunPoint.x > plot.x - 12 && sunPoint.x < plot.x + plot.w + 12
+      && sunPoint.y > plot.y - 12 && sunPoint.y < plot.y + plot.h + 12) {
+    ctx.beginPath();
+    ctx.arc(sunPoint.x, sunPoint.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd166';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(sunPoint.x, sunPoint.y, 9, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,209,102,.30)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Moon marker: the phase is the one the sky actually shows, with the bright
+  // limb turned towards the Sun *on the chart*.
+  if (moonPoint.x > plot.x - 20 && moonPoint.x < plot.x + plot.w + 20
+      && moonPoint.y > plot.y - 20 && moonPoint.y < plot.y + plot.h + 20) {
+    skyPaintMoon(ctx, moonPoint.x, moonPoint.y, 7.5, fraction, sunAngle);
+  }
+
+  // In the close-up the Sun is reduced to a direction: an arrow from the Moon
+  // towards it, clipped at the frame, with the compass direction on its tip.
+  if (closeup) {
+    let dx = sunPoint.x - moonPoint.x;
+    let dy = sunPoint.y - moonPoint.y;
+    const length = Math.hypot(dx, dy);
+    if (length > 1) {
+      dx /= length;
+      dy /= length;
+      const reach = skyRayLength(moonPoint.x, moonPoint.y, dx, dy, plot);
+      const draw = Math.max(26, Math.min(82, reach - 10));
+      const startX = moonPoint.x + dx * 13;
+      const startY = moonPoint.y + dy * 13;
+      const endX = moonPoint.x + dx * draw;
+      const endY = moonPoint.y + dy * draw;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = 'rgba(255,176,64,.8)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Arrowhead.
+      const wing = 5;
+      const angle = Math.atan2(dy, dx);
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - wing * Math.cos(angle - 0.45),
+                 endY - wing * Math.sin(angle - 0.45));
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - wing * Math.cos(angle + 0.45),
+                 endY - wing * Math.sin(angle + 0.45));
+      ctx.strokeStyle = '#ffb040';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      const label = `太阳 ${skyAzText(data.sun.azimuth_deg)}`;
+      ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+      const width = ctx.measureText(label).width;
+      const textX = skyClamp(endX + dx * 7, plot.x + 3, plot.x + plot.w - width - 3);
+      const textY = skyClamp(endY + dy * 7, plot.y + 10, plot.y + plot.h - 4);
+      ctx.fillStyle = 'rgba(9,12,18,.68)';
+      ctx.fillRect(textX - 2, textY - 8, width + 4, 13);
+      ctx.fillStyle = '#ffc266';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, textX, textY);
+    }
+  }
+
+  ctx.restore();  // clip
+
+  // Axes: ticks outside the plot, grid inside it.
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillStyle = '#8b93a3';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let az = Math.ceil(view.azMin / azStep) * azStep;
+       az <= view.azMax + 1e-9; az += azStep) {
+    const x = projection.x(az);
+    ctx.fillText(skyAzText(az), x, plot.y + plot.h + 5);
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let el = Math.ceil(view.elMin / elStep) * elStep;
+       el <= view.elMax + 1e-9; el += elStep) {
+    const y = projection.y(el);
+    ctx.fillText(skyElText(el), plot.x - 7, y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText('方位角 (°)   0 = 北 · 90 = 东', plot.x + plot.w / 2,
+               plot.y + plot.h + SKY_MARGIN.bottom - 2);
+  ctx.save();
+  ctx.translate(plot.x - 42, plot.y + plot.h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('高度角 (°)', 0, 0);
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(150,165,185,.34)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  // Labels last, so their boxes sit above every line they describe.
+  const obstacles = [];
+  if (moonPoint.x > plot.x && moonPoint.x < plot.x + plot.w
+      && moonPoint.y > plot.y && moonPoint.y < plot.y + plot.h) {
+    obstacles.push({ x: moonPoint.x - 10, y: moonPoint.y - 10, w: 20, h: 20 });
+  }
+  if (sunRelevant && sunPoint.x > plot.x && sunPoint.x < plot.x + plot.w
+      && sunPoint.y > plot.y && sunPoint.y < plot.y + plot.h) {
+    obstacles.push({ x: sunPoint.x - 10, y: sunPoint.y - 10, w: 20, h: 20 });
+  }
+  if (elongationBox) obstacles.push(elongationBox);
+  obstacles.push({ x: plot.x + 3, y: plot.y + 3, w: 116, h: 22 });
+  const labelItems = skyLabelItems(data, options, view, projection, plot);
+  if (labelItems.length) {
+    ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
+    const placed = skyPlaceLabels(ctx, labelItems, plot, obstacles);
+    for (const label of placed) {
+      const box = label.box;
+      const nearestX = skyClamp(label.x, box.x, box.x + box.w);
+      const nearestY = skyClamp(label.y, box.y, box.y + box.h);
+      ctx.beginPath();
+      ctx.moveTo(label.x, label.y);
+      ctx.lineTo(nearestX, nearestY);
+      ctx.strokeStyle = 'rgba(136,153,170,.5)';
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(11,14,20,.78)';
+      ctx.fillRect(box.x, box.y, box.w, box.h);
+      ctx.fillStyle = '#aeb7c7';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label.text, box.x + box.w / 2, box.y + box.h / 2);
+    }
+  }
+
+  // The mode badge, and the edge grips that say the axes can be re-ranged.
+  const badge = closeup ? '轨迹特写' : '地平线视图';
+  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+  const badgeWidth = ctx.measureText(badge).width + 14;
+  ctx.fillStyle = 'rgba(122,162,247,.10)';
+  ctx.fillRect(plot.x + 4, plot.y + 4, badgeWidth, 17);
+  ctx.strokeStyle = 'rgba(122,162,247,.55)';
+  ctx.lineWidth = 0.8;
+  ctx.strokeRect(plot.x + 4, plot.y + 4, badgeWidth, 17);
+  ctx.fillStyle = '#9db8f5';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(badge, plot.x + 4 + badgeWidth / 2, plot.y + 12.5);
+
+  if (options.interactive !== false) {
+    skyPaintEdgeHandles(ctx, plot, state.skyHoverEdge);
+  }
+
+  ctx.restore();
+  return { plot, projection };
+}
+
+/** The canvas, at its on-screen size. */
+function drawSky() {
+  if (!state.sky) return;
+  const metrics = skyCanvasMetrics();
+  if (!metrics.canvas) return;
+  const { canvas, width, height, dpr } = metrics;
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  // Assigning width/height clears the backing store, so only do it when the
+  // layout really changed; a wheel tick or a hover redraw should not pay for
+  // reallocating a megapixel canvas.
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  // The CSS says `width: 100%; height: 100%`; writing the measured size back
+  // would pin the canvas at its old size and stop it following a window drag.
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const options = skyOptions();
+  const plot = skyPlotLayout({ x: 0, y: 0, w: width, h: height });
+  const view = skyEnsureView(plot, state.sky, options);
+  const painted = paintSkyChart(ctx, { x: 0, y: 0, w: width, h: height },
+                                state.sky, view, options);
+  state.skyLayout = painted.plot;
+  state.skyProjection = painted.projection;
+  $('sky-empty').hidden = true;
+  $('sky-mode').textContent = options.closeup ? '轨迹特写' : '地平线视图';
+  fillSkySummary(state.sky);
+}
+
+function fillSkySummary(data) {
+  if (!data) return;
+  const summary = $('sky-summary');
+  if (!summary) return;
+  const offset = Number(data.tz_offset_hours) || 0;
+  const local = skyLocalText(data.when_utc, offset, true);
+  const moon = data.moon || {};
+  const sun = data.sun || {};
+  const geometry = data.geometry || {};
+  const illum = Number(geometry.illumination_percent_topo
+                       || geometry.illumination_percent_geo || 0);
+  const elong = Number(geometry.elongation_deg) || 0;
+  summary.textContent = `${local} · 月亮 ${fmt(moon.elevation_deg, 1)}° / `
+    + `方位 ${fmt(moon.azimuth_deg, 1)}° · 照亮 ${illum.toFixed(1)}% · `
+    + `距角 ${elong.toFixed(1)}° · 太阳高度 ${fmt(sun.elevation_deg, 1)}°`;
+}
+
+/** Ask the server for the tracks the window is centred on. */
+async function refreshSky() {
+  const sequence = ++state.skySeq;
+  $('sky-empty').hidden = false;
+  $('sky-empty').textContent = '正在计算天空位置…';
+  const span = skyClamp(Number($('sky-span').value) || 6, 0.25, 24);
+  $('sky-span').value = String(span);
+  try {
+    const payload = await post('/api/sky', {
+      when: whenPayload(),
+      span_hours: span,
+      step_seconds: SKY_DEFAULT_STEP_SECONDS,
+    });
+    if (sequence !== state.skySeq) return;
+    state.sky = payload;
+    state.skySeries = skySeries(payload);
+    if (!state.skyCloseupTouched) {
+      $('sky-closeup').checked = skyAutoCloseup(payload);
+    }
+    state.skyView = null;
+    drawSky();
+  } catch (error) {
+    if (sequence !== state.skySeq) return;
+    state.sky = null;
+    $('sky-empty').hidden = false;
+    $('sky-empty').textContent = '天空位置计算失败：'
+      + String((error && error.message) || error);
+  }
+}
+
+function skyWindowBox() {
+  const viewportWidth = window.innerWidth || 1280;
+  const viewportHeight = window.innerHeight || 800;
+  return { viewportWidth, viewportHeight };
+}
+
+function applySkyWindow(rect) {
+  const box = skyWindowBox();
+  // On a phone the viewport is narrower than the desktop minimum: the minimum
+  // follows the viewport down rather than forcing the window off the screen.
+  const minWidth = Math.min(SKY_MIN_WIDTH, Math.max(300, box.viewportWidth - 16));
+  const minHeight = Math.min(SKY_MIN_HEIGHT, Math.max(260, box.viewportHeight - 16));
+  const width = skyClamp(rect.width, minWidth, Math.max(minWidth, box.viewportWidth - 16));
+  const height = skyClamp(rect.height, minHeight, Math.max(minHeight, box.viewportHeight - 16));
+  const left = skyClamp(rect.left, 8, Math.max(8, box.viewportWidth - width - 8));
+  const top = skyClamp(rect.top, 8, Math.max(8, box.viewportHeight - height - 8));
+  const windowNode = $('sky-window');
+  windowNode.style.left = left + 'px';
+  windowNode.style.top = top + 'px';
+  windowNode.style.width = width + 'px';
+  windowNode.style.height = height + 'px';
+  state.skyWindow = { left, top, width, height };
+}
+
+function positionSkyWindow(reset) {
+  const box = skyWindowBox();
+  if (reset || !state.skyWindow) {
+    const maxWidth = Math.min(1180, Math.max(300, box.viewportWidth - 16));
+    const maxHeight = Math.min(820, Math.max(260, box.viewportHeight - 16));
+    const width = Math.round(skyClamp(box.viewportWidth * 0.78,
+      Math.min(640, maxWidth), maxWidth));
+    const height = Math.round(skyClamp(box.viewportHeight * 0.78,
+      Math.min(480, maxHeight), maxHeight));
+    state.skyWindow = {
+      left: Math.round((box.viewportWidth - width) / 2),
+      top: Math.round((box.viewportHeight - height) / 2),
+      width,
+      height,
+    };
+  }
+  applySkyWindow(state.skyWindow);
+}
+
+function openSky() {
+  state.skyOpen = true;
+  $('sky-backdrop').hidden = false;
+  positionSkyWindow(false);
+  $('sky-close').focus();
+  refreshSky();
+}
+
+function closeSky() {
+  state.skyOpen = false;
+  state.skySeq += 1;
+  state.skyDrag = null;
+  state.skyHoverEdge = null;
+  $('sky-backdrop').hidden = true;
+  $('sky-open').focus();
+}
+
+/* ── mouse: window edges, plot edges, pan and zoom ─────────────────────── */
+
+function skyCanvasPoint(event) {
+  const canvas = $('sky-canvas');
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX || 0) - rect.left,
+    y: (event.clientY || 0) - rect.top,
+  };
+}
+
+function skyEdgeAt(x, y, plot) {
+  const limit = 7;
+  const distances = [
+    ['left', Math.abs(x - plot.x)],
+    ['right', Math.abs(x - (plot.x + plot.w))],
+    ['top', Math.abs(y - plot.y)],
+    ['bottom', Math.abs(y - (plot.y + plot.h))],
+  ];
+  let best = null;
+  for (const [name, distance] of distances) {
+    if (distance > limit) continue;
+    if (!best || distance < best.distance) best = { name, distance };
+  }
+  if (!best) return null;
+  if ((best.name === 'left' || best.name === 'right')
+      && (y < plot.y || y > plot.y + plot.h)) return null;
+  if ((best.name === 'top' || best.name === 'bottom')
+      && (x < plot.x || x > plot.x + plot.w)) return null;
+  return best.name;
+}
+
+function skyCanvasDown(event) {
+  if (!state.sky || !state.skyLayout) return;
+  event.preventDefault();
+  const point = skyCanvasPoint(event);
+  const plot = state.skyLayout;
+  const edge = skyEdgeAt(point.x, point.y, plot);
+  const inside = point.x >= plot.x && point.x <= plot.x + plot.w
+    && point.y >= plot.y && point.y <= plot.y + plot.h;
+  if (edge) {
+    state.skyDrag = { kind: 'edge', edge, start: point, view: { ...state.skyView } };
+  } else if (inside) {
+    state.skyDrag = { kind: 'pan', start: point, view: { ...state.skyView } };
+  }
+}
+
+function skyCanvasHover(event) {
+  if (!state.skyLayout || state.skyDrag) return;
+  const point = skyCanvasPoint(event);
+  const edge = skyEdgeAt(point.x, point.y, state.skyLayout);
+  if (edge !== state.skyHoverEdge) {
+    state.skyHoverEdge = edge;
+    drawSky();
+  }
+  const canvas = $('sky-canvas');
+  canvas.style.cursor = edge
+    ? (edge === 'left' || edge === 'right' ? 'ew-resize' : 'ns-resize')
+    : 'crosshair';
+}
+
+function skyDragPlot(event) {
+  const drag = state.skyDrag;
+  if (!drag || !state.skyLayout) return;
+  if (drag.kind !== 'edge' && drag.kind !== 'pan') return;
+  const point = skyCanvasPoint(event);
+  const plot = state.skyLayout;
+  const view = drag.view;
+  if (drag.kind === 'pan') {
+    const projection = skyProjection(plot, view);
+    const azAtStart = projection.az(drag.start.x);
+    const elAtStart = projection.el(drag.start.y);
+    const azNow = projection.az(point.x);
+    const elNow = projection.el(point.y);
+    const azShift = azAtStart - azNow;
+    const elShift = elAtStart - elNow;
+    state.skyView = {
+      azMin: view.azMin + azShift,
+      azMax: view.azMax + azShift,
+      elMin: view.elMin + elShift,
+      elMax: view.elMax + elShift,
+    };
+    drawSky();
+    return;
+  }
+  const azSpan = view.azMax - view.azMin;
+  const elSpan = view.elMax - view.elMin;
+  const updated = { ...view };
+  const dx = point.x - drag.start.x;
+  const dy = point.y - drag.start.y;
+  if (drag.edge === 'left') {
+    updated.azMin = view.azMin + dx / Math.max(1, plot.w) * azSpan;
+    updated.azMin = Math.min(updated.azMin, updated.azMax - 0.5);
+    skyFitAspectFromAz(updated, plot.w / Math.max(1, plot.h));
+  } else if (drag.edge === 'right') {
+    updated.azMax = view.azMax + dx / Math.max(1, plot.w) * azSpan;
+    updated.azMax = Math.max(updated.azMax, updated.azMin + 0.5);
+    skyFitAspectFromAz(updated, plot.w / Math.max(1, plot.h));
+  } else if (drag.edge === 'top') {
+    updated.elMax = view.elMax - dy / Math.max(1, plot.h) * elSpan;
+    updated.elMax = Math.max(updated.elMax, updated.elMin + 0.5);
+    skyFitAspectFromEl(updated, plot.w / Math.max(1, plot.h));
+  } else if (drag.edge === 'bottom') {
+    updated.elMin = view.elMin - dy / Math.max(1, plot.h) * elSpan;
+    updated.elMin = Math.min(updated.elMin, updated.elMax - 0.5);
+    skyFitAspectFromEl(updated, plot.w / Math.max(1, plot.h));
+  }
+  state.skyView = updated;
+  drawSky();
+}
+
+function skyCanvasWheel(event) {
+  if (!state.sky || !state.skyLayout) return;
+  event.preventDefault();
+  const point = skyCanvasPoint(event);
+  const plot = state.skyLayout;
+  if (point.x < plot.x || point.x > plot.x + plot.w
+      || point.y < plot.y || point.y > plot.y + plot.h) return;
+  const view = state.skyView;
+  const projection = skyProjection(plot, view);
+  const azAt = projection.az(point.x);
+  const elAt = projection.el(point.y);
+  const scale = event.deltaY > 0 ? 1.16 : 1 / 1.16;
+  const azSpan = (view.azMax - view.azMin) * scale;
+  const elSpan = (view.elMax - view.elMin) * scale;
+  // One factor for both axes, so a zoom never breaks the equal-scale promise;
+  // below half a degree there is nothing left to resolve, so stop there.
+  if (azSpan < 0.5 || elSpan < 0.5) return;
+  const fx = (point.x - plot.x) / Math.max(1, plot.w);
+  const fy = (point.y - plot.y) / Math.max(1, plot.h);
+  state.skyView = {
+    azMin: azAt - fx * azSpan,
+    azMax: azAt + (1 - fx) * azSpan,
+    elMin: elAt - (1 - fy) * elSpan,
+    elMax: elAt + fy * elSpan,
+  };
+  drawSky();
+}
+
+function skyCanvasDoubleClick() {
+  state.skyView = null;
+  drawSky();
+}
+
+/* ── save the whole window as a PNG ───────────────────────────────────── */
+
+function skyCanvasBlob(canvas, callback) {
+  if (typeof canvas.toBlob === 'function') {
+    canvas.toBlob((blob) => callback(blob), 'image/png');
+    return;
+  }
+  const url = canvas.toDataURL('image/png');
+  const comma = url.indexOf(',');
+  const binary = atob(url.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  callback(new Blob([bytes], { type: 'image/png' }));
+}
+
+/** The window's own chrome, plus the chart, at the requested resolution.
+ *
+ * The controls are drawn as a summary rather than as widgets: what a saved
+ * picture needs is the state they are in, not eight form fields. */
+function paintSkyExport(ctx, width, height, data, view, options) {
+  ctx.fillStyle = '#171a21';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#39404e';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+  const offset = Number(data.tz_offset_hours) || 0;
+  const local = skyLocalText(data.when_utc, offset, true);
+  const geometry = data.geometry || {};
+  const illum = Number(geometry.illumination_percent_topo
+                       || geometry.illumination_percent_geo || 0);
+  const elong = Number(geometry.elongation_deg) || 0;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#e6e8ee';
+  ctx.font = '600 15px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText('天空位置示意图', 16, 24);
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(`${local} · 照亮 ${illum.toFixed(1)}% · 距角 ${elong.toFixed(1)}°`, 16, 42);
+  // The close affordance is part of the window; the saved picture keeps it so
+  // the image reads as this window rather than as a loose chart.
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '16px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText('×', width - 16, 27);
+  ctx.textAlign = 'left';
+
+  const mode = options.closeup ? '轨迹特写' : '地平线视图';
+  ctx.fillStyle = '#7aa2f7';
+  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(`${mode} · 时间标注 ${options.labels ? `${options.labelStep} min` : '关'}`
+    + ` · 距角连线 ${options.elongation ? '开' : '关'}`, 16, 60);
+
+  const area = { x: 12, y: 72, w: width - 24, h: height - 72 - 34 };
+  const plot = skyPlotLayout(area);
+  const exportView = { ...view };
+  skyGrowAspect(exportView, plot.w / Math.max(1, plot.h));
+  paintSkyChart(ctx, area, data, exportView,
+                { ...options, view: exportView, interactive: false });
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(fillSkySummaryText(data), 16, height - 17, width * 0.62);
+  ctx.textAlign = 'right';
+  ctx.fillText('实线 月亮 · 虚线 太阳 · 蓝色虚线 距角',
+               width - 16, height - 17, width * 0.34);
+}
+
+function fillSkySummaryText(data) {
+  const offset = Number(data.tz_offset_hours) || 0;
+  const local = skyLocalText(data.when_utc, offset, true);
+  const moon = data.moon || {};
+  const sun = data.sun || {};
+  const geometry = data.geometry || {};
+  const illum = Number(geometry.illumination_percent_topo
+                       || geometry.illumination_percent_geo || 0);
+  const elong = Number(geometry.elongation_deg) || 0;
+  return `${local} · 月亮 ${fmt(moon.elevation_deg, 1)}° / 方位 `
+    + `${fmt(moon.azimuth_deg, 1)}° · 照亮 ${illum.toFixed(1)}% · `
+    + `距角 ${elong.toFixed(1)}° · 太阳高度 ${fmt(sun.elevation_deg, 1)}°`;
+}
+
+function saveSkyPng() {
+  if (!state.sky) {
+    $('sky-empty').hidden = false;
+    $('sky-empty').textContent = '还没有天空数据可保存。';
+    return;
+  }
+  const rect = $('sky-window').getBoundingClientRect();
+  const baseWidth = Math.max(480, rect.width || 960);
+  const baseHeight = Math.max(380, rect.height || 680);
+  const target = skyClamp(Number($('sky-save-px').value) || 2400, 320, 10000);
+  $('sky-save-px').value = String(Math.round(target));
+  const reference = $('sky-save-ref').value === 'short' ? 'short' : 'long';
+  const longSide = Math.max(baseWidth, baseHeight);
+  const shortSide = Math.min(baseWidth, baseHeight);
+  const scale = target / (reference === 'short' ? shortSide : longSide);
+  let width = Math.round(baseWidth * scale);
+  let height = Math.round(baseHeight * scale);
+  const ceiling = 10000;
+  if (Math.max(width, height) > ceiling) {
+    const shrink = ceiling / Math.max(width, height);
+    width = Math.round(width * shrink);
+    height = Math.round(height * shrink);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(320, width);
+  canvas.height = Math.max(240, height);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(canvas.width / baseWidth, canvas.height / baseHeight);
+  const options = skyOptions();
+  const plot = skyPlotLayout({ x: 0, y: 0, w: baseWidth, h: baseHeight });
+  const view = skyEnsureView(plot, state.sky, options);
+  paintSkyExport(ctx, baseWidth, baseHeight, state.sky, view, options);
+  const offset = Number(state.sky.tz_offset_hours) || 0;
+  const stamp = skyLocalText(state.sky.when_utc, offset, true).replace(/[: ]/g, '-');
+  const name = `moon-sky-${stamp}.png`;
+  skyCanvasBlob(canvas, (blob) => {
+    if (!blob) return;
+    downloadUrl(URL.createObjectURL(blob), name);
+    $('sky-summary').textContent = `已保存 ${canvas.width}×${canvas.height} px · ${name}`;
+  });
+}
+
+/* ── window resizing and dragging ──────────────────────────────────────── */
+
+function skyResizeStart(event, direction) {
+  event.preventDefault();
+  const box = state.skyWindow || { left: 0, top: 0, width: 800, height: 600 };
+  state.skyDrag = {
+    kind: 'resize',
+    direction,
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...box },
+  };
+}
+
+function skyHeadDown(event) {
+  const target = event.target || {};
+  if (String(target.tagName || '').toUpperCase() === 'BUTTON') return;
+  if (!state.skyWindow) return;
+  event.preventDefault();
+  state.skyDrag = {
+    kind: 'move',
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...state.skyWindow },
+  };
+}
+
+function skyPointerMove(event) {
+  const drag = state.skyDrag;
+  if (!drag) return;
+  if (drag.kind === 'edge' || drag.kind === 'pan') {
+    skyDragPlot(event);
+    return;
+  }
+  if (drag.kind === 'resize') {
+    const dx = (event.clientX || 0) - drag.startX;
+    const dy = (event.clientY || 0) - drag.startY;
+    const box = { ...drag.box };
+    if (drag.direction.includes('e')) box.width += dx;
+    if (drag.direction.includes('w')) { box.width -= dx; box.left += dx; }
+    if (drag.direction.includes('s')) box.height += dy;
+    if (drag.direction.includes('n')) { box.height -= dy; box.top += dy; }
+    const viewport = skyWindowBox();
+    if (box.width < SKY_MIN_WIDTH) {
+      if (drag.direction.includes('w')) box.left -= SKY_MIN_WIDTH - box.width;
+      box.width = SKY_MIN_WIDTH;
+    }
+    if (box.height < SKY_MIN_HEIGHT) {
+      if (drag.direction.includes('n')) box.top -= SKY_MIN_HEIGHT - box.height;
+      box.height = SKY_MIN_HEIGHT;
+    }
+    box.width = Math.min(box.width, viewport.viewportWidth - 8);
+    box.height = Math.min(box.height, viewport.viewportHeight - 8);
+    applySkyWindow(box);
+    drawSky();
+  } else if (drag.kind === 'move') {
+    const dx = (event.clientX || 0) - drag.startX;
+    const dy = (event.clientY || 0) - drag.startY;
+    applySkyWindow({
+      left: drag.box.left + dx,
+      top: drag.box.top + dy,
+      width: drag.box.width,
+      height: drag.box.height,
+    });
+  }
+}
+
+function skyPointerUp() {
+  state.skyDrag = null;
+}
+
 /** An adaptive scale bar in the top-right of the disk, when labels are on.
  *
  * Drawn in screen pixels rather than frame pixels: a ruler whose length changes
@@ -4635,6 +5941,7 @@ async function refreshDisk() {
     const payload = await post('/api/disk', {
       when,
       ...lightPayload(),
+      ...computePayload(),
       preview: {
         width: previewPixels(),
         samples: previewSamples(),
@@ -5056,7 +6363,9 @@ const SETTING_FIELDS = [
   'data-source',
   'earthshine-gain', 'earth-geometric-albedo', 'earth-samples',
   'earthshine-tint',
-  'out-px', 'out-ref', 'out-scale', 'out-kmpx', 'out-samples',
+  'out-px', 'out-ref', 'out-scale', 'out-kmpx', 'out-samples', 'parallel',
+  'sky-span', 'sky-label-step', 'sky-labels', 'sky-elongation', 'sky-closeup',
+  'sky-save-ref', 'sky-save-px',
   'seeing', 'seeing-num',
   'blur-strength', 'diffraction', 'sharpen-radius', 'sharpen-strength',
   'saturation', 'gain', 'offset', 'gamma',
@@ -5182,6 +6491,8 @@ function applySettings(values) {
     // written straight into the control would leave the number behind.
     if (element.type === 'range') element.dispatchEvent(new Event('input'));
   }
+  // A stored 轨迹特写 choice is the reader's, not the automatic heuristic's.
+  if (values['sky-closeup'] !== undefined) state.skyCloseupTouched = true;
   applySensorType();
   applyLock();
   updateLockHint();
@@ -5695,6 +7006,7 @@ async function renderRegion(width, height, samples, label) {
       atmosphere: atmospherePayload(),
       processing: processingPayload(),
       ...lightPayload(),
+      ...computePayload(),
       output: {
         width,
         height,
@@ -5942,6 +7254,19 @@ async function loadLimits() {
       if (payload.limits.animation_max_frames) {
         LIMITS.animation_max_frames = Number(payload.limits.animation_max_frames);
         updateAnimSpan();
+      }
+      if (payload.limits.cpu_count) {
+        LIMITS.cpu_count = Math.max(1, Number(payload.limits.cpu_count) || 1);
+        const parallel = $('parallel');
+        if (parallel) {
+          parallel.max = String(LIMITS.cpu_count);
+          const wanted = Number(parallel.value);
+          if (Number.isFinite(wanted) && wanted > LIMITS.cpu_count) {
+            parallel.value = String(LIMITS.cpu_count);
+          }
+          parallel.title = '渲染按横带分给多个线程；调小可以给主机留出余量，调大则更快。'
+            + `（本机 ${LIMITS.cpu_count} 核；留空表示全部使用）`;
+        }
       }
       if (payload.data_sources) {
         LIMITS.data_sources = payload.data_sources;
@@ -6528,6 +7853,7 @@ function animationRequest() {
     atmosphere: atmospherePayload(),
     processing: processingPayload(),
     ...lightPayload(),
+    ...computePayload(),
     // The animation's own earthshine switch and gain: an animation is the one
     // case where a run of frames wants less light than the still beside it.
     earthshine: {
@@ -8210,10 +9536,63 @@ function init() {
   for (const button of document.querySelectorAll('#train-tabs .tab')) {
     button.addEventListener('click', () => setTrainTab(button.dataset.train));
   }
+  // 天空位置示意图: the door, the window, and the controls inside it.
+  $('sky-open').addEventListener('click', openSky);
+  $('sky-close').addEventListener('click', closeSky);
+  $('sky-refresh').addEventListener('click', refreshSky);
+  $('sky-reset').addEventListener('click', () => {
+    state.skyView = null;
+    drawSky();
+  });
+  $('sky-span').addEventListener('change', refreshSky);
+  for (const id of ['sky-label-step', 'sky-labels', 'sky-elongation']) {
+    $(id).addEventListener('change', drawSky);
+  }
+  $('sky-closeup').addEventListener('change', () => {
+    state.skyCloseupTouched = true;
+    state.skyView = null;
+    drawSky();
+  });
+  $('sky-save').addEventListener('click', saveSkyPng);
+  $('sky-canvas').addEventListener('pointerdown', skyCanvasDown);
+  $('sky-canvas').addEventListener('pointermove', skyCanvasHover);
+  $('sky-canvas').addEventListener('pointerleave', () => {
+    state.skyHoverEdge = null;
+    drawSky();
+  });
+  $('sky-canvas').addEventListener('wheel', skyCanvasWheel, { passive: false });
+  $('sky-canvas').addEventListener('dblclick', skyCanvasDoubleClick);
+  $('sky-head').addEventListener('pointerdown', skyHeadDown);
+  for (const handle of document.querySelectorAll('.sky-resize')) {
+    handle.addEventListener('pointerdown', (event) => {
+      skyResizeStart(event, handle.dataset.skyResize || 'se');
+    });
+  }
+  document.addEventListener('pointermove', skyPointerMove);
+  document.addEventListener('pointerup', skyPointerUp);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.skyOpen) closeSky();
+  });
+  // 并行数 is a per-render ceiling, not a preference that needs a re-render
+  // by itself: the next render reads it.  Saying so is enough.
+  $('parallel').addEventListener('change', () => {
+    const value = num('parallel');
+    setStatus(value === null
+      ? '并行数：自动（全部核心），下一次渲染生效'
+      : `并行数：${Math.round(value)}，下一次渲染生效`);
+  });
+
   // A window resize is the one event that changes the height the disk has to
   // fill, so the square is measured again -- unless the reader has already
   // chosen a width by dragging the divider, in which case theirs stands.
-  window.addEventListener('resize', () => { fitAll(); fitDiskColumn(); });
+  window.addEventListener('resize', () => {
+    fitAll();
+    fitDiskColumn();
+    if (state.skyOpen) {
+      positionSkyWindow(false);
+      drawSky();
+    }
+  });
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(() => fitAll());
     for (const name of Object.keys(views)) {

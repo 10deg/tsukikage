@@ -998,6 +998,24 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
 .pick-row select { flex: 0 1 auto; min-width: 0; }
 .pick-row input { flex: 0 1 5.4em; min-width: 0; }
 
+/* 区域高清补片的「下载」：这是两个字，不是一段可以折行的说明。  It sits in a
+   flex row beside a menu that can be a whole product name long, and both used to
+   be allowed to shrink -- the menu to a sliver and the button until 下/载 stacked
+   vertically.  The button now keeps its own width (and its text on one line) and
+   the menu is the one that gives ground. */
+#patch-download {
+  flex: 0 0 auto;
+  min-width: 3.2em;
+  white-space: nowrap;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+#patch-product { flex: 1 1 auto; min-width: 0; }
+
+/* 并行数: a short integer, not a sentence.  It shares the 2-column grid with
+   每像素采样, so the field keeps a fixed width instead of stretching. */
+#parallel { width: 6em; text-align: right; }
+
 /* A number typed beside its slider, and the two mirror icons. */
 input.num-inline {
   flex: 0 0 4.6em;
@@ -1651,3 +1669,187 @@ button .en::before, button .en::after { content: ""; }
    status line below them was competing for the same column of space. */
 .col-left .time-nudge { margin-top: 3px; margin-bottom: 9px; }
 .col-left .time-row > label { margin-bottom: 9px; }
+
+/* ── 天空位置示意图 ──────────────────────────────────────────────────────
+   The button under the phase strip is the door; the window is a canvas with
+   its own chrome rather than a stack of form rows, because the axes, labels
+   and tracks are all geometry that has to stay in step with one another.  The
+   window is deliberately *not* full screen: it opens at about four fifths of
+   the viewport and every edge can be dragged. */
+.sky-launch {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-start;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.sky-launch button {
+  white-space: nowrap;
+  padding: 4px 12px;
+  font-size: 11px;
+}
+.sky-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(4, 6, 10, .58);
+}
+.sky-window {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  min-width: 520px;
+  min-height: 400px;
+  overflow: hidden;
+  border: 1px solid #39404e;
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, .62);
+}
+.sky-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px 7px 13px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  row-gap: 4px;
+  cursor: move;
+  user-select: none;
+}
+.sky-heading {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.sky-head-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sky-head-tools button { padding: 3px 8px; font-size: 10.5px; }
+.sky-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.sky-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 11px;
+}
+.sky-controls > label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  white-space: nowrap;
+}
+.sky-controls input[type="number"] {
+  width: 4.4em;
+  padding: 1px 4px;
+  text-align: right;
+}
+.sky-controls select { width: auto; }
+.sky-save {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.sky-save label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  white-space: nowrap;
+}
+.sky-save input[type="number"] { width: 5.2em; }
+.sky-save button { padding: 6px 10px; font-size: 11px; }
+.sky-plot {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--viewport);
+  overflow: hidden;
+}
+.sky-plot > canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+.sky-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-dim);
+  font-size: 12px;
+  background: rgba(7, 9, 13, .6);
+  pointer-events: none;
+}
+.sky-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--ink-dim);
+}
+.sky-foot #sky-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sky-hint {
+  margin-left: auto;
+  white-space: nowrap;
+  color: #6b7280;
+}
+/* Edge and corner grips.  They are transparent until hovered, so the window
+   border is the only thing seen at rest -- and every one of them is outside the
+   plot, so it cannot be confused with dragging an axis limit. */
+.sky-resize { position: absolute; z-index: 6; }
+.sky-resize:hover { background: rgba(122, 162, 247, .22); }
+.sky-resize[data-sky-resize="n"],
+.sky-resize[data-sky-resize="s"] { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.sky-resize[data-sky-resize="e"],
+.sky-resize[data-sky-resize="w"] { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+.sky-resize[data-sky-resize="n"] { top: 0; }
+.sky-resize[data-sky-resize="s"] { bottom: 0; }
+.sky-resize[data-sky-resize="e"] { right: 0; }
+.sky-resize[data-sky-resize="w"] { left: 0; }
+.sky-resize[data-sky-resize="ne"] { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.sky-resize[data-sky-resize="nw"] { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.sky-resize[data-sky-resize="se"] { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.sky-resize[data-sky-resize="sw"] { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+
+@media (max-width: 640px) {
+  .sky-window { min-width: 0; min-height: 0; }
+  .sky-controls { gap: 4px 8px; }
+  .sky-save { margin-left: 0; }
+}
+
+.sky-controls .unit, .sky-save .unit { color: var(--ink-dim); }

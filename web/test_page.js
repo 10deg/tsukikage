@@ -39,7 +39,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'lockedDiskPlan',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
-  'litCentreFromPixels'];
+  'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
+  'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
+  'skyLabelItems', 'saveSkyPng'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -420,7 +422,7 @@ function respond(url, body) {
   if (url === '/api/health') {
     return { ok: true, limits: { preview_px: 5000, output_px: 8192, disk_px: 10000,
                                  min_px: 64, terrain_km_per_px: 0.11845058759433393,
-                                 label_outline_px: 9 },
+                                 label_outline_px: 9, cpu_count: 8 },
              data_sources: SOURCES };
   }
   if (url === '/api/source') {
@@ -486,6 +488,40 @@ function respond(url, body) {
                          geo_distance_km: 384400, topo_distance_km: 384300,
                          elongation_deg: 89.4, elevation_deg: 57.08, azimuth_deg: 180.3 } },
     } };
+  }
+  if (url === '/api/sky') {
+    /* A high Moon far from a Sun already below the horizon: the exact case the
+       window's automatic close-up exists for.  The tracks are a plain parabola,
+       which is all the drawing code needs to be driven through every branch. */
+    const start = Date.parse('2026-05-25T06:30:00Z');
+    const samples = [];
+    for (let index = 0; index <= 48; index += 1) {
+      const t = start + index * 10 * 60 * 1000;
+      const u = index / 48;
+      samples.push({
+        when_utc: new Date(t).toISOString(),
+        moon_azimuth_deg: 96 + 74 * u,
+        moon_elevation_deg: 46 + 14 * Math.sin(Math.PI * u),
+        sun_azimuth_deg: 300 + 26 * u,
+        sun_elevation_deg: -24 - 8 * u,
+      });
+    }
+    return {
+      when_utc: '2026-05-25T07:30:00+00:00',
+      site: { lat: 30, lon: 120, name: 'observer' },
+      tz_offset_hours: 8,
+      span_hours: Number(body.span_hours) || 6,
+      step_seconds: 120,
+      samples,
+      moon: { azimuth_deg: 133, elevation_deg: 60, range_km: 384400 },
+      sun: { azimuth_deg: 313, elevation_deg: -28, range_km: 151000000 },
+      geometry: {
+        elongation_deg: 120.0, illumination_percent_geo: 88.0,
+        illumination_percent_topo: 87.8, phase_angle_geo_deg: 35.0,
+        moon_age_days: 12.1, angular_diameter_arcsec: 1800,
+        crescent_width_arcsec: 1580, bright_limb_angle_deg: 300,
+      },
+    };
   }
   if (url === '/api/annotations') return planFor(body);
   if (url === '/api/region') {
@@ -649,6 +685,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fetchCalls.some((c) => c.url === '/api/settings/list'));
   check('the geometry from /api/disk landed in the state',
     T.state.geometry && T.state.geometry.angular_diameter_deg > 0.5);
+  check('the render request carries the 并行数 ceiling',
+    fetchCalls.filter((call) => call.url === '/api/disk').pop().body.parallel === 4,
+    JSON.stringify(fetchCalls.filter((call) => call.url === '/api/disk').pop().body.parallel));
+  check('并行数 explains itself on hover rather than in a visible hint',
+    /渲染按横带分给多个线程/.test(document.getElementById('parallel').title) &&
+    /8 核/.test(document.getElementById('parallel').title) &&
+    ![...document.querySelectorAll('p.hint')].some(
+      (p) => p.textContent.includes('渲染按横带')));
   check('the preview canvas took the rendered size',
     document.getElementById('disk').width === 1200);
   check('the class switches were built from the class list',
@@ -2691,6 +2735,128 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       layers().length === before + 1, String(layers().length));
     fire('phase-name', 'click');
     check('so it can snow again', layers().length === before + 2);
+  }
+
+  console.log('');
+  console.log('the sky position window');
+  {
+    const canvas = document.getElementById('sky-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.drawn.texts.length = 0;
+    fire('sky-open', 'click');
+    await tick();
+    await tick();
+    const calls = fetchCalls.filter((call) => call.url === '/api/sky');
+    check('the button asks for the tracks', calls.length === 1,
+      String(calls.length));
+    check('the request is centred on the page instant',
+      !!calls[0] && calls[0].body.when.observer.lat === Number(document.getElementById('lat').value)
+      && calls[0].body.span_hours === 6,
+      calls[0] ? JSON.stringify(calls[0].body) : 'no call');
+    check('the samples land in the state',
+      !!T.state.sky && T.state.sky.samples.length === 49);
+    check('the floating window opens', document.getElementById('sky-backdrop').hidden === false);
+    check('a high Moon far from the Sun is a close-up by itself',
+      document.getElementById('sky-closeup').checked === true);
+    check('and the badge says so', document.getElementById('sky-mode').textContent === '轨迹特写');
+    const view = T.state.skyView;
+    const layout = T.state.skyLayout;
+    check('the chart keeps the same scale in both axes',
+      !!view && !!layout
+      && Math.abs((view.azMax - view.azMin) / (view.elMax - view.elMin)
+                   - layout.w / layout.h) < 1e-6,
+      view ? JSON.stringify({ view, layout }) : 'no view');
+    check('the plot edges are hit targets',
+      T.skyEdgeAt(layout.x + 2, layout.y + layout.h / 2, layout) === 'left'
+      && T.skyEdgeAt(layout.x + layout.w - 2, layout.y + layout.h / 2, layout) === 'right'
+      && T.skyEdgeAt(layout.x + layout.w / 2, layout.y + 2, layout) === 'top');
+    check('time labels are on the canvas',
+      ctx.drawn.texts.some((text) => /^\d\d:\d\d$/.test(text.text)));
+
+    // Labels are a switch, and the switch has to reach the paint.
+    ctx.drawn.texts.length = 0;
+    set('sky-labels', false);
+    fire('sky-labels', 'change');
+    check('turning labels off removes the clock text',
+      !ctx.drawn.texts.some((text) => /^\d\d:\d\d$/.test(text.text)));
+    set('sky-labels', true);
+    fire('sky-labels', 'change');
+
+    // So is the elongation line.
+    ctx.drawn.texts.length = 0;
+    set('sky-elongation', false);
+    fire('sky-elongation', 'change');
+    check('turning the elongation line off removes its label',
+      !ctx.drawn.texts.some((text) => text.text.includes('距角')));
+    set('sky-elongation', true);
+    fire('sky-elongation', 'change');
+
+    // The close-up is a checked choice, not a command: switching it off brings
+    // the horizon back for the same samples.
+    set('sky-closeup', false);
+    fire('sky-closeup', 'change');
+    check('switching the close-up off restores the horizon view',
+      document.getElementById('sky-mode').textContent === '地平线视图'
+      && ctx.drawn.texts.some((text) => text.text === '地平线'),
+      document.getElementById('sky-mode').textContent);
+
+    T.saveSkyPng();
+    check('the whole window can be saved as a PNG',
+      document.getElementById('sky-summary').textContent.includes('已保存'),
+      document.getElementById('sky-summary').textContent);
+
+    fire('sky-close', 'click');
+    check('the close button hides the window',
+      document.getElementById('sky-backdrop').hidden === true);
+  }
+
+  console.log('');
+  console.log('the sky chart keeps its geometry honest');
+  {
+    const high = {
+      samples: [{ moon_elevation_deg: 50 }, { moon_elevation_deg: 60 }],
+      geometry: { elongation_deg: 120 },
+      moon: { azimuth_deg: 100, elevation_deg: 60 },
+      sun: { azimuth_deg: 300, elevation_deg: -20 },
+    };
+    check('a high Moon far from the Sun is the close-up case',
+      T.skyAutoCloseup(high) === true);
+    check('a low Moon is not',
+      T.skyAutoCloseup({ ...high, moon: { azimuth_deg: 100, elevation_deg: 5 },
+        samples: [{ moon_elevation_deg: 5 }, { moon_elevation_deg: 12 }] }) === false);
+
+    const grown = { azMin: 0, azMax: 100, elMin: 0, elMax: 20 };
+    T.skyGrowAspect(grown, 2);
+    check('growing to an aspect ratio keeps both axes equal',
+      Math.abs((grown.azMax - grown.azMin) / (grown.elMax - grown.elMin) - 2) < 1e-9,
+      JSON.stringify(grown));
+    const fitted = { azMin: 0, azMax: 100, elMin: 0, elMax: 20 };
+    T.skyFitAspectFromAz(fitted, 2);
+    check('fitting from an azimuth range does too',
+      Math.abs((fitted.azMax - fitted.azMin) / (fitted.elMax - fitted.elMin) - 2) < 1e-9,
+      JSON.stringify(fitted));
+
+    const labelCtx = document.createElement('canvas').getContext('2d');
+    labelCtx.font = '11px sans-serif';
+    const items = [
+      { x: 100, y: 100, text: '12:00' },
+      { x: 104, y: 102, text: '12:10' },
+      { x: 108, y: 98, text: '12:20' },
+    ];
+    const placed = T.skyPlaceLabels(labelCtx, items,
+      { x: 0, y: 0, w: 200, h: 200 }, []);
+    let overlaps = false;
+    for (let i = 0; i < placed.length; i += 1) {
+      for (let j = i + 1; j < placed.length; j += 1) {
+        const a = placed[i].box;
+        const b = placed[j].box;
+        const width = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        const height = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        if (width > 0 && height > 0) overlaps = true;
+      }
+    }
+    check('labels that start on top of one another are pushed apart',
+      placed.length === 3 && !overlaps, JSON.stringify(placed));
   }
 
   console.log('');

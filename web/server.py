@@ -28,6 +28,7 @@ import io
 import itertools
 import json
 import math
+import os
 import re
 import sys
 import tempfile
@@ -50,6 +51,7 @@ from moonlib_s.annotations import CLASS_LABELS, FEATURE_CLASSES, feature_class  
 from moonlib_s.annotations import (  # noqa: E402
     disk_frame, plan_annotations, region_frame,
 )
+from moonlib_s.crescent import crescent_geometry  # noqa: E402
 from moonlib_s.labelpaint import find_label_font, paint_annotation_plan  # noqa: E402
 from moonlib_s.models import MoonRenderSettings  # noqa: E402
 
@@ -257,6 +259,23 @@ def _sun_samples(bag: Any) -> int:
         return max(1, min(32, int((bag or {}).get("sun_samples") or 1)))
     except (TypeError, ValueError):
         return 1
+
+
+def _parallel(value: Any) -> int:
+    """How many CPU workers one render may use; ``0`` means "let the library".
+
+    The page's 并行数 is a ceiling on *this* render rather than a process-wide
+    setting: two requests must not fight over ``MOONLIB_BAND_WORKERS``.  A
+    value above the machine's own count is clamped there, because spawning
+    more threads than cores only adds context switches.
+    """
+    try:
+        wanted = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    if wanted <= 0:
+        return 0
+    return max(1, min(wanted, os.cpu_count() or 1))
 
 
 def _finite(value: Any, default: float) -> float:
@@ -765,9 +784,97 @@ class MoonService:
             # The animation's frame ceiling, so the page can say "this will be
             # refused" before the reader spends a press finding out.
             "animation_max_frames": ANIMATION_MAX_FRAMES,
+            # The page's 并行数 field must not promise more threads than the
+            # host can run, and the renderer clamps to the same number.
+            "cpu_count": os.cpu_count() or 1,
             # The page prints this in its header, so "which build is this?" has
             # an answer without opening a terminal.
             "version": moonlib_s.__version__,
+        }
+
+    # -- sky chart ------------------------------------------------------
+    def sky(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Moon and Sun tracks in azimuth/elevation for the sky window.
+
+        The page draws the chart itself, so this returns samples rather than a
+        picture: it is the same ``az_el`` the library's matplotlib figure uses,
+        but every point can then be labelled, connected and re-ranged by the
+        reader without asking the server again.
+
+        The window is centred on the page's own instant and is *symmetric* --
+        ``span_hours`` is the half-width.  Samples are returned in UTC because
+        the page already owns the offset it displays them in.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        span = _f(request, "span_hours", 4.0)
+        if not 0.25 <= span <= 24.0:
+            raise moonlib_s.MoonlibError(
+                f"天空图的时间跨度必须在 ±0.25–±24 小时之间（收到 ±{span:g}）。"
+            )
+        step = _f(request, "step_seconds", 120.0)
+        if not 10.0 <= step <= 3600.0:
+            raise moonlib_s.MoonlibError(
+                f"天空图的采样间隔必须在 10–3600 秒之间（收到 {step:g}）。"
+            )
+        count = int(round(2.0 * span * 3600.0 / step)) + 1
+        if count > 4000:
+            raise moonlib_s.MoonlibError(
+                "天空图的采样点太多（"
+                f"{count} 个）；请加大采样间隔或缩短时间跨度。"
+            )
+
+        anchor = when.get("at") or None
+        anchor_utc = moonlib_s.as_utc(anchor) if anchor else moonlib_s.utc_now()
+        anchor_et = moonlib_s.to_et(anchor_utc)
+        geometry = crescent_geometry(anchor_et, site)
+        start_et = anchor_et - span * 3600.0
+        samples = []
+        for index in range(count):
+            et = start_et + index * step
+            moon = moonlib_s.az_el("MOON", et, site)
+            sun = moonlib_s.az_el("SUN", et, site)
+            samples.append({
+                "when_utc": moonlib_s.to_utc(et).isoformat(),
+                "moon_azimuth_deg": float(moon.azimuth_deg),
+                "moon_elevation_deg": float(moon.elevation_deg),
+                "sun_azimuth_deg": float(sun.azimuth_deg),
+                "sun_elevation_deg": float(sun.elevation_deg),
+            })
+
+        moon_at = moonlib_s.az_el("MOON", anchor_et, site)
+        sun_at = moonlib_s.az_el("SUN", anchor_et, site)
+        return {
+            "when_utc": anchor_utc.isoformat(),
+            "site": site.as_dict(),
+            "tz_offset_hours": _tz_offset(request),
+            "span_hours": float(span),
+            "step_seconds": float(step),
+            "samples": samples,
+            "moon": {
+                "azimuth_deg": float(moon_at.azimuth_deg),
+                "elevation_deg": float(moon_at.elevation_deg),
+                "range_km": float(moon_at.range_km),
+            },
+            "sun": {
+                "azimuth_deg": float(sun_at.azimuth_deg),
+                "elevation_deg": float(sun_at.elevation_deg),
+                "range_km": float(sun_at.range_km),
+            },
+            "geometry": {
+                "elongation_deg": float(geometry.elongation_deg),
+                "illumination_percent_geo": float(
+                    geometry.illumination_percent_geo
+                ),
+                "illumination_percent_topo": float(
+                    geometry.illumination_percent_topo
+                ),
+                "phase_angle_geo_deg": float(geometry.phase_angle_geo_deg),
+                "moon_age_days": float(geometry.moon_age_days),
+                "angular_diameter_arcsec": float(geometry.angular_diameter_arcsec),
+                "crescent_width_arcsec": float(geometry.crescent_width_arcsec),
+                "bright_limb_angle_deg": float(geometry.bright_limb_angle_deg),
+            },
         }
 
     # -- full disk ------------------------------------------------------
@@ -869,6 +976,7 @@ class MoonService:
             height=int(width),
             samples_per_pixel=int(samples),
             shadow_steps=int(shadow_steps),
+            band_workers=_parallel(request.get("parallel")),
             photometric_model=_optical_model(
                 _light_option(request, "preview", "photometric_model")
             ),
@@ -982,6 +1090,7 @@ class MoonService:
             height=height,
             samples_per_pixel=int(_f(output, "samples", 2)),
             shadow_steps=int(_f(output, "shadow_steps", 64)),
+            band_workers=_parallel(request.get("parallel")),
             photometric_model=_optical_model(
                 _light_option(request, "output", "photometric_model")
             ),
@@ -1381,6 +1490,7 @@ class MoonService:
             height=height,
             samples_per_pixel=int(_f(output, "samples", 1)),
             shadow_steps=int(_f(output, "shadow_steps", 48)),
+            band_workers=_parallel(request.get("parallel")),
             photometric_model=_optical_model(
                 _light_option(request, "output", "photometric_model")
             ),
@@ -2564,6 +2674,10 @@ class Handler(BaseHTTPRequestHandler):
                      "image": _data_url(encode_png(image)),
                      "image_raw": _data_url(encode_png(raw))},
                 )
+            if path == "/api/sky":
+                # Samples, not a picture: the window draws, re-ranges and
+                # labels the same tracks without another round trip.
+                return self._json(200, self.service.sky(request))
             if path == "/api/cancel":
                 # 终止: the page stops waiting *and* says so.  The render polls
                 # this between bands, which is the difference between a button
