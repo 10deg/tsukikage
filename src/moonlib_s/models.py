@@ -1326,16 +1326,15 @@ class MoonRenderSettings:
     pixel has to darken part of a pixel, not all or none of it.
     """
     shadow_steps: int = 48
-    """Soft floor on the number of samples along a shadow ray.
+    """Number of samples along a shadow ray.
 
-    The march spreads its samples over the distance the Sun can actually
-    illuminate (the relief-limited reach, never more than ``shadow_range_km``)
-    in roughly this many geometric steps, then caps each step by the height it
-    may rise.  A larger value therefore samples more densely; a small one is
-    still bounded by that rise cap and by the renderer's own sample ceiling.
+    Samples grow geometrically from one frame pixel to ``shadow_range_km``, so
+    the near field keeps pixel-scale resolution while a 200 km graze is still
+    covered in a few dozen samples.  Each sample reads the pyramid level that
+    matches the spacing to the next sample.
     """
     shadow_range_km: float = 220.0
-    """Upper bound on how far a shadow caster is searched for along the sun ray."""
+    """How far a shadow caster is searched for along the sun ray."""
     shadow_skip_elevation_deg: float = 30.0
     """Sun elevations above the local horizontal skip the shadow march."""
     sun_samples: int = 1

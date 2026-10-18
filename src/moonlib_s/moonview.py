@@ -215,20 +215,9 @@ _TINY = 1e-12
 #: shadow by only a kilometre or so.
 _SHADOW_BIAS_KM = 1.5e-3
 
-#: Tallest relief the moon offers, above the reference sphere: a shadow cannot
-#: reach further than this allows at a given sun elevation.
-_SHADOW_RELIEF_KM = 9.0
-#: How much a shadow ray may rise between two samples, as a floor (metres of
-#: height, i.e. metres of boundary quantisation divided by tan(elevation)) and
-#: as a fraction of the frame's own pixel size.
-_SHADOW_MIN_RISE_KM = 0.040
-_SHADOW_RISE_PER_PIXEL = 0.5
-#: ...and a ceiling, so a coarse frame cannot pick a step so long that a whole
-#: hill falls between two samples (2.4 km pixels at a grazing sun is the case:
-#: half a pixel there is a kilometre of height, and nothing is resolved).
-_SHADOW_MAX_RISE_KM = 0.150
-#: Hard ceiling on samples per ray, so a pathological elevation cannot turn one
-#: frame into an hour of marching.
+#: Hard ceiling on samples per ray, so a pathological ``shadow_steps`` (or a
+#: request from an old settings file) cannot turn one frame into an hour of
+#: marching.
 _MAX_SHADOW_SAMPLES = 512
 
 #: Rays traced per band.  This, not the frame size, is what bounds peak memory:
@@ -1291,53 +1280,18 @@ def _occlusion(
 
     here = points[subset]
     along = directions if directions.ndim == 1 else directions[subset]
-    # The shallowest ray decides the schedule: the rays are marched together, so
-    # a schedule that is dense enough for the mean and not for the minimum would
-    # quantise exactly the grazing shadows this exists to resolve.
-    if sin_elevation is not None:
-        sin_min = float(np.clip(np.min(np.abs(np.asarray(sin_elevation)[subset])),
-                                1e-4, 1.0))
-    else:  # pragma: no cover - every caller passes it
-        sin_min = 1.0
-
-    scale = float(np.clip(pixel_km, 1e-3, 0.4 * max_range_km))
-    # A shadow can only reach as far as the deepest relief allows: no terrain is
-    # taller than this above the sphere it stands on, so marching further only
-    # spends samples on empty space.  At a grazing sun this is the whole range;
-    # at a high one it is a few kilometres.
-    reach = float(min(max_range_km, _SHADOW_RELIEF_KM / max(sin_min, 1e-4)))
-    reach = max(reach, 2.0 * scale)
-    # How much a ray may *rise* between two samples.  The shadow boundary is
-    # quantised to the step length, which is `rise / sin(e)` along the ground --
-    # so this is the knob that decides whether a grazing shadow edge is a smooth
-    # curve or a staircase of kilometre-long facets.  Tying it to the frame's own
-    # pixel keeps a whole-disk frame from paying for close-up precision.
-    rise = min(max(_SHADOW_MIN_RISE_KM, _SHADOW_RISE_PER_PIXEL * scale),
-               _SHADOW_MAX_RISE_KM)
-    dt_cap = max(scale, rise / max(sin_min, 1e-4))
-    # A denser request (`steps`) is honoured rather than ignored.
-    if steps >= 2:
-        dt_cap = min(dt_cap, reach / float(steps - 1))
-
-    # Spread the samples over *reach* rather than over the full ``max_range``:
-    # the old fixed 1.30 growth spent the first dozen samples crawling out of
-    # the near field and then took kilometre-wide strides through the middle
-    # distance, which is where a low Sun casts most of the shadows a reader
-    # actually sees.  Sizing the growth from the reach the Sun allows restores
-    # the older, denser mid-field march while keeping the rise-limited far
-    # field.  ``dt_cap`` still decides the largest step any ray may take.
-    growth = (reach / scale) ** (1.0 / float(steps - 1))
-    distances: List[float] = []
-    t = scale
-    while t < reach and len(distances) < _MAX_SHADOW_SAMPLES:
-        distances.append(t)
-        t += max(min(t * (growth - 1.0), dt_cap), scale * 0.25)
-    if distances and len(distances) < _MAX_SHADOW_SAMPLES and distances[-1] < reach:
-        # A tiny ``steps`` (2 or 3) makes the growth so large that the loop can
-        # stop one stride short of the reach it was sized for.  Keep the end
-        # sample: the old fixed-count march always included the range limit,
-        # and without it a two-step request sampled only the near field.
-        distances.append(reach)
+    del sin_elevation  # kept in the signature for every existing caller
+    # The geometric schedule of the versions before 1.3.0.  A rise-limited
+    # schedule was tried in 1.3.0 and again in 1.3.2: it made the far field of
+    # a grazing shadow smoother, but it also blunted the tips of long shadows
+    # (a 4.5 deg Sun at Sinus Iridum was enough to see it), and real photographs
+    # kept agreeing with the older march.  Keep the old spacing; the polygon
+    # bug was in the *level* choice, not in the step schedule, and that is
+    # fixed below.
+    first = float(np.clip(pixel_km, 1e-3, 0.4 * max_range_km))
+    sample_count = max(2, min(int(steps), _MAX_SHADOW_SAMPLES))
+    growth = (max_range_km / first) ** (1.0 / float(sample_count - 1))
+    distances = [first * growth ** step for step in range(sample_count)]
     reference = MOON_REFERENCE_RADIUS_KM
     # The pyramid level has to match the *distance between samples* -- the
     # scale at which the ray actually queries the terrain -- not the distance
@@ -1353,9 +1307,9 @@ def _occlusion(
         elif index:
             spacing = distance - distances[index - 1]
         else:
-            spacing = scale
+            spacing = first
         levels.append(
-            terrain.dem.level_for_ground_scale(max(spacing, scale))
+            terrain.dem.level_for_ground_scale(max(spacing, first))
         )
     ceiling = _dem_ceiling_km(terrain.dem)
     remaining = np.ones(subset.size, dtype=bool)
