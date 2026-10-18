@@ -33,11 +33,11 @@ is why the umbra radius carries the conventional 2% allowance.
     Ukert, a few hours after first quarter, and the bright L-shaped ridge west
     of Zach G.  The X/V anchor is the eastern arm of the X near Blanchinus B
     (lon 1.8°, lat -25°); the L anchor is the stated Zach G west point
-    (lon 0°, lat -58.54°).  A window is the interval in which the Sun stands
-    -0.5°–1.5° above that point, with 0.5° as the best moment; X/V keeps the
-    colongitude gate at 358°.  L is paired with the next X/V of the same
-    sunrise train, and an overlap is written into the X/V row as
-    "后半段可见 L".
+    (lon -0.5°, lat -58.54°).  X/V uses the Sun's -0.5°–1.5° band with 0.5°
+    as the best moment and keeps the colongitude gate at 358°.  L has its own
+    band: -0.75°–0.20°, best -0.30°, fitted to the reported one-hour/three-hour/
+    five-hour offsets.  L is paired with the X/V of the same sunrise train,
+    and an overlap is written into the X/V row as "后半段可见 L".
 """
 
 from __future__ import annotations
@@ -101,15 +101,25 @@ XVL_ANCHOR_LAT_DEG = -25.0
 XVL_COLONGITUDE_DEG = 358.0
 XVL_COLONGITUDE_TOLERANCE_DEG = 2.0
 
-#: The Sun's altitude at the anchor during an X/V/L window.  The old upper
-#: edge was 1.5° and the window began at the horizon; the observing notes put
-#: the letters' best contrast near 0.5°, so the window is now the whole
-#: -0.5°…1.5° band and 0.5° is reported as the best moment.  Below the horizon
-#: the terminator is still close enough to catch the grazing light, which is
-#: why the start is negative rather than zero.
+#: The Sun's altitude at the X/V anchor.  The old upper edge was 1.5° and the
+#: window began at the horizon; the observing notes put the letters' best
+#: contrast near 0.5°, so the window is the whole -0.5°…1.5° band and 0.5° is
+#: reported as the best moment.  Below the horizon the terminator is still
+#: close enough to catch the grazing light, which is why the start is negative.
 XVL_SUN_ALTITUDE_MIN_DEG = -0.5
 XVL_SUN_ALTITUDE_MAX_DEG = 1.5
 XVL_SUN_ALTITUDE_BEST_DEG = 0.5
+
+#: The Sun's altitude at the L anchor.  L is not the same grazing geometry as
+#: X/V: comparing the first forecast with the observed event put our start
+#: 1 h late, the best moment 3 h late and the end 5 h late.  The altitude rate
+#: at the high-southern anchor is roughly 0.25°/h, so the band moves down by
+#: 0.25°, 0.75° and 1.25° respectively: -0.75°…0.20°, best -0.30°.  These are
+#: still provisional, but they are fitted to the reported offsets rather than
+#: borrowed from X/V.
+LXV_SUN_ALTITUDE_MIN_DEG = -0.75
+LXV_SUN_ALTITUDE_MAX_DEG = 0.20
+LXV_SUN_ALTITUDE_BEST_DEG = -0.30
 
 #: The L of the same family: a bright L-shaped ridge just west of Zach G.
 #: The published descriptions place it on the crater's western rampart; the
@@ -334,8 +344,10 @@ def _xvl_colongitude_deg(et: float) -> float:
     return (90.0 - subsolar_lon) % 360.0
 
 
-def _altitude_windows(altitude_fn, start: float, end: float) -> List[Tuple[float, float, float]]:
-    """``(start, end, best)`` for every -0.5°…1.5° solar-altitude window."""
+def _altitude_windows(altitude_fn, start: float, end: float,
+                      minimum: float, maximum: float,
+                      best_target: float) -> List[Tuple[float, float, float]]:
+    """``(start, end, best)`` for every solar-altitude window in a band."""
     if end <= start + 60.0:
         return []
     windows: List[Tuple[float, float, float]] = []
@@ -345,32 +357,29 @@ def _altitude_windows(altitude_fn, start: float, end: float) -> List[Tuple[float
     while moment < end:
         following = min(moment + step, end)
         altitude = altitude_fn(following)
-        if previous <= XVL_SUN_ALTITUDE_MIN_DEG < altitude:
+        if previous <= minimum < altitude:
             root = bisect_root(
-                lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_MIN_DEG,
+                lambda et: altitude_fn(et) - minimum,
                 moment, following, tol=1e-3,
             )
             limit = min(end, root + 12.0 * 3600.0)
             upper = altitude_fn(limit)
-            if upper <= XVL_SUN_ALTITUDE_MAX_DEG:
+            if upper <= maximum:
                 # The requested range ends inside the window; report the part
                 # of it the reader asked for rather than inventing an end.
                 finish = limit
             else:
                 finish = bisect_root(
-                    lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_MAX_DEG,
+                    lambda et: altitude_fn(et) - maximum,
                     root, limit, tol=1e-3,
                 )
             if finish > root + 60.0:
-                # 0.5° is the best moment; bisect between the two crossings.
-                # If the band was already above 0.5° at the start (a very short
-                # window), the midpoint is the honest fallback.
-                best = 0.5 * (root + finish)
-                if altitude_fn(best) < XVL_SUN_ALTITUDE_BEST_DEG:
-                    best = bisect_root(
-                        lambda et: altitude_fn(et) - XVL_SUN_ALTITUDE_BEST_DEG,
-                        root, finish, tol=1e-3,
-                    )
+                # The best moment is the crossing of its own target, which lies
+                # inside [minimum, maximum] by construction.
+                best = bisect_root(
+                    lambda et: altitude_fn(et) - best_target,
+                    root, finish, tol=1e-3,
+                )
                 windows.append((root, finish, best))
         previous = altitude
         moment = following
@@ -381,24 +390,29 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
     """The X/V and L windows inside *window*.
 
     One coarse scan for each anchor's sunrise, a bisection on the solar
-    altitude, and a colongitude gate for X/V.  L is paired with the *next* X/V
-    of the same lunation: the published descriptions agree that L appears
-    later, so an L sunrise with no preceding X/V is not reported.  When the two
-    intervals overlap, the X/V row says that the second half of its window also
-    shows L.
+    altitude, and a colongitude gate for X/V.  L uses its own altitude band
+    (see :data:`LXV_SUN_ALTITUDE_MIN_DEG`) and is paired with the X/V of the
+    same sunrise train.  When the two intervals overlap, the X/V row says that
+    the second half of its window also shows L.
     """
     start = float(window.start_et)
     end = float(window.end_et)
     events: List[MoonEvent] = []
 
     xv_windows: List[Tuple[float, float, float]] = []
-    for root, finish, best in _altitude_windows(_xvl_sun_altitude_deg, start, end):
+    for root, finish, best in _altitude_windows(
+            _xvl_sun_altitude_deg, start, end,
+            XVL_SUN_ALTITUDE_MIN_DEG, XVL_SUN_ALTITUDE_MAX_DEG,
+            XVL_SUN_ALTITUDE_BEST_DEG):
         colongitude = _xvl_colongitude_deg(root)
         offset = wrap_angle(colongitude - XVL_COLONGITUDE_DEG, period=360.0)
         if abs(offset) <= XVL_COLONGITUDE_TOLERANCE_DEG:
             xv_windows.append((root, finish, best))
 
-    l_windows = _altitude_windows(_lxv_sun_altitude_deg, start, end)
+    l_windows = _altitude_windows(
+        _lxv_sun_altitude_deg, start, end,
+        LXV_SUN_ALTITUDE_MIN_DEG, LXV_SUN_ALTITUDE_MAX_DEG,
+        LXV_SUN_ALTITUDE_BEST_DEG)
     paired_l: List[Tuple[float, float, float]] = []
     overlaps: Dict[float, float] = {}
     used: set = set()
@@ -406,14 +420,11 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
         for position, (l_root, l_finish, l_best) in enumerate(l_windows):
             if position in used:
                 continue
-            # L belongs to the same sunrise train: a few hours later, never a
-            # whole lunation away.  Its -0.5° onset can precede X/V's by a few
-            # minutes late in the year (the high-southern anchor sees the
-            # terminator first), but its *best* moment is still the later one;
-            # that is the ordering the forecast promises.
+            # L belongs to the same sunrise train, not a whole lunation away.
+            # The corrected L band can put its onset or best moment slightly
+            # before X/V's -- the two anchors are 33° apart in latitude -- so
+            # the pairing is by proximity, not by a forced order.
             if not (root - 6.0 * 3600.0 <= l_root <= finish + 30.0 * 3600.0):
-                continue
-            if l_best < best - 120.0:
                 continue
             used.add(position)
             overlaps[root] = max(0.0, min(finish, l_finish) - max(root, l_root))
@@ -452,9 +463,9 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
             altitude_deg=moon_altitude,
             title="月面 L（Zach G 西侧）",
             detail=(
-                f"太阳高度 {XVL_SUN_ALTITUDE_MIN_DEG:g}–"
-                f"{XVL_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
-                f"{XVL_SUN_ALTITUDE_BEST_DEG:g}°　"
+                f"太阳高度 {LXV_SUN_ALTITUDE_MIN_DEG:g}–"
+                f"{LXV_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
+                f"{LXV_SUN_ALTITUDE_BEST_DEG:g}°　"
                 f"持续 {minutes:.0f} min　"
                 f"锚点 {LXV_ANCHOR_LON_DEG:g}° / {LXV_ANCHOR_LAT_DEG:g}°　"
                 f"{_altitude_text(moon_altitude)}"

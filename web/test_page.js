@@ -623,8 +623,18 @@ function respond(url, body) {
     const image = componentImage(body);
     return { render_id: '7', image, image_raw: image,
              info: { component: body.component || 'image',
-                     image: { shape: [400, 400] }, region: { ground_sample_km: 0.2,
-                     emergence_deg: 3, solar_elevation_deg: 20 },
+                     image: { shape: [400, 400] }, region: {
+                       ground_sample_km: 0.2, emergence_deg: 3,
+                       solar_elevation_deg: 20, width: 400, height: 400,
+                       lon_deg: Number((body.selection || {}).lon ?? 0),
+                       lat_deg: Number((body.selection || {}).lat ?? 0),
+                       span_km: 200,
+                       rotation_deg: Number((body.selection || {}).rotation_deg ?? 0),
+                       sub_observer_lon_deg: -4.738,
+                       sub_observer_lat_deg: 1.377,
+                       observer_distance_km: 384400,
+                       angular_diameter_deg: 0.5122145,
+                     },
                      earthshine: { earthshine_ratio: 4.55e-5, earthshine_magnitude: -15.88,
                                    earthshine_apparent_magnitude: -0.58,
                                    earth_illuminated_percent: 60.5,
@@ -2014,14 +2024,18 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('moving the pointer does not change it',
     document.getElementById('magnify-info').textContent === captionBefore,
     document.getElementById('magnify-info').textContent);
-  /* 经纬度：the footer's last cell follows the pointer, and a selected
-     landform pins it to that feature's own marker until the selection goes. */
+  /* 经纬度：a floating readout in the picture's bottom-right corner, not a
+     cell in the footer.  It follows the pointer, and a selected landform pins
+     it to that feature's own marker until the selection goes. */
   body.fire('pointermove', { clientX: 280, clientY: 280, preventDefault() {} });
-  const coordCell = document.getElementById('disk-coord');
-  check('the full-disk footer shows the pointer coordinate',
+  const coordCell = document.getElementById('coord-hud-disk');
+  check('the full-disk HUD shows the pointer coordinate',
+    coordCell.hidden === false &&
     /经度 \d+\.\d+°[EW]/.test(coordCell.textContent) &&
     /纬度 \d+\.\d+°[NS]/.test(coordCell.textContent),
     coordCell.textContent);
+  check('the coordinate no longer shares the footer line',
+    document.getElementById('disk-info').textContent.indexOf('经度') < 0);
   {
     const plan = T.state.labels.disk;
     const item = plan && plan.items && plan.items.find((entry) =>
@@ -2031,7 +2045,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       T.paintCoordReadout('disk');
       const pinned = coordCell.textContent;
       body.fire('pointermove', { clientX: 100, clientY: 100, preventDefault() {} });
-      check('a selected landform pins the footer to its marker',
+      check('a selected landform pins the HUD to its marker',
         /选中地貌/.test(pinned) &&
         coordCell.textContent === pinned &&
         coordCell.textContent.includes(Math.abs(Number(item.lon_deg)).toFixed(2)),
@@ -2041,6 +2055,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       check('and the pointer coordinate returns after deselecting',
         !/选中地貌/.test(coordCell.textContent), coordCell.textContent);
     }
+  }
+  /* The close-ups carry the same readout, in their own corners. */
+  {
+    const rawBody = document.getElementById('body-raw');
+    rawBody.fire('pointermove', { clientX: 280, clientY: 280,
+                                 preventDefault() {} });
+    const rawHud = document.getElementById('coord-hud-raw');
+    const procHud = document.getElementById('coord-hud-proc');
+    check('the close-up HUD reads the frame back to lon/lat',
+      rawHud.hidden === false && /经度 \d+\.\d+°[EW]/.test(rawHud.textContent) &&
+      /纬度 \d+\.\d+°[NS]/.test(rawHud.textContent),
+      rawHud.textContent);
+    check('and the other tab already carries the same readout',
+      procHud.textContent === rawHud.textContent, procHud.textContent);
   }
   /* Ctrl+click anchors: a red caption, a number, and one clear button. */
   {

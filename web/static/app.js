@@ -42,7 +42,6 @@ const state = {
   manualSeq: 0,        // next 标记点 number
   manualLayout: { disk: [], raw: [], proc: [] },  // last painted boxes, frame px
   coord: { disk: null, region: null },  // last pointer coordinate per picture
-  resultInfoBase: '',  // the line under the close-ups, without the coordinate
   diskWhen: null,      // the instant the *displayed* preview was rendered for
   downloads: { disk: null, raw: null, proc: null },  // what each target last made
   diskExport: null,    // last full-disk export render: {key, url, geometry}
@@ -1108,7 +1107,12 @@ function pointerLonLat(viewName, event) {
     : regionPixelToLonLat(p.x, p.y);
 }
 
-/** Format one coordinate for the footer. */
+/** The three floating coordinate readouts, one per picture. */
+const COORD_HUDS = {
+  disk: 'coord-hud-disk', raw: 'coord-hud-raw', proc: 'coord-hud-proc',
+};
+
+/** Format one coordinate for the readout. */
 function coordText(lon, lat) {
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return '';
   const ew = lon >= 0 ? 'E' : 'W';
@@ -1116,7 +1120,7 @@ function coordText(lon, lat) {
   return `经度 ${Math.abs(lon).toFixed(2)}°${ew}　纬度 ${Math.abs(lat).toFixed(2)}°${ns}`;
 }
 
-/** The coordinate a selected thing pins to the footer, or null. */
+/** The coordinate a selected thing pins to the readout, or null. */
 function selectedCoord(viewName) {
   const chosen = overlay.selected;
   if (!chosen) return null;
@@ -1141,37 +1145,44 @@ function selectedCoord(viewName) {
 
 /** Repaint one picture's coordinate readout, preferring a selection. */
 function paintCoordReadout(viewName) {
-  if (viewName === 'disk') {
-    const el = $('disk-coord');
-    if (!el) return;
-    const picked = selectedCoord('disk');
-    const here = picked || state.coord.disk;
-    el.textContent = here
-      ? `${here.prefix || ''}${coordText(here.lon, here.lat)}` : '';
-    el.title = picked
-      ? '选中的标注：取消选中后，这里重新显示鼠标所在位置的经纬度'
-      : '鼠标所在位置的月面经纬度；选中地貌或手动标记时显示标记点';
-    return;
-  }
-  const base = state.resultInfoBase || '';
-  const picked = selectedCoord(activeTarget());
-  const here = picked || state.coord.region;
-  $('result-info').textContent = here
-    ? `${base}${base ? '　' : ''}${here.prefix || ''}${coordText(here.lon, here.lat)}`
-    : base;
+  const pane = viewName === 'proc' ? 'proc' : viewName === 'raw' ? 'raw' : 'disk';
+  const el = $(COORD_HUDS[pane]);
+  if (!el) return;
+  const picked = selectedCoord(pane);
+  const here = picked || (pane === 'disk' ? state.coord.disk : state.coord.region);
+  const text = here
+    ? `${here.prefix || ''}${coordText(here.lon, here.lat)}` : '';
+  el.textContent = text;
+  el.hidden = !text;
+  el.title = picked
+    ? '选中的标注：取消选中后，这里重新显示鼠标所在位置的经纬度'
+    : '鼠标所在位置的月面经纬度；选中地貌或手动标记时显示标记点';
 }
 
 /** The coordinate line for a hover event over one of the three pictures. */
 function updateCoordFromEvent(viewName, event) {
-  const frameView = viewName === 'proc' ? 'proc' : viewName;
-  const at = pointerLonLat(frameView, event);
-  state.coord[viewName === 'disk' ? 'disk' : 'region'] = at;
-  paintCoordReadout(viewName);
+  const at = pointerLonLat(viewName, event);
+  if (viewName === 'disk') {
+    state.coord.disk = at;
+    paintCoordReadout('disk');
+    return;
+  }
+  state.coord.region = at;
+  // The two close-ups share one camera and one readout position; keep both
+  // copies current so the hidden tab is already right when it is switched to.
+  paintCoordReadout('raw');
+  paintCoordReadout('proc');
 }
 
 function clearCoordReadout(viewName) {
-  state.coord[viewName === 'disk' ? 'disk' : 'region'] = null;
-  paintCoordReadout(viewName);
+  if (viewName === 'disk') {
+    state.coord.disk = null;
+    paintCoordReadout('disk');
+    return;
+  }
+  state.coord.region = null;
+  paintCoordReadout('raw');
+  paintCoordReadout('proc');
 }
 
 function drawDisk() {
@@ -3512,6 +3523,7 @@ function selectOverlay(what) {
 function repaintCoordReadouts() {
   paintCoordReadout('disk');
   paintCoordReadout('raw');
+  paintCoordReadout('proc');
 }
 
 /** The ruler's grab targets, in device pixels: either end, or the bar. */
@@ -8153,8 +8165,9 @@ function describeResult(info, ms) {
             `锐化半径 ${fmt(inst.sharpen_sigma_px, 2)} px（${fmt(inst.sharpen_sigma_arcsec, 3)}″）`);
   if (ms !== null && ms !== undefined) bits.push(`前端 ${(ms / 1000).toFixed(1)} s`);
   if (info.process_seconds !== undefined) bits.push(`后期 ${(info.process_seconds * 1000).toFixed(0)} ms`);
-  state.resultInfoBase = bits.join('　');
+  $('result-info').textContent = bits.join('　');
   paintCoordReadout('raw');
+  paintCoordReadout('proc');
 }
 
 /* ── wiring ──────────────────────────────────────────────────────── */
@@ -9843,7 +9856,8 @@ function setResultTab(tab) {
   }
   fitCanvas(views[state.resultTab]);
   drawAllLabels();
-  paintCoordReadout(state.resultTab);
+  paintCoordReadout('raw');
+  paintCoordReadout('proc');
   updateDownloadLink();
 }
 

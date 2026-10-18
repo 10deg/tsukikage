@@ -297,14 +297,27 @@ input:disabled, select:disabled { opacity: .45; }
   padding-left: 8px;
   color: #6b7280;
 }
-/* 经纬度：信息栏的最后一格，等宽数字，不随窗口宽度跳动。 */
-.coord-readout {
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+/* 经纬度：画面右下角的半透明浮层，和左上角的预览参数、右上角的缩放是
+   同一套“浮在图上的控件”语言。放信息栏里会挤掉图窗尺寸那一行，所以它
+   不参与排版，也不拦鼠标。 */
+.coord-hud {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  z-index: 3;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(15, 17, 22, .74);
   color: var(--ink);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
-.coord-readout:empty { display: none; }
-#disk-info .coord-readout { padding-left: 8px; }
 
 /* One button instead of bilingual labels everywhere: every English gloss is a
    `.en` span, so hiding them is a class on the body, not a second stylesheet. */

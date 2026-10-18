@@ -324,6 +324,9 @@
           <canvas id="overlay"></canvas>
           <canvas id="labels-disk" class="labels"></canvas>
           <div class="busy" id="disk-busy">渲染中…</div>
+          <!-- 经纬度读数是画面上的独立浮层，不占信息栏：右下角、半透明、
+               不拦鼠标。鼠标一动就更新；选中标注时改成标记点坐标。 -->
+          <div class="coord-hud" id="coord-hud-disk" hidden></div>
 
           <!-- 图窗左上角：预览用的渲染分辨率。既可从下拉里挑给定档位，也可
                直接键入任意像素数（上限由服务端给出）。 -->
@@ -393,9 +396,6 @@
           <span id="disk-info-size">—</span>
           <span id="disk-info-earthshine"></span>
           <span class="view-foot-hint">Shift 或中键拖动平移　·　滚轮缩放</span>
-          <!-- 经纬度读数放在信息栏最后：鼠标一动就更新；选中标注时改成
-               那个标记点的坐标，直到取消选中。 -->
-          <span id="disk-coord" class="coord-readout"></span>
         </p>
 
         <!-- 保存整月面：整月面自己的分辨率、格式与是否带地照，与右下两张近景图无关。
@@ -561,6 +561,7 @@
               <span class="busy-note" id="render-status">—</span>
             </span>
           </div>
+          <div class="coord-hud" id="coord-hud-raw" hidden></div>
         </div>
         <div class="view-body" id="body-proc" hidden>
           <canvas id="result"></canvas>
@@ -575,6 +576,7 @@
               <span class="busy-note" id="render-status-copy">—</span>
             </span>
           </div>
+          <div class="coord-hud" id="coord-hud-proc" hidden></div>
         </div>
         <p class="view-foot" id="result-info">—</p>
 
