@@ -8109,6 +8109,7 @@ function describeResult(info, ms) {
   // known roll (or the box the frame was asked for) fills the gap.
   if (r) {
     state.regionInfo = {
+      ...(state.regionInfo || {}),
       ...r,
       rotation_deg: Number.isFinite(Number(r.rotation_deg))
         ? Number(r.rotation_deg)
