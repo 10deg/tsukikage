@@ -129,8 +129,11 @@ def draw(frame: dict, service: Any) -> np.ndarray:
         "when": _when(frame["when"]),
         "selection": dict(frame["selection"]),
         "output": {"width": frame["width"], "height": frame["width"],
-                   "samples": frame["samples"]},
-        "shadow_steps": frame["shadow_steps"],
+                   "samples": frame["samples"],
+                   # The region endpoint reads shadow_steps from *output*;
+                   # keeping it at the top level made the tool's step count a
+                   # silent no-op and every region hash used the server default.
+                   "shadow_steps": frame["shadow_steps"]},
         "telescope": {}, "camera": {}, "processing": {},
     }
     image, _info, _render_id, _raw = service.region(request)

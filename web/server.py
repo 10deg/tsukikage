@@ -81,6 +81,12 @@ IDENTITY_PROCESSING = {
 }
 PREVIEW_SAMPLES = 1
 PREVIEW_SHADOW_STEPS = 24
+#: Shadow steps for a close-up still.  64 was the historical default, but at a
+#: grazing Sun its geometric march takes ~12 km strides at the far end and
+#: quantises the shadow boundary into visible rectangular blocks.  256 cuts that
+#: to about 3 km and keeps the 1.3.3 tip shape; 512 is cleaner still but costs
+#: roughly twice as much again.  Animations stay at 48: every frame pays it.
+REGION_SHADOW_STEPS = 256
 
 #: Hard pixel caps.  A preview is re-rendered on every change of time or place,
 #: so its cap is the one that decides how interactive the page feels -- but the
@@ -1089,7 +1095,7 @@ class MoonService:
             width=width,
             height=height,
             samples_per_pixel=int(_f(output, "samples", 2)),
-            shadow_steps=int(_f(output, "shadow_steps", 64)),
+            shadow_steps=int(_f(output, "shadow_steps", REGION_SHADOW_STEPS)),
             band_workers=_parallel(request.get("parallel")),
             photometric_model=_optical_model(
                 _light_option(request, "output", "photometric_model")
