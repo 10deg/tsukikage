@@ -150,6 +150,16 @@ function matches(element, selector) {
   if (selector === '[data-nudge]') {
     return element.dataset && element.dataset.nudge !== undefined;
   }
+  // `[data-x="y"]`: the page groups its nudge rows with `data-range="anim-start"`
+  // and `data-range="sky"`, so the harness has to answer this selector or the
+  // wiring those rows depend on is silently never exercised.
+  {
+    const attribute = /^\[data-([\w-]+)="([^"]*)"\]$/.exec(selector);
+    if (attribute) {
+      const key = attribute[1].replace(/-([a-z])/g, (_m, chr) => chr.toUpperCase());
+      return Boolean(element.dataset) && element.dataset[key] === attribute[2];
+    }
+  }
   // A bare class selector: the dividers look their panel up this way.
   if (/^\.[\w-]+$/.test(selector)) {
     return String(element.className || '').split(/\s+/).includes(selector.slice(1));
@@ -324,6 +334,28 @@ for (const [name, width, height] of [['col-left', 300, 900], ['col-right', 620, 
   node.clientHeight = height;
 }
 
+/** The attributes the markup puts on an element, as the browser would have them.
+ *
+ *  The harness builds elements on demand from the HTML string, so without this
+ *  a `data-range="sky"` button exists but carries no dataset, and any wiring
+ *  that walks `[data-range=...]` finds nothing -- a test that then "passes"
+ *  proves only that nothing was clicked. */
+function applyHtmlAttributes(element, id) {
+  if (!id) return;
+  const at = html.indexOf(`id="${id}"`);
+  if (at < 0) return;
+  const open = html.lastIndexOf('<', at);
+  const close = html.indexOf('>', at);
+  if (open < 0 || close < 0) return;
+  const tag = html.slice(open, close + 1);
+  for (const match of tag.matchAll(/data-([\w-]+)="([^"]*)"/g)) {
+    const key = match[1].replace(/-([a-z])/g, (_m, chr) => chr.toUpperCase());
+    element.dataset[key] = match[2];
+  }
+  const klass = /\bclass="([^"]*)"/.exec(tag);
+  if (klass && !element.className) element.className = klass[1];
+}
+
 const document = {
   body: makeElement('body'),
   documentElement: { style: { setProperty() {} } },
@@ -333,7 +365,11 @@ const document = {
     // id it was given after creation, which is the only way to find it.
     const built = created.find((el) => el.id === id);
     if (built) { registry.set(id, built); return built; }
-    if (!registry.has(id)) registry.set(id, makeElement(id));
+    if (!registry.has(id)) {
+      const element = makeElement(id);
+      applyHtmlAttributes(element, id);
+      registry.set(id, element);
+    }
     return registry.get(id);
   },
   createElement(tag) {
@@ -460,6 +496,12 @@ function respond(url, body) {
     } : undefined;
     return { image: diskImage, hdr, geometry: {
       when_utc: '2026-05-25T07:30:00+00:00', distance_km: 384400,
+      /* The server computes the Chinese calendar from the ephemeris.  This
+         label is the real one for that instant; an age-based estimate would
+         say 初九, so a page that ignores this field fails the check below. */
+      lunar: { year: 2026, month: 4, day: 9, is_leap: false,
+               label_zh: '四月初九', label_latin: 'M04D09',
+               civil_date: '2026-05-25' },
       angular_diameter_deg: 0.5135, disk_radius_fraction: 0.47,
       libration_lon_deg: -4.7, libration_lat_deg: 1.4,
       sub_solar_lon_deg: -6.5, sub_solar_lat_deg: 1.5,
@@ -1959,8 +2001,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   // The strip used to describe the drawing (bright limb angle, sub-solar point)
   // and now describes the observation: the lunar-calendar date, and where the
   // Moon is in the reader's own sky.
-  check('and with the lunar-calendar date, in Chinese',
-    /农历 初九/.test(document.getElementById('phase-lunar').textContent),
+  check('and with the lunar-calendar date the server computed',
+    /农历 四月初九/.test(document.getElementById('phase-lunar').textContent),
     document.getElementById('phase-lunar').textContent);
   check('with the age beside it',
     /月龄 8\.48/.test(document.getElementById('phase-age').textContent),
@@ -2713,24 +2755,24 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   console.log('');
   console.log('the phase name hides a joke');
   {
-    /* Eleven taps in quick succession and the page snows.  The count is a time
+    /* Five taps in quick succession and the page snows.  The count is a time
        window, so taps inside one run of the harness are "consecutive" by
        construction -- which is exactly the case that has to work. */
     const layers = () => document.body.children
       .filter((el) => String(el.className).split(/\s+/).includes('moonfall'));
     const before = layers().length;
-    for (let i = 0; i < 10; i += 1) fire('phase-name', 'click');
-    check('ten taps on the phase name are still just taps',
+    for (let i = 0; i < 4; i += 1) fire('phase-name', 'click');
+    check('four taps on the phase name are still just taps',
       layers().length === before, String(layers().length));
     fire('phase-name', 'click');
-    check('the eleventh brings the snow', layers().length === before + 1);
+    check('the fifth brings the snow', layers().length === before + 1);
     const layer = layers().pop();
     check('with a whole sky of flakes', layer && layer.children.length >= 100,
       layer ? String(layer.children.length) : 'no layer');
     check('and a character on each one',
       layer && layer.children.every((f) => String(f.textContent).length > 0));
     /* The counter resets, so the joke can be told twice. */
-    for (let i = 0; i < 10; i += 1) fire('phase-name', 'click');
+    for (let i = 0; i < 4; i += 1) fire('phase-name', 'click');
     check('and the count starts over afterwards',
       layers().length === before + 1, String(layers().length));
     fire('phase-name', 'click');
@@ -2755,6 +2797,51 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       calls[0] ? JSON.stringify(calls[0].body) : 'no call');
     check('the samples land in the state',
       !!T.state.sky && T.state.sky.samples.length === 49);
+    /* 这张图有自己的时刻：打开时从主界面取，之后由它自己的日期/时间/时区与
+       ± 一排步长驱动。 */
+    {
+      const mainWhen = document.getElementById('when').value;
+      check('the window starts on the page instant',
+        document.getElementById('sky-date').value === mainWhen.slice(0, 10) &&
+        document.getElementById('sky-time').value === mainWhen.slice(11, 16) &&
+        Number(document.getElementById('sky-tz').value)
+          === Number(document.getElementById('tz').value),
+        `${document.getElementById('sky-date').value} ` +
+        `${document.getElementById('sky-time').value} ` +
+        `${document.getElementById('sky-tz').value}`);
+
+      const before = fetchCalls.filter((call) => call.url === '/api/sky').length;
+      set('sky-time', '21:45');
+      fire('sky-time', 'change');
+      await tick();
+      const moved = fetchCalls.filter((call) => call.url === '/api/sky').pop();
+      check('changing its time asks the server for that moment',
+        fetchCalls.filter((call) => call.url === '/api/sky').length === before + 1 &&
+        /T21:45/.test(moved.body.when.at) === false &&
+        Math.abs(Date.parse(moved.body.when.at + 'Z')
+                 - Date.parse(`${document.getElementById('sky-date').value}T21:45:00Z`)
+                 + Number(document.getElementById('sky-tz').value) * 3600000) < 1000,
+        moved.body.when.at);
+
+      const nudges = fetchCalls.filter((call) => call.url === '/api/sky').length;
+      const stepButton = document.getElementById('sky-nudge-fwd-hour');
+      check('the row of ± buttons exists', !!stepButton);
+      fire('sky-nudge-fwd-hour', 'click');
+      await tick();
+      check('and +1h moves the window an hour, not the page',
+        fetchCalls.filter((call) => call.url === '/api/sky').length === nudges + 1 &&
+        document.getElementById('sky-time').value === '22:45' &&
+        document.getElementById('when').value === mainWhen,
+        `${document.getElementById('sky-time').value} / ` +
+        `${document.getElementById('when').value}`);
+
+      fire('sky-now', 'click');
+      await tick();
+      check('此刻 puts it back on the page instant',
+        document.getElementById('sky-time').value === mainWhen.slice(11, 16),
+        document.getElementById('sky-time').value);
+      set('sky-time', mainWhen.slice(11, 16));
+    }
     check('the floating window opens', document.getElementById('sky-backdrop').hidden === false);
     check('a high Moon far from the Sun is a close-up by itself',
       document.getElementById('sky-closeup').checked === true);

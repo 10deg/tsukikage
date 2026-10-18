@@ -158,6 +158,7 @@ from .models import (
     as_tone_mapping,
     jsonable,
 )
+from .lunardate import chinese_lunar_date, lunar_date_label
 from .moon import libration_angles, moon_report, moon_state, orbit_elements
 from .phases import (
     PHASE_NAME_BANDS,
@@ -373,6 +374,8 @@ __all__ = [
     "previous_new_moon_et",
     "moon_age",
     "phase_name",
+    "chinese_lunar_date",
+    "lunar_date_label",
     "lunar_day_label",
     "phase_calendar",
     "find_moons_by_illumination",

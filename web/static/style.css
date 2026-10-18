@@ -1758,6 +1758,26 @@ button .en::before, button .en::after { content: ""; }
   margin: 0;
   white-space: nowrap;
 }
+/* 天空位置图自己的时刻：日期/时间/时区三件套与一排 ± 步长。它们与下面的
+   显示选项是两类东西——一类是"看哪一刻"，一类是"怎么画"，所以中间一条线分开。 */
+.sky-controls.sky-when-row {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 7px;
+}
+.sky-nudge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sky-nudge button.mini {
+  float: none;
+  padding: 0 5px;
+  line-height: 16px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+#sky-now { padding: 0 7px; }
+
 .sky-controls input[type="number"] {
   width: 4.4em;
   padding: 1px 4px;

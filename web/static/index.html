@@ -1236,7 +1236,31 @@
       </div>
     </header>
 
-    <div class="sky-controls">
+    <div class="sky-controls sky-when-row">
+      <!-- 这张图有自己的时刻：读者想看的常常是"那一天的黄昏"，而不是主界面的
+           时间。三件套（日期、时刻、时区）与主界面的同名控件同义，另外一排
+           ±1d/±1h/±15m/±1m 让它像钟表一样走。 -->
+      <label title="这张图对应的日期（按下面的时区解释）">日期
+        <input type="date" id="sky-date">
+      </label>
+      <label title="这张图对应的时刻（按下面的时区解释）">时间
+        <input type="time" id="sky-time" step="60">
+      </label>
+      <label title="时刻所处的时区，与主界面的时区设置互相独立">时区
+        <input type="number" id="sky-tz" step="0.5" min="-12" max="14" value="8">
+        <span class="unit">h</span>
+      </label>
+      <span class="sky-nudge" id="sky-nudge">
+        <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
+        <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
+        <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
+        <button class="ghost mini" id="sky-nudge-back-minute" data-nudge="-1m" data-range="sky">-1m</button>
+        <button class="ghost mini" id="sky-now" title="跳到主界面当前的时刻">此刻</button>
+        <button class="ghost mini" id="sky-nudge-fwd-minute" data-nudge="+1m" data-range="sky">+1m</button>
+        <button class="ghost mini" id="sky-nudge-fwd-quarter" data-nudge="+15m" data-range="sky">+15m</button>
+        <button class="ghost mini" id="sky-nudge-fwd-hour" data-nudge="+1h" data-range="sky">+1h</button>
+        <button class="ghost mini" id="sky-nudge-fwd-day" data-nudge="+1d" data-range="sky">+1d</button>
+      </span>
       <label title="以当前时刻为中心，向前后各展开多少小时">时间跨度 ±
         <input type="number" id="sky-span" value="6" min="0.25" max="24" step="0.25">
         <span class="unit">h</span>

@@ -252,11 +252,12 @@ check('every nudge button is labelled with its own step',
   (() => {
     const nudges = [...html.matchAll(/data-nudge="([^"]+)"[\s\S]{0,160}?>([^<\n]*)</g)]
       .map((m) => [m[1], m[2].trim()]);
-    // 8 for the observer's instant and 16 for the animation: that pane carries
-    // a row under 开始 *and* one under 结束.  事件预报 has none any more -- its
-    // two ends are typed, and a whole row of decade/month steps above them was
-    // eight buttons to move a window nobody moves that way.
-    return nudges.length === 24 && nudges.every(([step, text]) => step === text);
+    // 8 for the observer's instant, 16 for the animation (a row under 开始 *and*
+    // one under 结束) and 8 inside the sky window, which walks its own instant.
+    // 事件预报 has none any more -- its two ends are typed, and a whole row of
+    // decade/month steps above them was eight buttons to move a window nobody
+    // moves that way.
+    return nudges.length === 32 && nudges.every(([step, text]) => step === text);
   })());
 check('and every range nudge says which range it moves',
   (() => {
@@ -268,7 +269,8 @@ check('and every range nudge says which range it moves',
     }, {});
     // The animation's two rows are *not* one range: the row under 开始 moves
     // the start and the row under 结束 moves the end.
-    return !counts.events && counts['anim-start'] === 8 && counts['anim-end'] === 8;
+    return (!counts.events && counts['anim-start'] === 8
+            && counts['anim-end'] === 8 && counts['sky'] === 8);
   })());
 /* Two rows of nudges, each with the steps that row is about: the observer's
    instant (w/d/h/m) and a range in the animation (d/h/15m/m). */

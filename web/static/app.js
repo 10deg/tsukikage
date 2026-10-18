@@ -3893,10 +3893,19 @@ function fillPhaseFacts() {
   const phase = st.phase || {};
   const lib = st.libration || {};
   const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
-  const day = lunarDayNumber(phase.age_days);
-  // The lunar date is a Chinese name, not a number: "初九" is the date, "9" is
-  // a count.  In the English interface it is the same month day in Latin.
-  set('phase-lunar', day === null ? '—' : `农历 ${lunarDayName(day)}`);
+  // The lunar date is the *Chinese calendar*, computed by the server from the
+  // same ephemeris as everything else: a month begins on the Beijing civil day
+  // that holds the new moon, and a leap month is inserted by the 中气 rule.  The
+  // page used to estimate it from the Moon's age, which is off by a day
+  // whenever the conjunction falls late in the evening.
+  const lunar = g.lunar;
+  const lunarName = lunar
+    ? (lunar.label_zh || lunarDayName(lunar.day))
+    : null;
+  set('phase-lunar', lunarName
+    ? `农历 ${lunarName}`
+    : (lunarDayNumber(phase.age_days) === null
+      ? '—' : `农历 ${lunarDayName(lunarDayNumber(phase.age_days))}`));
   set('phase-illum', `${fmt(g.illuminated_percent, 1)}%`);
   // Arcminutes only: the strip is a glance, and the arcsecond figure beside it
   // was four more digits for a number nobody reads there.
@@ -4819,6 +4828,63 @@ function fillSkySummary(data) {
     + `距角 ${elong.toFixed(1)}° · 太阳高度 ${fmt(sun.elevation_deg, 1)}°`;
 }
 
+/** The sky window's own instant, as its three fields hold it. */
+function skyFieldsValue() {
+  const date = $('sky-date').value;
+  if (!date) return '';
+  const time = $('sky-time').value || '00:00';
+  return `${date}T${time.slice(0, 5)}`;
+}
+
+/** Write an instant (``YYYY-MM-DDTHH:MM``) into the window's fields. */
+function setSkyFields(localValue, offsetHours) {
+  if (!localValue) return;
+  const [date, time = '00:00'] = String(localValue).split('T');
+  $('sky-date').value = date;
+  $('sky-time').value = time.slice(0, 5);
+  const offset = Number(offsetHours);
+  if (Number.isFinite(offset)) $('sky-tz').value = String(offset);
+}
+
+/** Seed the window from the main page: the reader's own clock, until they
+ *  move it.  Called when the window opens and by 此刻. */
+function skyFieldsFromMain() {
+  setSkyFields($('when').value, Number($('tz').value) || 0);
+}
+
+/** What the window asks the server for.
+ *
+ *  Its own date, time and zone -- the sky picture answers "where was the Moon
+ *  at *this* moment", and the moment a reader wants to look at is often not the
+ *  one the main page is showing (a sunset last week, a conjunction tonight).
+ *  The observer's position still comes from the main page: one place, many
+ *  times. */
+function skyWhenPayload() {
+  const local = skyFieldsValue();
+  const offset = Number($('sky-tz').value);
+  const tz = Number.isFinite(offset) ? offset : 0;
+  let at = null;
+  if (local) {
+    const asUtc = Date.parse(local + ':00Z');
+    if (Number.isFinite(asUtc)) {
+      at = new Date(asUtc - tz * 3600 * 1000).toISOString().slice(0, 19);
+    }
+  }
+  return {
+    at,
+    tz_offset_hours: tz,
+    observer: { lat: Number($('lat').value), lon: Number($('lon').value) },
+  };
+}
+
+/** Walk the window's instant by one nudge step, then redraw. */
+function nudgeSky(step) {
+  const next = shiftInstant(skyFieldsValue() || $('when').value, step);
+  if (!next) return;
+  setSkyFields(next);
+  refreshSky();
+}
+
 /** Ask the server for the tracks the window is centred on. */
 async function refreshSky() {
   const sequence = ++state.skySeq;
@@ -4828,7 +4894,7 @@ async function refreshSky() {
   $('sky-span').value = String(span);
   try {
     const payload = await post('/api/sky', {
-      when: whenPayload(),
+      when: skyWhenPayload(),
       span_hours: span,
       step_seconds: SKY_DEFAULT_STEP_SECONDS,
     });
@@ -4894,6 +4960,9 @@ function positionSkyWindow(reset) {
 
 function openSky() {
   state.skyOpen = true;
+  // First open: start from the main page's instant.  Later opens keep whatever
+  // the reader last set, because the window's time is its own.
+  if (!skyFieldsValue()) skyFieldsFromMain();
   $('sky-backdrop').hidden = false;
   positionSkyWindow(false);
   $('sky-close').focus();
@@ -8671,7 +8740,7 @@ function fitDiskColumn() {
 
 /* ── 彩蛋：连着点月相名，天上就下东西 ─────────────────────────────────
  *
- * Eleven quick taps on the phase name in the strip and the page snows for five
+ * Five quick taps on the phase name in the strip and the page snows for five
  * seconds.  It is a joke, so it is deliberately self-contained: an overlay that
  * takes no pointer events, its own timer, and no state kept between runs.
  *
@@ -8680,7 +8749,7 @@ function fitDiskColumn() {
  * a day would set it off sooner or later without meaning to.
  */
 const MOONFALL_CHARS = ['✦', '✧', '★', '☆', '·', '⋆', '☾', '☽', '✩', '⁂'];
-const MOONFALL_TAPS = 11;       // "more than ten"
+const MOONFALL_TAPS = 5;        // five quick taps
 const MOONFALL_GAP_MS = 1000;   // a slower tap starts a new run
 const MOONFALL_MS = 5000;       // how long the snow lasts
 const MOONFALL_FLAKES = 120;
@@ -9545,6 +9614,17 @@ function init() {
     drawSky();
   });
   $('sky-span').addEventListener('change', refreshSky);
+  // 这张图有自己的时刻：日期、时间、时区改了就重算，± 一组按钮把它当钟表走。
+  for (const id of ['sky-date', 'sky-time', 'sky-tz']) {
+    $(id).addEventListener('change', refreshSky);
+  }
+  $('sky-now').addEventListener('click', () => {
+    skyFieldsFromMain();
+    refreshSky();
+  });
+  for (const button of document.querySelectorAll('[data-range="sky"]')) {
+    button.addEventListener('click', () => nudgeSky(button.dataset.nudge));
+  }
   for (const id of ['sky-label-step', 'sky-labels', 'sky-elongation']) {
     $(id).addEventListener('change', drawSky);
   }

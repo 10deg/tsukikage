@@ -1013,6 +1013,14 @@ class MoonService:
                 "MOON", moonlib_s.to_et(geometry["when_utc"]), site
             ).elevation_deg
         geometry["utc_offset_hours"] = _tz_offset(request)
+        # 农历: the real Chinese calendar, not the age-based approximation the
+        # page used to derive.  Computed here because it needs the ephemeris,
+        # and sent as a finished label so the two can never disagree.
+        try:
+            geometry["lunar"] = moonlib_s.chinese_lunar_date(
+                geometry["when_utc"]).as_dict()
+        except Exception:  # pragma: no cover - a display nicety
+            geometry["lunar"] = None
         geometry["render_seconds"] = time.time() - started
         geometry["disk_radius_fraction"] = 0.5 * settings.disk_fraction
         geometry["image_width"] = int(width)
