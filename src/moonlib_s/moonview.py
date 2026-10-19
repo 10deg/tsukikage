@@ -1927,6 +1927,7 @@ def _finish_render(
     *,
     region: Optional["MoonRegion"] = None,
     exposure_hint: Optional[float] = None,
+    terrain: Optional[MoonTerrain] = None,
 ) -> MoonRender:
     """Expose, tone-map and package a traced frame.
 
@@ -2011,6 +2012,7 @@ def _finish_render(
         earthshine=earthlit_image if options.keep_components else None,
         stats=stats,
         region=region,
+        terrain=terrain,
     )
 
 
@@ -2472,7 +2474,7 @@ def render_region(
     stats["incidence_deg"] = region.incidence_deg
     stats["terrain_limited"] = region.terrain_limited
     return _finish_render(view, options, sunlit, earthlit, stats, region=region,
-                          exposure_hint=exposure_hint)
+                          exposure_hint=exposure_hint, terrain=terrain)
 
 
 def _region_coverage(
@@ -3059,6 +3061,7 @@ def region_geometry(
         width=int(options.width),
         height=int(options.height),
         distance_km=distance,
+        target_elevation_km=float(np.linalg.norm(target)) - MOON_REFERENCE_RADIUS_KM,
         emergence_deg=emergence_deg,
         incidence_deg=incidence_deg,
         solar_elevation_deg=(90.0 - incidence_deg)

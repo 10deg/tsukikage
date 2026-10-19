@@ -1384,14 +1384,11 @@
     <div class="event-window-body">
       <table class="event-table">
         <thead>
-          <tr>
-            <th class="date sortable" data-sort="date">日期</th>
-            <th class="time sortable" data-sort="time">时刻</th>
-            <th class="kind sortable" data-sort="label">事件</th>
-            <th class="height sortable" data-sort="altitude">高度</th>
-            <th class="window sortable" data-sort="window">窗口</th>
-            <th class="detail sortable" data-sort="detail">详情</th>
-          </tr>
+          <!-- The columns are per event kind; renderEventHeader() fills this
+               row from EVENT_COLUMN_SETS.  Keeping it empty in the markup is
+               what lets a phase table and an X/V window table show different
+               numbers instead of the intersection of both. -->
+          <tr id="event-window-head"></tr>
         </thead>
         <tbody id="event-window-rows"></tbody>
       </table>

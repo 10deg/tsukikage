@@ -54,6 +54,7 @@ from moonlib_s.annotations import (  # noqa: E402
     disk_frame, plan_annotations, region_frame,
 )
 from moonlib_s.crescent import crescent_geometry  # noqa: E402
+from moonlib_s.events import event_metrics  # noqa: E402
 from moonlib_s.labelpaint import find_label_font, paint_annotation_plan  # noqa: E402
 from moonlib_s.models import MoonRenderSettings  # noqa: E402
 
@@ -641,6 +642,10 @@ class MoonService:
         self._linear_id: Optional[str] = None
         self._linear_meta: Dict[str, Any] = {}
         self._linear_context: Dict[str, Any] = {}
+        # The terrain the cached close-up was actually traced against.  It may
+        # be a finer regional window than ``self.terrain()``; annotations have
+        # to stand on the same ground as the pixels, not on a coarser pyramid.
+        self._linear_terrain: Any = None
         # The view and camera the cached frame was rendered with.  Labels have
         # to describe *that* frame, not whatever the observer fields say now: a
         # page that changes the time and then labels the picture still on
@@ -1200,6 +1205,7 @@ class MoonService:
             self._linear_earthshine = earthshine
             self._linear_id = render_id
             self._linear_view = view
+            self._linear_terrain = getattr(render, "terrain", None)
             self._linear_meta = {
                 "arcsec_per_pixel": float(render.stats["arcsec_per_pixel"]),
                 "render_seconds": time.time() - started,
@@ -1462,6 +1468,10 @@ class MoonService:
                 "nights_from_new_moon": int(row["nights_from_new_moon"]),
                 "photo_score": round(float(row["photo_score"]), 3),
                 "yallop": (row.get("visibility") or {}).get("yallop", {}).get("verdict"),
+                # The table's later columns are measured at the best moment,
+                # exactly like an event row; the geometry above is already
+                # that moment, so this only fills in the missing quantities.
+                "metrics": event_metrics(site, row["best_utc"]),
             }
             for row in rows
         ]
@@ -2043,6 +2053,8 @@ class MoonService:
         satellite = str(request.get("satellite") or "full")
         if satellite not in ("full", "letter"):
             satellite = "full"
+        related = request.get("related")
+        related = str(related).strip() if related not in (None, "") else None
         focus = request.get("focus")
         if isinstance(focus, dict):
             focus = {
@@ -2069,6 +2081,8 @@ class MoonService:
             "satellite": satellite,
             "avoid_overlap": bool(request.get("avoid_overlap", True)),
             "focus": focus,
+            "related": related or None,
+            "lunar100": bool(request.get("lunar100", False)),
         }
         if frame_name == "disk":
             when = request.get("when") or {}
@@ -2086,8 +2100,14 @@ class MoonService:
         # Names go where the picture has them, not where the reference sphere
         # under it would: the renderer draws the height field, so a label placed
         # on the sphere drifts off its own feature by the relief there -- a
-        # kilometre of it is 0.65 px on a 2400 px frame.
-        options["terrain"] = self.terrain()
+        # kilometre of it is 0.65 px on a 2400 px frame.  A close-up may have
+        # been traced against a finer regional window than the global pyramid,
+        # so it must annotate against that same window.
+        terrain = self.terrain()
+        if frame_name == "region":
+            with self._lock:
+                terrain = self._linear_terrain or terrain
+        options["terrain"] = terrain
         # A crater near the limb is a circle standing on the height field; its
         # catalogue centre and the middle of the shape the reader sees are not
         # the same pixel.  The page wants the marker in the middle of the
@@ -2110,6 +2130,8 @@ class MoonService:
             "satellite": options["satellite"],
             "avoid_overlap": options["avoid_overlap"],
             "focus": options["focus"],
+            "related": options["related"],
+            "lunar100": options["lunar100"],
         }
         return payload
 
@@ -2143,6 +2165,8 @@ class MoonService:
             view = self._linear_view
         if not region:
             raise moonlib_s.MoonlibError(wanted)
+        with self._lock:
+            terrain = self._linear_terrain
         return moonlib_s.region_frame(
             view,
             float(region["lon_deg"]),
@@ -2151,7 +2175,8 @@ class MoonService:
             int(region["width"]),
             int(region["height"]),
             rotation,
-            terrain=self.terrain(),
+            terrain=terrain or self.terrain(),
+            target_elevation_km=region.get("target_elevation_km"),
         )
 
 
@@ -2476,6 +2501,7 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
         "font_px": max(6.0, min(400.0, _f(value, "font_px", DEFAULT_LABEL_FONT_PX))),
         "satellite": satellite,
         "avoid_overlap": bool(value.get("avoid_overlap", True)),
+        "lunar100": bool(value.get("lunar100", False)),
         "style": style,
     }
 
@@ -2508,6 +2534,7 @@ class _AnimationLabelPainter:
             "only_illuminated": spec["only_illuminated"],
             "satellite": spec.get("satellite", "full"),
             "avoid_overlap": spec.get("avoid_overlap", True),
+            "lunar100": bool(spec.get("lunar100", False)),
         }
         self._frozen = None
 
@@ -2519,6 +2546,10 @@ class _AnimationLabelPainter:
             rendered = getattr(item.render, "region", None)
             if rendered is None:
                 raise moonlib_s.MoonlibError("动画的「地貌」在近景帧上找不到选框信息。")
+            # The frame may have been traced against a finer regional window
+            # than the global pyramid; the labels have to stand on that same
+            # ground and aim at the height the renderer actually used.
+            terrain = getattr(item.render, "terrain", None) or self._service.terrain()
             projection = region_frame(
                 view,
                 rendered.lon_deg,
@@ -2527,15 +2558,17 @@ class _AnimationLabelPainter:
                 int(width),
                 int(height),
                 rotation_deg=float(self._region.get("rotation_deg") or 0.0),
-                terrain=self._service.terrain(),
+                terrain=terrain,
+                target_elevation_km=getattr(rendered, "target_elevation_km", None),
             )
         else:
+            terrain = self._service.terrain()
             projection = disk_frame(
                 view, int(width), int(height),
                 disk_fraction=float(self._settings.disk_fraction),
             )
         return plan_annotations(
-            projection, self._service.catalogue(), terrain=self._service.terrain(),
+            projection, self._service.catalogue(), terrain=terrain,
             **self._options,
         )
 
@@ -2619,6 +2652,11 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     for row in rows:
         counts[row["class"]] = counts.get(row["class"], 0) + 1
+    # The class counts partition the rows (the search index is keyed by one
+    # class per row).  The Lunar 100 is a *second* classification on top of
+    # that, so its true total is reported separately and the chip uses it.
+    lunar100_total = sum(1 for feature in catalogue
+                         if getattr(feature, "lunar100", 0))
     return {
         "features": rows,
         "classes": [
@@ -2628,6 +2666,7 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
             if counts.get(key, 0)
         ],
         "count": len(rows),
+        "lunar100_count": lunar100_total,
     }
 
 # ---------------------------------------------------------------------------

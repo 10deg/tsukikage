@@ -281,8 +281,10 @@ check('the CSV import and export share one button size',
 check('the event table footer does not print the CSV schema',
   !html.includes('CSV 列') && /\.event-window-foot\s*\{[^}]*justify-content:\s*flex-end/
     .test(css));
-check('every event table heading is a sort control',
-  (html.match(/<th class="[^"]*sortable" data-sort="/g) || []).length === 6);
+check('the event table header is built from the per-kind column sets',
+  htmlIds.has('event-window-head') &&
+  /const EVENT_COLUMN_SETS = \{/.test(js) &&
+  /const EVENT_COLUMNS = \{/.test(js));
 /* The close-up save row is meant to be the same row as the full disk's: its two
    resolution menus and the number all sit inside the 保存分辨率 label, and the
    unit span carries the scale.  Spread out again, the row grows taller than the

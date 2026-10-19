@@ -36,7 +36,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setProcTab',
   'buildEventKinds', 'drawViewLabels', 'labelEdits', 'labelHidden', 'labelClass',
   'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler',
-  'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'lockedDiskPlan',
+  'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'scalePlanAxes',
+  'fitPlanToFrame', 'lockedDiskPlan', 'relatedNameFor',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
@@ -44,6 +45,7 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
+  'eventColumnsFor', 'eventCellText', 'eventMetric', 'renderEventHeader',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
   'manualHitTest', 'clearManualMarks', 'overlay'];
 
@@ -816,6 +818,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the class switches were built from the class list',
     document.querySelectorAll('.cls-chip').length === T.LAND_CLASSES.length,
     document.querySelectorAll('.cls-chip').length);
+  const lunar100Chip = [...document.querySelectorAll('.cls-chip')]
+    .find((chip) => chip.children[0] && chip.children[0].id === 'class-lunar100');
+  check('the Lunar 100 switch explains its first unannotatable entries on hover',
+    !!lunar100Chip && /前 3 项/.test(lunar100Chip.title) &&
+    /月球本体/.test(lunar100Chip.title) &&
+    /Sky & Telescope/.test(lunar100Chip.title),
+    lunar100Chip ? lunar100Chip.title : 'no chip');
   /* The columns are part of "how the page looks": a settings file has to carry
      the widths the reader dragged, and put them back on import. */
   {
@@ -1423,7 +1432,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the classes start with the big families off and the rest on',
     boxes().length === T.LAND_CLASSES.length && boxes().length >= 20 &&
     offByDefault.join(',') ===
-      'basin,dome,imp,impact,other,pit,pyroclastic,rima,statio',
+      'basin,dome,imp,impact,lunar100,other,pit,pyroclastic,rima,statio',
     `${boxes().length} classes, off: ${offByDefault.join(',')}`);
   /* The row is ordered by what is on to begin with: a switch that shows nothing
      until a close-up should not be the first thing in the row.  Read the order
@@ -1466,7 +1475,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const off = boxes().filter((box) => !box.checked)
       .map((box) => String(box.id).replace('class-', '')).sort();
     check('标注设置复位 brings back the default class set',
-      off.join(',') === 'basin,dome,imp,impact,other,pit,pyroclastic,statio',
+      off.join(',') === 'basin,dome,imp,impact,lunar100,other,pit,pyroclastic,statio',
       off.join(','));
   }
   /* Touching a class or an overlay brings the label switch up with it: the
@@ -1517,10 +1526,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 9 event kinds plus 极低照明度, which shares the range boxes and the list but
-     is a crescent-session report rather than an instant list. */
+  /* 11 event kinds plus 极低照明度, which shares the range boxes and the list
+     but is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 10 && T.state.eventKind === 'full_moon',
+    kindChips().length === 12 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
   /* 极低照明度: same range boxes, a different report -- sessions ranked by how
      thin they are, not instants ranked by date. */
@@ -1630,23 +1639,28 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('one row per event',
       body.children.length === 2, String(body.children.length));
     const xvRow = [...body.children].find(
-      (row) => row.children[2].textContent.includes('X / V'));
-    check('the X/V row is split into date, time, kind, height and window',
+      (row) => row.children[1].textContent.includes('X / V'));
+    // X/V has its own column set: date, event, best, start, end, duration,
+    // altitude, ... -- the first six cells are the window, not the phase table.
+    check('the X/V row carries its own window columns',
       !!xvRow && xvRow.children[0].textContent === '05-21'
-      && xvRow.children[1].textContent === '03:00'
-      && xvRow.children[3].textContent.includes('31.5')
-      && xvRow.children[4].textContent.includes('05-21'),
+      && xvRow.children[1].textContent.includes('X / V')
+      && xvRow.children[2].textContent === '05-21 03:00'
+      && xvRow.children[3].textContent === '05-21 03:00'
+      && xvRow.children[4].textContent.includes('05-21')
+      && xvRow.children[5].textContent.includes('196 min')
+      && xvRow.children[6].textContent.includes('31.5'),
       xvRow ? [...xvRow.children].map((cell) => cell.textContent).join(' | ') : 'no row');
     T.state.eventSort = { key: 'altitude', dir: 1 };
     T.renderEventWindowRows();
     check('clicking a column sorts by it',
-      body.children[0].children[3].textContent.includes('-12.0'),
-      body.children[0].children[3].textContent);
+      body.children[0].children[6].textContent.includes('-12.0'),
+      body.children[0].children[6].textContent);
     T.state.eventSort = { key: 'altitude', dir: -1 };
     T.renderEventWindowRows();
     check('and the same column flips direction',
-      body.children[0].children[3].textContent.includes('31.5'),
-      body.children[0].children[3].textContent);
+      body.children[0].children[6].textContent.includes('31.5'),
+      body.children[0].children[6].textContent);
     T.state.eventSort = { key: 'date', dir: 1 };
     T.renderEventWindowRows();
     const before = document.getElementById('when').value;
@@ -1680,6 +1694,38 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       catch (error) { return String(error.message); }
     })();
     check('a file without when_utc is refused', /when_utc/.test(broken), broken);
+
+    // A phase row gets a different set: no start/end/duration, and no
+    // earthshine column for a full moon.  The values come from metrics, so a
+    // CSV imported without them still shows the fallback em dashes.
+    T.state.eventTable = [T.eventRowFromForecast({
+      kind: 'full_moon', label: '满月',
+      when_utc: '2026-05-01T12:00:00+00:00', altitude_deg: 40.2,
+      detail: '视直径 33′ 00.0″', observable: true,
+      metrics: { age_days: 14.2, lunar: '八月十五', phase_angle_deg: 5.0,
+                 illumination_percent: 99.8, diameter_arcmin: 33.0,
+                 altitude_deg: 40.2, azimuth_deg: 180.0,
+                 distance_km: 384400, magnitude: -12.7,
+                 surface_brightness: 3.4, earthshine_magnitude: null },
+    })];
+    T.renderEventWindowRows();
+    const phaseHead = document.getElementById('event-window-head');
+    const phaseLabels = [...phaseHead.children].map((cell) => cell.textContent);
+    check('a phase row gets the phase column set',
+      phaseHead.children.length === 13 &&
+      phaseLabels.includes('月龄') && phaseLabels.includes('农历') &&
+      phaseLabels.includes('亮度') && phaseLabels.includes('月面亮度') &&
+      !phaseLabels.includes('地照亮度') && !phaseLabels.includes('最佳时刻'),
+      phaseLabels.join(' / '));
+    const phaseCells = [...body.children[0].children].map((cell) => cell.textContent);
+    check('and the metric columns are formatted for a reader',
+      phaseCells[3] === '14.20 d' && phaseCells[4] === '八月十五' &&
+      phaseCells[7] === '33.00′' && phaseCells[8] === '+40.2°' &&
+      phaseCells[10] === '384,400 km' && phaseCells[11] === '-12.70 mag' &&
+      phaseCells[12] === '3.40 mag/″²',
+      phaseCells.join(' | '));
+    T.state.eventTable = eventTable;
+    T.renderEventWindowRows();
 
     fire('event-window-export', 'click');
     check('exporting reports the file',
@@ -2720,6 +2766,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
           x: 600, y: 300, radius_px: 18, labelled: true, label_x: 620, label_y: 295,
           label_w: 50, label_h: 14, leader: false, outline: null },
       ] };
+    T.overlay.selected = { kind: 'label', view: 'disk', key: 'Clavius' };
+    check('a selected crater asks the plan for its family',
+      T.relatedNameFor('disk') === 'Clavius', String(T.relatedNameFor('disk')));
+    T.overlay.selected = null;
+    check('and an empty selection asks for none',
+      T.relatedNameFor('disk') === null);
     const moved = evalIn(sandbox, '(() => { labelEdits.disk.Clavius = { dx: 12, dy: -7 };'
       + ' const plan = applyLabelEdits(state.labels.disk, "disk");'
       + ' const item = plan.items.find((one) => one.name_en === "Clavius");'
@@ -3087,6 +3139,32 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       T.scalePlan({ frame: plan.frame, font_px: 13,
                     items: [{ x: 1, y: 2, label_x: null, label_y: null }] }, 2)
         .items[0].label_x === null);
+
+    // A saved close-up is the render at another pixel count.  The plan on hand
+    // may still belong to the previous frame's resolution; fitting it to the
+    // picture before painting is what keeps every name on its own ground.
+    const stale = {
+      frame: { width: 400, height: 400 },
+      font_px: 10,
+      items: [{ x: 100, y: 80, radius_px: 4, label_x: 108, label_y: 72,
+                label_w: 32, label_h: 12, label: '阿贝', labelled: true,
+                outline: [[100, 80], [140, 80]] }],
+    };
+    const fitted = T.fitPlanToFrame(stale, 800, 800);
+    check('a plan from another resolution is fitted to the saved picture',
+      fitted.frame.width === 800 && fitted.frame.height === 800 &&
+      fitted.font_px === 20 && fitted.items[0].x === 200 &&
+      fitted.items[0].label_x === 216 && fitted.items[0].label_w === 64 &&
+      fitted.items[0].outline[1][0] === 280,
+      JSON.stringify(fitted.items[0]));
+    const oblong = T.scalePlanAxes(stale, 2, 4);
+    check('a non-square export scales each axis on its own',
+      oblong.items[0].x === 200 && oblong.items[0].y === 320 &&
+      oblong.items[0].label_w === 64 && oblong.items[0].label_h === 48 &&
+      oblong.frame.height === 1600,
+      JSON.stringify(oblong.items[0]));
+    check('a plan already at the right size is left alone',
+      T.fitPlanToFrame(stale, 400, 400) === stale);
 
     // The export path itself: the frozen layout comes back scaled to the
     // export's resolution, and a frame nobody locked is never reused.

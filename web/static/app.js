@@ -116,6 +116,14 @@ const LAND_CLASSES = [
   { key: 'imp',          zh: '不规则月海斑块',  en: 'Irregular mare patch', color: '#bcd0a0' },
   { key: 'impact',       zh: '撞击闪光',    en: 'NELIOTA impact',       color: '#f0c0a0' },
   { key: 'albedo',       zh: '反射率特征点',          en: 'Albedo feature',       color: '#c9c9dc' },
+  /* A curated observing list, not a geological family.  The tooltip is part
+     of the control: the first three entries are about the Moon as a whole and
+     have no point to put on a map, which would otherwise look like a bug. */
+  { key: 'lunar100',     zh: 'Lunar 100',            en: 'The Lunar 100',
+    color: '#d9b8f2',
+    title: 'Charles A. Wood 的 The Lunar 100（Sky & Telescope 2004 年 4 月，p.113）：'
+      + '100 个目视观测目标。前 3 项（月球本体、地照、月海/月陆二分）没有月面点，'
+      + '不参与标注；其余按点位标注，月溪、辐射纹、区域等没有直径的项目只画点。' },
   { key: 'other',        zh: '其他',                 en: 'Other',                color: '#b9bec9' },
 ];
 
@@ -126,7 +134,7 @@ const LAND_CLASSES = [
    landing region up close.  A first look at the Moon is not covered in them.
    `resetClasses()` reads this list, so "复位" and the first paint agree. */
 const DEFAULT_OFF_CLASSES = ['basin', 'dome', 'pit', 'pyroclastic', 'imp', 'impact',
-                             'statio', 'other'];
+                             'statio', 'lunar100', 'other'];
 
 /* The classes in the order the switches show them: the ones that are on to
  * begin with first, the ones that start switched off after them.
@@ -938,8 +946,12 @@ function regionCamera() {
     Number(r.sub_observer_lon_deg ?? g.libration_lon_deg) || 0,
     Number(r.sub_observer_lat_deg ?? g.libration_lat_deg) || 0);
   const origin = [sub[0] * distance, sub[1] * distance, sub[2] * distance];
+  // The camera was aimed at the target *on the height field*; using the
+  // reference sphere here would tilt it by the target's elevation, which is
+  // invisible at a coarse preview and several pixels at a high-resolution one.
+  const targetRadius = radiusKm + (Number(r.target_elevation_km) || 0);
   const target = moonVector(Number(r.lon_deg) || 0, Number(r.lat_deg) || 0)
-    .map((value) => value * radiusKm);
+    .map((value) => value * targetRadius);
   const forward = unit3([
     target[0] - origin[0], target[1] - origin[1], target[2] - origin[2],
   ]);
@@ -2050,6 +2062,21 @@ function activeClasses() {
   return keys.length === boxes.length ? null : keys;   // null = everything
 }
 
+/** The Lunar 100 is opt-in even when every ordinary class is on.
+ *
+ * ``activeClasses()`` collapses "everything" to null for the server; the Lunar
+ * 100 chip has to survive that collapse, so its state travels as its own flag
+ * rather than being inferred from the class list.
+ */
+function lunar100Wanted() {
+  // Built at run time by buildClassToggles(), so it is found through the row
+  // rather than the static-markup helper that would create a placeholder.
+  for (const box of document.querySelectorAll('#label-classes input[type="checkbox"]')) {
+    if (box.value === 'lunar100') return !!box.checked;
+  }
+  return false;
+}
+
 /** The switches themselves, built from LAND_CLASSES rather than written out.
  *
  *  Sixteen chips of markup would be sixteen places to forget when a class is
@@ -2064,7 +2091,7 @@ function buildClassToggles() {
     const chip = document.createElement('label');
     chip.className = 'cls-chip';
     chip.dataset.on = DEFAULT_OFF_CLASSES.includes(entry.key) ? 'false' : 'true';
-    chip.title = `${entry.zh} / ${entry.en}`;
+    chip.title = entry.title || `${entry.zh} / ${entry.en}`;
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.checked = !DEFAULT_OFF_CLASSES.includes(entry.key);
@@ -2096,11 +2123,16 @@ function buildClassToggles() {
 }
 
 /** Put the catalogue's own counts on the chips, once /api/features has arrived. */
-function fillClassCounts(classes) {
+function fillClassCounts(classes, lunar100Count) {
   if (!classes) return;
   const byKey = Object.fromEntries(classes.map((entry) => [entry.key, entry.count]));
   for (const chip of document.querySelectorAll('.cls-chip em')) {
-    const count = byKey[chip.dataset.count];
+    const key = chip.dataset.count;
+    // The Lunar 100 is a second classification, not a partition: its total is
+    // the number of tagged places, which is larger than the number of rows
+    // whose primary class is lunar100.
+    const count = key === 'lunar100' && Number.isFinite(Number(lunar100Count))
+      ? Number(lunar100Count) : byKey[key];
     chip.textContent = count ? String(count) : '';
   }
 }
@@ -2276,6 +2308,7 @@ function paintLabels(ctx, plan, style) {
     dash: ink.dash || [],
   };
   const textColor = ink.textColor || '#eef2ff';
+  const highlightColor = ink.highlightColor || '#ffd166';
   const strokeColor = ink.strokeColor || 'rgba(12, 14, 20, .92)';
   const strokeWidth = ink.strokeWidth === undefined ? fontPx * 0.28 : ink.strokeWidth;
   // A marker's rim has its own colour and width.  The fallbacks are the old
@@ -2316,13 +2349,18 @@ function paintLabels(ctx, plan, style) {
       ctx.strokeStyle = 'rgba(12, 14, 20, .55)';
       strokeRing(item);
     }
-    ctx.lineWidth = Math.max(0.4, rim.width);
     for (const item of plan.items) {
       if (!item.outline || !item.outline.length) continue;
       ctx.globalAlpha = alphaFor(item);
       // The rim carries the class colour too; the picker is the override for
-      // when the reader wants one colour for everything.
-      ctx.strokeStyle = item.manual ? MANUAL_COLOUR
+      // when the reader wants one colour for everything.  A related member of
+      // the selected crater's family is drawn heavier and in the highlight
+      // colour, so the family reads as one object.
+      ctx.lineWidth = item.highlight
+        ? Math.max(0.8, rim.width * 1.9 + 0.8)
+        : Math.max(0.4, rim.width);
+      ctx.strokeStyle = item.highlight ? highlightColor
+        : item.manual ? MANUAL_COLOUR
         : ink.uniform ? rim.color : itemColor(item, ink);
       strokeRing(item);
     }
@@ -2330,21 +2368,37 @@ function paintLabels(ctx, plan, style) {
   }
   for (const item of plan.items) {
     ctx.globalAlpha = alphaFor(item);
-    const colour = item.manual ? MANUAL_COLOUR : itemColor(item, ink);
+    const colour = item.highlight ? highlightColor
+      : item.manual ? MANUAL_COLOUR : itemColor(item, ink);
+    if (item.highlight) {
+      // A halo outside the dot, so a related crater is visible even when its
+      // caption was lost to the budget or its rim is too small to draw.
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, marker * 2.15 + Math.max(1.6, fontPx * 0.12),
+        0, Math.PI * 2);
+      ctx.strokeStyle = highlightColor;
+      ctx.lineWidth = Math.max(1.1, fontPx * 0.13);
+      ctx.stroke();
+    }
     ctx.beginPath();
     ctx.arc(item.x, item.y, marker, 0, Math.PI * 2);
     ctx.fillStyle = colour;
     ctx.fill();
     if (markerStrokeWidth > 0) {
       ctx.lineWidth = markerStrokeWidth;
-      ctx.strokeStyle = markerStrokeColor;
+      ctx.strokeStyle = item.highlight ? 'rgba(20, 16, 4, .85)' : markerStrokeColor;
       ctx.stroke();
     }
   }
   for (const item of plan.items) {
     if (!item.labelled) continue;
     ctx.globalAlpha = alphaFor(item);
-    const colour = item.manual ? MANUAL_COLOUR : itemColor(item, ink);
+    const colour = item.highlight ? highlightColor
+      : item.manual ? MANUAL_COLOUR : itemColor(item, ink);
+    // The selected crater and its family are set bold, which is the one weight
+    // change the layout can absorb without moving a box.
+    ctx.font = `${(ink.bold || item.highlight) ? 'bold ' : ''}${fontPx}px ` +
+      '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif';
     const left = item.label_x;
     const top = item.label_y;
     const right = left + item.label_w;
@@ -3515,8 +3569,15 @@ const overlay = { selected: null, drag: null };
    dragging it, so "press again to deselect" would take the × away halfway
    through a nudge.  Empty picture deselects. */
 function selectOverlay(what) {
+  const wasLabel = !!(overlay.selected && overlay.selected.kind === 'label');
   overlay.selected = what;
   repaintCoordReadouts();
+  // A selected crater asks the plan for its family's highlight markers.  The
+  // request returns the same captions in the same places (they are not part of
+  // the layout), so this cannot make the picture jump; it only adds the halos.
+  if (state.labelsOn && (wasLabel || (what && what.kind === 'label'))) {
+    refreshLabels();
+  }
 }
 
 /** Both footers, because a selection can move from one picture to another. */
@@ -3604,6 +3665,7 @@ function overlayDown(viewName, event) {
     ruler.selected = false;
     drawAllLabels();
     repaintCoordReadouts();
+    if (state.labelsOn) refreshLabels();
   }
   return false;
 }
@@ -3649,6 +3711,7 @@ function hideBadgeTarget(kind, badge) {
   overlay.selected = null;
   drawAllLabels();
   repaintCoordReadouts();
+  if (state.labelsOn) refreshLabels();
   setStatus('这一条地貌标注已临时隐藏（重新排版、关掉它的分类或点「复位」可恢复）');
 }
 
@@ -3747,6 +3810,10 @@ function composeImage(source, width, height, plan, style, orientation, marks, le
   canvas.height = Math.max(1, Math.round(height));
   const ctx = canvas.getContext('2d');
   const picture = smoothImage(source, smooth);
+  // The plan belongs to a frame; the picture handed in is that frame at some
+  // size.  Make the two agree first, so a plan from another render resolution
+  // cannot be painted at the wrong scale.
+  if (plan) plan = fitPlanToFrame(plan, picture.width, picture.height);
   const scale = canvas.width / Math.max(1, picture.width);
   ctx.imageSmoothingEnabled = scale < 1;
   ctx.imageSmoothingQuality = 'high';
@@ -3819,6 +3886,10 @@ function savedImageBlob(target, callback) {
   const annotate = wantedLabels && state.labelsOn;
   const style = labelStyleForFrame(view);
   let plan = annotate ? planFor(view) : null;
+  // A plan left over from another render resolution is fitted to *this* picture
+  // before the manual anchors (which are already in the picture's pixels) are
+  // merged in; otherwise the two layers would be scaled by different factors.
+  plan = annotate ? fitPlanToFrame(plan, source.width, source.height) : plan;
   // Manual anchors travel into the file as part of the same annotation layer.
   plan = annotate
     ? withManualPlan(plan, view, style, source.width, source.height) : plan;
@@ -3969,6 +4040,7 @@ async function saveDisk() {
     const exportFont = plan && plan.font_px
       ? plan.font_px : labelFrameFontPx('disk') * (width / Math.max(1, DISK.width));
     if (annotate) {
+      plan = fitPlanToFrame(plan, width, width);
       plan = withManualPlan(plan, 'disk', { ...style, fontPx: exportFont },
                             width, width);
     }
@@ -4333,7 +4405,7 @@ async function loadFeatureIndex() {
       feature.haystack = `${feature.zh} ${feature.en}`.toLowerCase();
     }
     state.featureByLabel = new Map(state.features.map((f) => [f.label, f]));
-    fillClassCounts(payload.classes);
+    fillClassCounts(payload.classes, payload.lunar100_count);
     // A class key the server knows and the page does not would silently never be
     // filtered; the two lists are meant to be the same list.
     const known = new Set(LAND_CLASSES.map((entry) => entry.key));
@@ -4391,6 +4463,15 @@ function selectFeature(feature) {
   syncSelectionInputs();
   drawDisk();
   afterSelectionChange();
+  // Picking a crater from the search box is also a selection: if that name is
+  // on the picture, give it the same family highlight a click on its label
+  // would.  A mare or a rille is not a crater family and stays a move-only.
+  if (state.labelsOn && ['crater', 'basin'].includes(feature.class)) {
+    const plan = planFor('disk');
+    const item = plan && plan.items
+      ? plan.items.find((entry) => entry.name_en === feature.en) : null;
+    if (item) selectOverlay({ kind: 'label', view: 'disk', key: labelKey(item) });
+  }
   const visible = lonLatToPixel(feature.lon, feature.lat) !== null;
   const lonText = `${Math.abs(feature.lon).toFixed(3)}°${feature.lon >= 0 ? 'E' : 'W'}`;
   const latText = `${Math.abs(feature.lat).toFixed(3)}°${feature.lat >= 0 ? 'N' : 'S'}`;
@@ -6149,7 +6230,25 @@ function focusPayload() {
   };
 }
 
-function labelRequestBase() {
+/** The crater family the current selection asks to highlight, if any.
+ *
+ *  Only a round impact feature has a parent-and-satellites family; selecting a
+ *  mare, a rille or a landing site is just a selection.  The same rule the
+ *  server uses (``related_crater_names``) is stated here as a class test: the
+ *  server does the name matching.
+ */
+function relatedNameFor(viewName) {
+  const chosen = overlay.selected;
+  if (!chosen || chosen.kind !== 'label' || !state.labelsOn) return null;
+  if ((viewName === 'disk') !== (chosen.view === 'disk')) return null;
+  const plan = planFor(viewName === 'disk' ? 'disk' : 'region');
+  const item = plan && plan.items
+    ? plan.items.find((entry) => labelKey(entry) === chosen.key) : null;
+  if (!item || !['crater', 'basin'].includes(item.class)) return null;
+  return item.name_en || null;
+}
+
+function labelRequestBase(viewName) {
   const density = densitySettings();
   const overlap = $('label-overlap');
   return {
@@ -6162,6 +6261,8 @@ function labelRequestBase() {
     satellite: satelliteMode(),
     avoid_overlap: !(overlap && overlap.checked),
     focus: focusPayload(),
+    related: relatedNameFor(viewName || 'disk'),
+    lunar100: lunar100Wanted(),
   };
 }
 
@@ -6191,7 +6292,11 @@ function labelLayoutKey(viewName) {
   const frame = viewName === 'disk'
     ? `${DISK.width}|${JSON.stringify(state.diskWhen)}`
     : `${state.renderId}`;
-  return JSON.stringify([frame, labelRequestBase()]);
+  // ``related`` only adds highlight markers; it never changes the layout, so
+  // it is deliberately absent from the key (and from the lock's view of it).
+  const base = labelRequestBase(viewName);
+  delete base.related;
+  return JSON.stringify([frame, base]);
 }
 
 /** The frame each frozen layout belongs to, as of the request that made it. */
@@ -6228,6 +6333,58 @@ function scalePlan(plan, k) {
   };
 }
 
+/** The same layout fitted to a frame of another size, per axis.
+ *
+ * A plan is in the pixels of the frame it was laid out for.  A saved file is
+ * usually the same frame at another size, and occasionally the plan on hand is
+ * still the previous render's (a resolution change lands while the labels are
+ * being refreshed).  Scaling the plan to the picture before painting is what
+ * keeps a name on its own ground in both cases; without it the boxes sit at
+ * the old frame's coordinates and the export looks shifted as a block.
+ */
+function scalePlanAxes(plan, scaleX, scaleY) {
+  if (!plan || !plan.frame) return plan;
+  const sx = Number(scaleX), sy = Number(scaleY);
+  if (!(sx > 0) || !(sy > 0)) return plan;
+  if (Math.abs(sx - 1) < 1e-6 && Math.abs(sy - 1) < 1e-6) return plan;
+  // A single scalar for the type keeps glyphs undistorted; positions and boxes
+  // follow their own axes, because a frame and its export need not round to
+  // exactly the same aspect.
+  const fontScale = Math.sqrt(sx * sy);
+  return {
+    ...plan,
+    frame: {
+      ...plan.frame,
+      width: plan.frame.width * sx,
+      height: plan.frame.height * sy,
+    },
+    font_px: (plan.font_px || 13) * fontScale,
+    items: (plan.items || []).map((item) => ({
+      ...item,
+      x: item.x * sx,
+      y: item.y * sy,
+      radius_px: (item.radius_px || 0) * fontScale,
+      label_x: item.label_x === null || item.label_x === undefined
+        ? item.label_x : item.label_x * sx,
+      label_y: item.label_y === null || item.label_y === undefined
+        ? item.label_y : item.label_y * sy,
+      label_w: (item.label_w || 0) * sx,
+      label_h: (item.label_h || 0) * sy,
+      outline: item.outline
+        ? item.outline.map(([x, y]) => [x * sx, y * sy]) : item.outline,
+    })),
+  };
+}
+
+/** Fit a plan to the pixel size of the picture it is about to be drawn on. */
+function fitPlanToFrame(plan, width, height) {
+  if (!plan || !plan.frame) return plan;
+  const w = Number(plan.frame.width), h = Number(plan.frame.height);
+  const targetW = Number(width), targetH = Number(height);
+  if (!(w > 0) || !(h > 0) || !(targetW > 0) || !(targetH > 0)) return plan;
+  return scalePlanAxes(plan, targetW / w, targetH / h);
+}
+
 /** The frozen full-disk layout, when it describes the frame being exported.
  *
  * The plan is in the *preview's* pixels, so the caller scales it to the export;
@@ -6251,7 +6408,7 @@ function lockedDiskPlan(when, width) {
  */
 async function diskLabelsAt(width, when) {
   const scale = width / Math.max(1, DISK.width);
-  const base = labelRequestBase();
+  const base = labelRequestBase('disk');
   return await fetchLabels('disk', {
     // The instant the frame was rendered for, not whatever the observer fields
     // say now: an export rendered at 09:00 must not carry 08:00's names.
@@ -6293,7 +6450,10 @@ async function refreshLabels() {
   const locked = labelLockOn();
   if (state.diskImage && state.diskWhen) {
     const key = labelLayoutKey('disk');
-    if (!(locked && state.labels.disk && labelLockKeys.disk === key)) {
+    const related = relatedNameFor('disk');
+    const staleRelated = ((state.labels.disk && state.labels.disk.related) || null)
+      !== (related || null);
+    if (staleRelated || !(locked && state.labels.disk && labelLockKeys.disk === key)) {
       const plan = await diskLabelsAt(DISK.width);
       if (seq !== labelSeq) return;
       if (plan) {
@@ -6305,8 +6465,11 @@ async function refreshLabels() {
   }
   if (state.rawImage && state.renderId) {
     const key = labelLayoutKey('region');
-    if (!(locked && state.labels.region && labelLockKeys.region === key)) {
-      const base = labelRequestBase();
+    const related = relatedNameFor('region');
+    const staleRelated = ((state.labels.region && state.labels.region.related) || null)
+      !== (related || null);
+    if (staleRelated || !(locked && state.labels.region && labelLockKeys.region === key)) {
+      const base = labelRequestBase('region');
       const plan = await fetchLabels('region', {
         frame: 'region',
         render_id: state.renderId,
@@ -8400,8 +8563,9 @@ function buildEventKinds() {
     ['new_moon', '朔月'], ['first_quarter', '上弦月'],
     ['full_moon', '满月'], ['last_quarter', '下弦月'],
     ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
-    ['highest_moon', '最高月亮'],
+    ['highest_moon', '最高月亮'], ['lowest_moon', '最低月亮'],
     ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
+    ['jewelled_handle', '月面 the jewelled handle'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
@@ -8502,6 +8666,8 @@ function eventRowFromForecast(event) {
       ? Number(event.altitude_deg) : null,
     observable: event.observable !== false,
     detail: String(event.detail || ''),
+    metrics: (event.metrics && typeof event.metrics === 'object')
+      ? event.metrics : null,
     window_start_utc: event.window_start_utc || null,
     window_end_utc: event.window_end_utc || null,
   };
@@ -8522,6 +8688,14 @@ function crescentEventRow(item) {
     detail: `照亮 ${Number.isFinite(illuminate) ? illuminate.toFixed(2) : '—'}%`
       + `　距角 ${Number.isFinite(elongation) ? elongation.toFixed(1) : '—'}°`
       + `　${item.night || ''}${item.session === 'sunset' ? ' 日落时段' : ' 日出时段'}`,
+    metrics: {
+      ...((item.metrics && typeof item.metrics === 'object') ? item.metrics : {}),
+      // The session report measured these at the same best moment; prefer its
+      // own numbers so the table and the list cannot disagree.
+      illumination_percent: Number.isFinite(illuminate) ? illuminate : null,
+      altitude_deg: Number.isFinite(elevation) ? elevation : null,
+      elongation_deg: Number.isFinite(elongation) ? elongation : null,
+    },
     window_start_utc: item.window_start_utc || null,
     window_end_utc: item.window_end_utc || null,
   };
@@ -8665,25 +8839,120 @@ function eventLocalParts(iso, tz) {
   return { date: local.slice(5, 10), time: local.slice(11, 16) };
 }
 
+/* The table columns, one definition per kind of event.  The request asked for
+ * different columns for different forecasts: a phase event is about age,
+ * illumination and brightness, while an X/V window is about its best moment,
+ * duration and colongitude.  A fixed six-column table could only show the
+ * intersection, so each row set carries its own headers and the header is
+ * rebuilt when the set changes. */
+const EVENT_COLUMNS = {
+  date: '日期', time: '时刻', label: '事件', age: '月龄', lunar: '农历',
+  phaseAngle: '相位角', illumination: '照明度', diameter: '视直径（角分）',
+  altitude: '高度角', azimuth: '方位角', distance: '地心距',
+  magnitude: '亮度', surfaceBrightness: '月面亮度', earthshine: '地照亮度',
+  best: '最佳时刻', start: '开始时间', end: '结束时间',
+  duration: '持续时长', elongation: '距角', colongitude: '余经度',
+  detail: '详情',
+};
+
+const PHASE_COLUMNS = ['date', 'time', 'label', 'age', 'lunar', 'phaseAngle',
+  'illumination', 'diameter', 'altitude', 'azimuth', 'distance', 'magnitude',
+  'surfaceBrightness', 'earthshine'];
+const PHASE_COLUMNS_NO_EARTHSHINE = PHASE_COLUMNS.filter(
+  (key) => key !== 'earthshine');
+
+const EVENT_COLUMN_SETS = {
+  full_moon: PHASE_COLUMNS_NO_EARTHSHINE,
+  new_moon: PHASE_COLUMNS,
+  first_quarter: PHASE_COLUMNS,
+  last_quarter: PHASE_COLUMNS,
+  supermoon: ['date', 'time', 'label', 'diameter', 'distance', 'age', 'lunar',
+    'phaseAngle', 'illumination', 'altitude', 'azimuth', 'surfaceBrightness'],
+  micromoon: ['date', 'time', 'label', 'diameter', 'distance', 'age', 'lunar',
+    'phaseAngle', 'illumination', 'altitude', 'azimuth', 'surfaceBrightness'],
+  highest_moon: ['date', 'time', 'label', 'altitude', 'azimuth', 'age', 'lunar',
+    'phaseAngle', 'illumination', 'diameter', 'distance', 'surfaceBrightness'],
+  lowest_moon: ['date', 'time', 'label', 'altitude', 'azimuth', 'age', 'lunar',
+    'phaseAngle', 'illumination', 'diameter', 'distance', 'surfaceBrightness'],
+  lunar_eclipse: ['date', 'time', 'label', 'age', 'lunar', 'phaseAngle',
+    'illumination', 'diameter', 'distance', 'altitude', 'azimuth',
+    'surfaceBrightness'],
+  xvl: ['date', 'label', 'best', 'start', 'end', 'duration', 'altitude',
+    'azimuth', 'age', 'lunar', 'phaseAngle', 'colongitude', 'illumination',
+    'diameter', 'distance', 'surfaceBrightness'],
+  jewelled_handle: ['date', 'label', 'best', 'start', 'end', 'duration',
+    'altitude', 'azimuth', 'age', 'lunar', 'phaseAngle', 'colongitude',
+    'illumination', 'diameter', 'distance', 'surfaceBrightness'],
+  crescent: ['date', 'time', 'label', 'illumination', 'best', 'start', 'end',
+    'altitude', 'azimuth', 'elongation', 'age', 'lunar', 'phaseAngle',
+    'diameter', 'distance', 'surfaceBrightness'],
+};
+
+function eventColumnsFor(kind) {
+  return EVENT_COLUMN_SETS[kind]
+    || ['date', 'time', 'label', 'altitude', 'detail'];
+}
+
+/** One numeric metric, or the row's legacy field when the CSV had none. */
+function eventMetric(row, key) {
+  const metrics = (row && row.metrics) || {};
+  if (key === 'altitude') {
+    const raw = metrics.altitude_deg;
+    const value = (raw === null || raw === undefined || raw === '')
+      ? NaN : Number(raw);
+    if (Number.isFinite(value)) return value;
+    const legacy = row && row.altitude_deg;
+    if (legacy === null || legacy === undefined || legacy === '') return null;
+    const fallback = Number(legacy);
+    return Number.isFinite(fallback) ? fallback : null;
+  }
+  if (key === 'elongation') {
+    const raw = metrics.elongation_deg;
+    const value = (raw === null || raw === undefined || raw === '')
+      ? NaN : Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+  const field = {
+    age: 'age_days', phaseAngle: 'phase_angle_deg',
+    illumination: 'illumination_percent', diameter: 'diameter_arcmin',
+    azimuth: 'azimuth_deg', distance: 'distance_km', magnitude: 'magnitude',
+    surfaceBrightness: 'surface_brightness', earthshine: 'earthshine_magnitude',
+    colongitude: 'colongitude_deg',
+  }[key];
+  if (!field) return null;
+  const raw = metrics[field];
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 /** The value a header sorts by.  Missing data sorts last in either direction. */
 function eventSortValue(row, key) {
-  if (key === 'altitude') {
-    const value = Number(row.altitude_deg);
-    return Number.isFinite(value) ? value : -Infinity;
+  if (key === 'date' || key === 'time' || key === 'best') {
+    const stamp = Date.parse(row.when_utc);
+    return Number.isFinite(stamp) ? stamp : 0;
   }
-  if (key === 'window') {
+  if (key === 'start' || key === 'window') {
     const stamp = Date.parse(row.window_start_utc || row.when_utc);
     return Number.isFinite(stamp) ? stamp : 0;
   }
-  if (key === 'label') {
-    return String(row.label || row.kind || '');
+  if (key === 'end') {
+    const stamp = Date.parse(row.window_end_utc || row.when_utc);
+    return Number.isFinite(stamp) ? stamp : 0;
   }
-  if (key === 'detail') {
-    return String(row.detail || '');
+  if (key === 'duration') {
+    const start = Date.parse(row.window_start_utc);
+    const end = Date.parse(row.window_end_utc);
+    return Number.isFinite(start) && Number.isFinite(end)
+      ? (end - start) / 60000 : -Infinity;
   }
-  // 日期 and 时刻 both order by the same instant; the two columns show it split.
-  const stamp = Date.parse(row.when_utc);
-  return Number.isFinite(stamp) ? stamp : 0;
+  if (key === 'label') return String(row.label || row.kind || '');
+  if (key === 'lunar') {
+    return String(((row.metrics || {}).lunar) || '');
+  }
+  if (key === 'detail') return String(row.detail || '');
+  const value = eventMetric(row, key);
+  return Number.isFinite(value) ? value : -Infinity;
 }
 
 function sortedEventRows() {
@@ -8705,7 +8974,9 @@ function sortedEventRows() {
 
 function syncEventSortMarks() {
   const sort = state.eventSort || { key: 'date', dir: 1 };
-  for (const th of document.querySelectorAll('#event-window th[data-sort]')) {
+  const head = $('event-window-head');
+  if (!head) return;
+  for (const th of head.children) {
     const active = th.dataset.sort === sort.key;
     if (active) {
       th.dataset.order = sort.dir > 0 ? '↑' : '↓';
@@ -8717,17 +8988,102 @@ function syncEventSortMarks() {
   }
 }
 
-function wireEventSortHeaders() {
-  for (const th of document.querySelectorAll('#event-window th[data-sort]')) {
+/** Rebuild the header for one kind.  The cells are the only thing that
+ *  changes: the table window is not reopened, and the sort key is kept if the
+ *  new set still has that column. */
+function renderEventHeader(kind) {
+  const head = $('event-window-head');
+  if (!head) return;
+  head.innerHTML = '';
+  for (const key of eventColumnsFor(kind)) {
+    const th = document.createElement('th');
+    th.className = 'sortable';
+    th.dataset.col = key;
+    th.dataset.sort = key;
+    th.textContent = EVENT_COLUMNS[key] || key;
     th.addEventListener('click', () => {
-      const key = th.dataset.sort;
       const current = state.eventSort || { key: 'date', dir: 1 };
-      state.eventSort = {
-        key,
-        dir: current.key === key ? -current.dir : 1,
-      };
+      state.eventSort = { key, dir: current.key === key ? -current.dir : 1 };
       renderEventWindowRows();
     });
+    head.appendChild(th);
+  }
+  const columns = eventColumnsFor(kind);
+  if (state.eventSort && !columns.includes(state.eventSort.key)) {
+    state.eventSort = { key: 'date', dir: 1 };
+  }
+}
+
+function eventSigned(value, digits = 1) {
+  return Number.isFinite(value)
+    ? `${value >= 0 ? '+' : ''}${value.toFixed(digits)}°` : '—';
+}
+
+/** The text of one cell.  Numbers are formatted here, not on the server, so the
+ *  table follows the reader's language and time zone. */
+function eventCellText(row, key, tz) {
+  const parts = eventLocalParts(row.when_utc, tz);
+  switch (key) {
+    case 'date': return parts.date;
+    case 'time': return parts.time;
+    case 'label': return row.label || row.kind || '事件';
+    case 'best': return eventLocalText(row.when_utc, tz);
+    case 'start': return eventLocalText(row.window_start_utc, tz);
+    case 'end': return eventLocalText(row.window_end_utc, tz);
+    case 'duration': {
+      const start = Date.parse(row.window_start_utc);
+      const end = Date.parse(row.window_end_utc);
+      return Number.isFinite(start) && Number.isFinite(end)
+        ? `${Math.round((end - start) / 60000)} min` : '—';
+    }
+    case 'age': {
+      const value = eventMetric(row, 'age');
+      return Number.isFinite(value) ? `${value.toFixed(2)} d` : '—';
+    }
+    case 'lunar': return String(((row.metrics || {}).lunar) || '—');
+    case 'phaseAngle': {
+      const value = eventMetric(row, 'phaseAngle');
+      return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
+    }
+    case 'illumination': {
+      const value = eventMetric(row, 'illumination');
+      return Number.isFinite(value) ? `${value.toFixed(2)}%` : '—';
+    }
+    case 'diameter': {
+      const value = eventMetric(row, 'diameter');
+      return Number.isFinite(value) ? `${value.toFixed(2)}′` : '—';
+    }
+    case 'altitude': return eventSigned(eventMetric(row, 'altitude'));
+    case 'azimuth': {
+      const value = eventMetric(row, 'azimuth');
+      return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
+    }
+    case 'distance': {
+      const value = eventMetric(row, 'distance');
+      return Number.isFinite(value)
+        ? `${Math.round(value).toLocaleString('en-US')} km` : '—';
+    }
+    case 'magnitude': {
+      const value = eventMetric(row, 'magnitude');
+      return Number.isFinite(value) ? `${value.toFixed(2)} mag` : '—';
+    }
+    case 'surfaceBrightness': {
+      const value = eventMetric(row, 'surfaceBrightness');
+      return Number.isFinite(value) ? `${value.toFixed(2)} mag/″²` : '—';
+    }
+    case 'earthshine': {
+      const value = eventMetric(row, 'earthshine');
+      return Number.isFinite(value) ? `${value.toFixed(2)} mag` : '—';
+    }
+    case 'elongation': {
+      const value = eventMetric(row, 'elongation');
+      return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
+    }
+    case 'colongitude': {
+      const value = eventMetric(row, 'colongitude');
+      return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
+    }
+    default: return row.detail || '—';
   }
 }
 
@@ -8737,31 +9093,26 @@ function renderEventWindowRows() {
   if (!body) return;
   body.innerHTML = '';
   const tz = Number($('tz').value) || 0;
-  for (const row of sortedEventRows()) {
+  // A forecast is one kind at a time; an imported file may mix kinds, and in
+  // that case the first row names the columns (a table cannot have one header
+  // per row).  Using the *unsorted* first row keeps the header stable while a
+  // column is being clicked.
+  const kind = (state.eventTable[0] && state.eventTable[0].kind) || 'full_moon';
+  renderEventHeader(kind);
+  const columns = eventColumnsFor(kind);
+  // The header may have reset a sort key that the new column set does not
+  // contain; sort again with the key that is actually shown.
+  const rows = sortedEventRows();
+  for (const row of rows) {
     const tr = document.createElement('tr');
     tr.dataset.observable = row.observable === false ? 'false' : 'true';
-    tr.title = '双击把主界面时间设为这一刻';
-    const parts = eventLocalParts(row.when_utc, tz);
-    const date = document.createElement('td');
-    date.className = 'date';
-    date.textContent = parts.date;
-    const time = document.createElement('td');
-    time.className = 'time';
-    time.textContent = parts.time;
-    const kind = document.createElement('td');
-    kind.className = 'kind';
-    kind.textContent = row.label || row.kind || '事件';
-    const height = document.createElement('td');
-    height.className = 'height';
-    height.textContent = row.altitude_deg === null || row.altitude_deg === undefined
-      ? '—' : `${fmt(row.altitude_deg, 1)}°`;
-    const windowCell = document.createElement('td');
-    windowCell.className = 'window';
-    windowCell.textContent = eventRangeText(row, tz) || '—';
-    const detail = document.createElement('td');
-    detail.className = 'detail';
-    detail.textContent = row.detail || '';
-    tr.append(date, time, kind, height, windowCell, detail);
+    tr.title = row.detail || '双击把主界面时间设为这一刻';
+    for (const key of columns) {
+      const td = document.createElement('td');
+      td.className = key === 'label' ? 'kind' : (key === 'altitude' ? 'height' : key);
+      td.textContent = eventCellText(row, key, tz);
+      tr.appendChild(td);
+    }
     tr.addEventListener('dblclick', () => setMainTimeFromEventRow(row));
     body.appendChild(tr);
   }
@@ -9282,6 +9633,7 @@ function animationAnnotationsPayload() {
     only_illuminated: !$('label-shadow').checked,
     satellite: satelliteMode(),
     avoid_overlap: !$('label-overlap').checked,
+    lunar100: lunar100Wanted(),
     labels: density.labels,
     min_radius_px: density.min_radius_px * scale,
     outline_min_radius_px: (Number(LIMITS.label_outline_px) || 9) * scale,
@@ -10588,7 +10940,6 @@ function init() {
   $('events-end-sync').addEventListener('click', () => {
     syncRangeTime('events-end', '结束', loadEvents);
   });
-  wireEventSortHeaders();
   $('event-window-open').addEventListener('click', openEventWindow);
   $('event-window-close').addEventListener('click', closeEventWindow);
   $('event-window-export').addEventListener('click', exportEventCsv);

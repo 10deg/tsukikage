@@ -59,6 +59,7 @@ __all__ = [
     "NOMENCLATURE_FILE",
     "load_nomenclature",
     "load_chinese_names",
+    "load_lunar100",
     "marker_radius_px",
     "outline_exit_distance",
     "annotation_catalogue",
@@ -67,6 +68,7 @@ __all__ = [
     "region_frame",
     "rim_outline",
     "rim_anchor",
+    "related_crater_names",
     "Annotation",
     "AnnotationPlan",
     "plan_annotations",
@@ -81,6 +83,23 @@ __all__ = [
 
 #: Full IAU gazetteer for the Moon, rebuilt by ``tools/fetch_nomenclature.py``.
 NOMENCLATURE_FILE = "lunar_nomenclature.csv"
+
+#: Charles Wood's Lunar 100 observing list, transcribed from the published
+#: table.  The file is data, not a build product: its rows are fixed by the
+#: 2004 Sky & Telescope article and do not change when the IAU gazetteer does.
+LUNAR100_FILE = "lunar100.csv"
+
+#: A Lunar 100 entry with no published diameter (a ray system, a rille, a
+#: region) is a point on the map, not a circle.  One kilometre keeps the
+#: ``diameter_km`` contract positive without inventing a real extent; the
+#: planner draws the marker and no rim.
+LUNAR100_POINT_DIAMETER_KM = 1.0
+
+#: The first entries of the Lunar 100 are about the Moon as a whole -- the
+#: satellite, earthshine, the mare/highland dichotomy -- and have no point on
+#: the surface to annotate.  They are kept in the data file with blank
+#: coordinates and explained in the page's Lunar 100 tooltip.
+LUNAR100_NO_POSITION = frozenset({1, 2, 3})
 
 #: What a label may say: the official Chinese name, the IAU English one, or
 #: both.  ``zh`` falls back to English for the few features that have no
@@ -131,6 +150,7 @@ FEATURE_CLASSES: Tuple[str, ...] = (
     "imp",
     "impact",
     "albedo",
+    "lunar100",
     "other",
 )
 
@@ -159,6 +179,7 @@ CLASS_LABELS: Dict[str, Tuple[str, str]] = {
     "imp": ("不规则月海斑块", "Irregular mare patch"),
     "impact": ("撞击闪光", "NELIOTA impact"),
     "albedo": ("反射率特征点", "Albedo feature"),
+    "lunar100": ("Lunar 100", "The Lunar 100"),
     "other": ("其他", "Other"),
 }
 
@@ -201,6 +222,7 @@ _CLASS_BY_KIND = {
     "Contemporary meteoritic impact": "impact",
     "Impact basin": "basin",
     "Historical site": "statio",
+    "Lunar 100": "lunar100",
 }
 
 #: The first word of an IAU name *is* the feature family -- ``Mare Imbrium``,
@@ -330,6 +352,12 @@ _SITE_LIMIT = 40
 #: something several times larger.
 _HIGHLIGHT_BONUS = 22.0
 
+#: A Lunar 100 target is a curated observing subject, so it outranks an
+#: arbitrary neighbour of the same apparent size while that switch is on.  It
+#: does not outrank the showpiece list (which is the project's own selection)
+#: and it is not applied at all while the Lunar 100 class is off.
+_LUNAR100_BONUS = 18.0
+
 #: Marker discs are drawn this size regardless of a feature's real extent, and
 #: the planner keeps labels off them; past a certain size a ray crater would
 #: otherwise reserve a circle bigger than the label it is trying to place.
@@ -353,6 +381,19 @@ _OUTLINE_CLASSES = frozenset({"basin", "crater", "mare", "lacus", "sinus", "palu
 #: and the centroid of a circle invented around it is not a better answer than
 #: the catalogue's own centre.
 _RIM_CENTRED_CLASSES = frozenset({"crater", "basin"})
+
+#: Classes whose *height* is allowed to move the projected point.  Only the
+#: crater class: a mare's -- or a basin's -- level is an average over a very
+#: large, irregular patch, and standing the single catalogue centre on that
+#: average made the point drift away from the middle of the patch near the limb.
+#: Everything else keeps the historical reference-sphere projection
+#: (``elevation_km``), which is what it had before the height field was used.
+_TERRAIN_LIFT_CLASSES = frozenset({"crater"})
+
+#: The genuinely round impact features, used where a *rim* is meaningful
+#: (recentring a marker on the drawn shape).  This is a separate question from
+#: which classes get the centre-height lift above.
+_ROUND_IMPACT_CLASSES = frozenset({"crater", "basin"})
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +438,77 @@ def load_chinese_names(path: Optional[Any] = None) -> Dict[str, str]:
     return names
 
 
+def load_lunar100(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
+    """Read the Lunar 100 observing list.
+
+    The workbook the list came from is a table for a reader, not a machine:
+    coordinates are strings such as ``18.9N`` / ``3.7W`` and a few sizes are
+    ``—`` or ``N/A``.  The shipped ``lunar100.csv`` is the normalised form of
+    that table: decimal signed degrees, a blank size where the list has none,
+    and the list number kept as :attr:`SurfaceFeature.lunar100`.
+
+    Rows with no coordinates are the first few entries about the Moon as a
+    whole; they cannot be placed on a frame and are skipped.  A blank size
+    becomes :data:`LUNAR100_POINT_DIAMETER_KM`, the point sentinel -- the
+    annotation planner still draws the marker and simply has no rim to draw.
+    """
+    source = Path(path) if path is not None else package_data_dir() / LUNAR100_FILE
+    if not source.is_file():
+        raise TargetDataError(
+            f"Lunar 100 list not found: {source}. It ships with the package; "
+            "regenerate it from out/Lunar 100.xlsx."
+        )
+    features: List[SurfaceFeature] = []
+    try:
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            for row_number, row in enumerate(csv.DictReader(handle), start=2):
+                try:
+                    number = int(str(row.get("L") or "").strip())
+                except ValueError:
+                    continue
+                name = (row.get("English Name") or "").strip()
+                if not name:
+                    continue
+                lat_text = (row.get("Lat") or "").strip()
+                lon_text = (row.get("Lon") or "").strip()
+                if not lat_text or not lon_text:
+                    continue
+                try:
+                    lat = float(lat_text)
+                    lon = float(lon_text)
+                    diameter = float((row.get("Diameter") or "").strip() or 0.0)
+                except ValueError as exc:
+                    raise TargetDataError(
+                        f"{source.name} row {row_number}: cannot read "
+                        f"Lat/Lon/Diameter for {name!r} ({exc})."
+                    ) from exc
+                if not (-90.0 <= lat <= 90.0):
+                    raise TargetDataError(
+                        f"{source.name} row {row_number}: latitude {lat} is off "
+                        "the globe."
+                    )
+                significance = (row.get("Significance") or "").strip()
+                if diameter <= 0.0:
+                    diameter = LUNAR100_POINT_DIAMETER_KM
+                features.append(
+                    SurfaceFeature(
+                        name_en=name,
+                        name_zh=(row.get("名称") or "").strip(),
+                        lat_deg=lat,
+                        lon_deg=((lon + 180.0) % 360.0) - 180.0,
+                        diameter_km=float(diameter),
+                        kind="Lunar 100",
+                        note=significance,
+                        diameter_source="lunar100",
+                        lunar100=number,
+                        lunar100_significance=significance,
+                    )
+                )
+    except OSError as exc:  # pragma: no cover - racing deletion
+        raise TargetDataError(f"Cannot read {source}: {exc}") from exc
+    return tuple(features)
+
+
 def _name_key(name: str) -> str:
     """Fold a name for matching: accents, case and spacing do not count."""
     folded = unicodedata.normalize("NFKD", str(name or ""))
@@ -408,6 +520,7 @@ def annotation_catalogue(
     path: Optional[Any] = None,
     *,
     showpieces: Optional[Sequence[SurfaceFeature]] = None,
+    lunar100_path: Optional[Any] = None,
 ) -> Tuple[SurfaceFeature, ...]:
     """Everything worth labelling: the gazetteer, with showpieces taking priority.
 
@@ -422,6 +535,14 @@ def annotation_catalogue(
     catalogue's own translations, which were informal: the showpieces call
     Clavius 克拉维斯环形山, the official table calls it 克拉维斯, and the
     official name is the one the page should show.
+
+    The Lunar 100 is a second, curated classification layered on top of the
+    gazetteer rather than a parallel catalogue.  A name the gazetteer already
+    has (Clavius, Tycho, Mare Crisium) is the same row with
+    ``lunar100`` set; only the list's descriptive entries that the IAU does not
+    name (``Straight Wall``, ``Altai Scarp``, ``Hadley Rille``) are added as
+    rows of their own.  That is what lets the page show one label per place
+    whether the Lunar 100 switch is on or off.
     """
     primary = tuple(showpieces) if showpieces is not None else load_features()
     gazetteer = load_nomenclature(path)
@@ -454,6 +575,25 @@ def annotation_catalogue(
         # are different features that both belong in the list.
         shown.add(feature.name_en)
         features.append(_with_gazetteer_kind(feature))
+
+    # The Lunar 100 is an observing list, not a geological family: tag the
+    # place that is already in the catalogue, and add only the descriptive
+    # names the IAU gazetteer does not carry.  The first three list entries
+    # have no position and were skipped by the loader.
+    by_key = {_name_key(feature.name_en): index
+              for index, feature in enumerate(features)}
+    for entry in load_lunar100(lunar100_path):
+        key = _name_key(entry.name_en)
+        if key in by_key:
+            index = by_key[key]
+            features[index] = replace(
+                features[index],
+                lunar100=int(entry.lunar100),
+                lunar100_significance=entry.lunar100_significance,
+            )
+        else:
+            by_key[key] = len(features)
+            features.append(entry)
     return tuple(features)
 
 
@@ -673,13 +813,16 @@ def region_frame(
     height: int,
     rotation_deg: float = 0.0,
     terrain: Optional[MoonTerrain] = None,
+    target_elevation_km: Optional[float] = None,
 ) -> FrameProjection:
     """Frame of :func:`moonlib_s.render_region` for the same arguments.
 
     *terrain* is used only to place the target on the height field, exactly as
-    the renderer does; a few hundred metres of elevation there is a ten-
-    thousandth of a pixel of camera tilt, so the global pyramid is close enough
-    for a frame whose window the renderer may have upgraded.
+    the renderer does.  *target_elevation_km* overrides that lookup: a caller
+    that has the render's own :attr:`MoonRegion.target_elevation_km` should pass
+    it, because the renderer may have cut a finer regional window than the
+    terrain handed in here.  At a high-resolution close-up a kilometre of
+    target-height difference tilts the camera by several pixels.
     """
     if int(width) < 8 or int(height) < 8:
         raise MoonlibError("a frame needs an image of at least 8x8 pixels.")
@@ -688,7 +831,12 @@ def region_frame(
     origin = float(view.distance_km) * np.asarray(
         view.observer_direction, dtype=np.float64
     )
-    target = _target_vector(float(lon_deg), float(lat_deg), terrain)
+    if target_elevation_km is None:
+        target = _target_vector(float(lon_deg), float(lat_deg), terrain)
+    else:
+        target = surface_normals(float(lat_deg), float(lon_deg)) * (
+            MOON_REFERENCE_RADIUS_KM + float(target_elevation_km)
+        )
     to_target = target - origin
     distance = float(np.linalg.norm(to_target))
     if distance <= 0.0:  # pragma: no cover - the observer is on the surface
@@ -1017,6 +1165,11 @@ class Annotation:
     leader: bool
     outline: Optional[Tuple[Tuple[float, float], ...]] = None
     feature_class: str = "other"
+    #: True when this item belongs to the selected crater's family -- the parent
+    #: and its lettered satellites.  The page paints those with a halo; they may
+    #: also be included without a caption when they would otherwise have lost
+    #: their label to the budget.
+    highlight: bool = False
 
     @property
     def labelled(self) -> bool:
@@ -1044,6 +1197,7 @@ class Annotation:
             "label_w": round(self.label_w, 2),
             "label_h": round(self.label_h, 2),
             "leader": self.leader,
+            "highlight": bool(self.highlight),
             "outline": (
                 None if self.outline is None
                 else [[x, y] for x, y in self.outline]
@@ -1065,6 +1219,10 @@ class AnnotationPlan:
     unplaced: int
     font_px: float
     language: str = "zh"
+    #: The feature family the plan was asked to highlight, if any (the name as
+    #: sent to :func:`plan_annotations`).  The page uses it to decide whether a
+    #: new selection needs another request.
+    related: Optional[str] = None
 
     @property
     def labelled(self) -> int:
@@ -1087,6 +1245,7 @@ class AnnotationPlan:
             "items": [item.to_dict() for item in self.items],
             "font_px": self.font_px,
             "language": self.language,
+            "related": self.related,
             "counts": {
                 "catalogue": self.catalogue_size,
                 "in_frame": self.in_frame,
@@ -1164,6 +1323,54 @@ def _crater_caption(text: str) -> str:
 def _satellite_letter(name_en: str) -> Optional[str]:
     match = re.search(r"\s([A-Z])$", str(name_en or "").strip())
     return match.group(1) if match else None
+
+
+def related_crater_names(
+    features: Sequence[SurfaceFeature], name: str
+) -> Tuple[str, ...]:
+    """The parent and lettered satellites that belong with one crater.
+
+    The IAU names a satellite crater by putting a single capital after its
+    parent's name -- ``Abbe B`` is a crater on ``Abbe`` -- so the family is a
+    prefix question, not a table lookup.  Selecting either the parent or one of
+    its letters therefore speaks about the whole family.
+
+    Only round impact features take part.  A lettered crater on a mare is still
+    a crater, but the mare itself is not a member of the family this returns:
+    the request is about the crater and its satellites, and painting a whole sea
+    as "related" would highlight a feature the reader did not ask about.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return ()
+    by_name = {feature.name_en: feature for feature in features}
+    target = by_name.get(wanted)
+    if target is None:
+        return ()
+    if feature_class(target.kind, target.diameter_km) not in _ROUND_IMPACT_CLASSES:
+        return ()
+    letter = _satellite_letter(wanted)
+    parent_name = wanted.rsplit(" ", 1)[0] if letter else wanted
+    family: List[str] = [wanted]
+    parent = by_name.get(parent_name)
+    if (
+        parent is not None
+        and parent.name_en != wanted
+        and feature_class(parent.kind, parent.diameter_km) in _ROUND_IMPACT_CLASSES
+    ):
+        family.append(parent.name_en)
+    prefix = parent_name + " "
+    for feature in features:
+        candidate = feature.name_en
+        if candidate == wanted or not candidate.startswith(prefix):
+            continue
+        suffix = candidate[len(prefix):]
+        if len(suffix) == 1 and suffix.isupper():
+            if feature_class(feature.kind, feature.diameter_km) in _ROUND_IMPACT_CLASSES:
+                family.append(candidate)
+    # Preserve order while removing duplicates (a parent and a satellite can
+    # both name the same row only if the catalogue is malformed).
+    return tuple(dict.fromkeys(family))
 
 
 def _display_label(feature: SurfaceFeature, language: str,
@@ -1285,6 +1492,8 @@ def plan_annotations(
     satellite: str = "full",
     avoid_overlap: bool = True,
     focus: Optional[Dict[str, float]] = None,
+    related: Optional[str] = None,
+    lunar100: bool = False,
 ) -> AnnotationPlan:
     """Choose the labels for one frame and lay them out.
 
@@ -1362,6 +1571,19 @@ def plan_annotations(
         ``aspect``, ``rotation_deg`` -- that gets a finer size floor and a
         second label budget.  This is 针对选框标注: the rest of the frame keeps
         its normal density.
+    related
+        Name of the crater whose family the page has selected.  The parent and
+        its lettered satellites are marked ``highlight``; any that would have
+        lost their caption to the budget are still returned as markers (without
+        a caption), so the selection can show the whole family at once.  This
+        does not change which *other* names are chosen or where they are placed.
+    lunar100
+        Show Charles Wood's Lunar 100 as an additional classification.  It is
+        **opt-in**: ``classes=None`` still means the ordinary geological
+        families, and this flag is what the page's Lunar 100 switch sends.  With
+        it on, tagged existing places are painted in the Lunar 100 colour and
+        the list's descriptive names are added; every locatable list entry also
+        gets a marker even when the label budget is smaller than 97.
     """
     if max_labels < 0:
         raise MoonlibError("max_labels cannot be negative.")
@@ -1389,6 +1611,13 @@ def plan_annotations(
     highlighted = (
         frozenset() if highlight is None else {_name_key(name) for name in highlight}
     )
+    lunar100_active = bool(lunar100) or (
+        wanted is not None and "lunar100" in wanted
+    )
+    related_names = (
+        frozenset(related_crater_names(features, related))
+        if related is not None else frozenset()
+    )
     projected = frame.project(
         [feature.lat_deg for feature in features],
         [feature.lon_deg for feature in features],
@@ -1411,8 +1640,19 @@ def plan_annotations(
         # come back are the ones this plan reports: a feature the ground pushes
         # over the limb is dropped by the same test that drops one that was
         # never in frame.
+        #
+        # Only the round impact features are lifted.  A maria's DEM height is an
+        # average over a basin-sized, irregular patch, and standing its single
+        # central point on that average pulled the label away from the middle of
+        # the patch near the limb -- the correction helped the craters and hurt
+        # exactly the large landforms this page shows most of.  Everything else
+        # keeps the reference-sphere pixel it has always had.
         latitude = np.array([feature.lat_deg for feature in features], dtype=np.float64)
         longitude = np.array([feature.lon_deg for feature in features], dtype=np.float64)
+        liftable = np.array([
+            feature_class(feature.kind, feature.diameter_km) in _TERRAIN_LIFT_CLASSES
+            for feature in features
+        ], dtype=bool)
         slack = _elevation_slack_px(frame)
         near = (
             facing
@@ -1421,7 +1661,7 @@ def plan_annotations(
             & (y >= -slack)
             & (y <= frame.height - 1 + slack)
         )
-        lifted_index = np.nonzero(near)[0]
+        lifted_index = np.nonzero(near & liftable)[0]
         if lifted_index.size:
             level = _terrain_level(terrain, frame, terrain_level)
             heights = np.asarray(
@@ -1481,6 +1721,7 @@ def plan_annotations(
 
     candidates: List[Tuple[float, int, str]] = []
     groups: Dict[int, str] = {}
+    display_groups: Dict[int, str] = {}
     unlit = too_small = in_frame = 0
     for index, feature in enumerate(features):
         if not inside[index]:
@@ -1489,15 +1730,30 @@ def plan_annotations(
         if allowed is not None and feature.kind not in allowed:
             continue
         group = feature_class(feature.kind, feature.diameter_km)
-        if wanted is not None and group not in wanted:
+        # The new Lunar 100 rows have no ordinary family; they exist only while
+        # the switch is on.  Tagged gazetteer rows keep their own class when it
+        # is off, so the default catalogue plan is unchanged.
+        if group == "lunar100" and not lunar100_active:
             continue
+        # The Lunar 100 is a second classification, not a physical kind.  When
+        # its switch is on, a tagged place is painted in the Lunar 100 colour
+        # even if its own class is also on; when the switch is off it stays in
+        # its ordinary class and nothing about the page changes.
+        show_as_lunar100 = bool(feature.lunar100) and lunar100_active
+        if wanted is not None and group not in wanted and not show_as_lunar100:
+            continue
+        display_group = "lunar100" if show_as_lunar100 else group
         # Landing sites are exempt from the size floor: a 1 km site is a dot on
         # a full disk, and it is still the thing the reader is looking for.
-        # Inside the focus box the floor is much lower -- that is what "更高密度
-        # 的标注" means, and the second budget below turns it into names.
+        # Lunar 100 entries are exempt too: several are a dome field, a ray or a
+        # rille with no published diameter, and the list's point is that they
+        # are worth finding.  Inside the focus box the floor is much lower --
+        # that is what "更高密度的标注" means, and the second budget below turns
+        # it into names.
         focus_here = bool(in_focus[index])
         floor = min_radius_px * (0.35 if focus_here else 1.0)
-        if not is_landing_site(feature) and (
+        exempt = is_landing_site(feature) or show_as_lunar100
+        if not exempt and (
             feature.diameter_km < min_diameter_km or radius[index] < floor
         ):
             too_small += 1
@@ -1514,10 +1770,12 @@ def plan_annotations(
             _size_score(float(radius[index]), unit)
             + _KIND_BONUS.get(feature.kind, 0.0)
             + (_HIGHLIGHT_BONUS if _name_key(feature.name_en) in highlighted else 0.0)
+            + (_LUNAR100_BONUS if show_as_lunar100 else 0.0)
             + 6.0 * centrality
             + (0.0 if luminous else -8.0)
         )
         groups[index] = group
+        display_groups[index] = display_group
         family = _family(feature.kind, group)
         # Only the sites themselves are exempt: a landmark inside one is a name
         # like any other.  `_family` cannot tell them apart -- both are `Statio`
@@ -1687,7 +1945,11 @@ def plan_annotations(
                 float(feature.lon_deg),
                 float(feature.diameter_km),
                 points=int(outline_points),
-                terrain=terrain,
+                terrain=(
+                    terrain
+                    if groups.get(index) in _TERRAIN_LIFT_CLASSES
+                    else None
+                ),
                 terrain_level=terrain_level,
             )
         items.append(
@@ -1711,9 +1973,123 @@ def plan_annotations(
                 label_h=label_height,
                 leader=bool(leader),
                 outline=outline,
-                feature_class=groups.get(index, "other"),
+                feature_class=display_groups.get(index, groups.get(index, "other")),
+                highlight=feature.name_en in related_names,
             )
         )
+
+    if related_names:
+        # The family may be larger than the label budget.  Those members still
+        # get a marker (and a rim when they are big enough) so the selection can
+        # show the parent-and-satellites relationship; they simply carry no
+        # caption, and adding them does not change any caption already placed.
+        present = {item.name_en for item in items}
+        for index, feature in enumerate(features):
+            if feature.name_en not in related_names or feature.name_en in present:
+                continue
+            if not bool(inside[index]):
+                continue
+            if only_illuminated and float(incidence[index]) >= 90.0:
+                continue
+            group = feature_class(feature.kind, feature.diameter_km)
+            display_group = (
+                "lunar100"
+                if feature.lunar100 and lunar100_active else group
+            )
+            outline = None
+            if (
+                group in _OUTLINE_CLASSES
+                and float(radius[index]) >= outline_min_radius_px
+            ):
+                outline = rim_outline(
+                    frame,
+                    float(feature.lat_deg),
+                    float(feature.lon_deg),
+                    float(feature.diameter_km),
+                    points=int(outline_points),
+                    terrain=terrain if group in _TERRAIN_LIFT_CLASSES else None,
+                    terrain_level=terrain_level,
+                )
+            items.append(
+                Annotation(
+                    name_en=feature.name_en,
+                    name_zh=feature.name_zh,
+                    kind=feature.kind,
+                    lat_deg=float(feature.lat_deg),
+                    lon_deg=float(feature.lon_deg),
+                    diameter_km=float(feature.diameter_km),
+                    x=float(x[index]),
+                    y=float(y[index]),
+                    radius_px=float(radius[index]),
+                    incidence_deg=float(incidence[index]),
+                    illuminated=float(incidence[index]) < 90.0,
+                    score=0.0,
+                    label="",
+                    label_x=None,
+                    label_y=None,
+                    label_w=0.0,
+                    label_h=0.0,
+                    leader=False,
+                    outline=outline,
+                    feature_class=display_group,
+                    highlight=True,
+                )
+            )
+
+    if lunar100_active:
+        # The list is a checklist: every target that is on the near side gets a
+        # marker and, where the physical kind has a rim, an outline, even when
+        # the label budget or the layout could not find room for its caption.
+        # This is what makes the switch useful at the low densities too -- the
+        # reader sees all the points and gets names where they fit.
+        present = {item.name_en for item in items}
+        for index, feature in enumerate(features):
+            if not feature.lunar100 or feature.name_en in present:
+                continue
+            if not bool(inside[index]):
+                continue
+            if only_illuminated and float(incidence[index]) >= 90.0:
+                continue
+            group = feature_class(feature.kind, feature.diameter_km)
+            outline = None
+            if (
+                group in _OUTLINE_CLASSES
+                and float(radius[index]) >= outline_min_radius_px
+            ):
+                outline = rim_outline(
+                    frame,
+                    float(feature.lat_deg),
+                    float(feature.lon_deg),
+                    float(feature.diameter_km),
+                    points=int(outline_points),
+                    terrain=terrain if group in _TERRAIN_LIFT_CLASSES else None,
+                    terrain_level=terrain_level,
+                )
+            items.append(
+                Annotation(
+                    name_en=feature.name_en,
+                    name_zh=feature.name_zh,
+                    kind=feature.kind,
+                    lat_deg=float(feature.lat_deg),
+                    lon_deg=float(feature.lon_deg),
+                    diameter_km=float(feature.diameter_km),
+                    x=float(x[index]),
+                    y=float(y[index]),
+                    radius_px=float(radius[index]),
+                    incidence_deg=float(incidence[index]),
+                    illuminated=float(incidence[index]) < 90.0,
+                    score=0.0,
+                    label="",
+                    label_x=None,
+                    label_y=None,
+                    label_w=0.0,
+                    label_h=0.0,
+                    leader=False,
+                    outline=outline,
+                    feature_class="lunar100",
+                    highlight=False,
+                )
+            )
 
     return AnnotationPlan(
         frame=frame,
@@ -1726,6 +2102,7 @@ def plan_annotations(
         unplaced=unplaced,
         font_px=float(font_px),
         language=language,
+        related=related,
     )
 
 

@@ -1139,6 +1139,15 @@ class SurfaceFeature:
     note: str = ""
     diameter_source: str = "catalogue"
     """``"catalogue"`` for a published value, ``"dem"`` for a measured one."""
+    lunar100: int = 0
+    """The item's number in Charles Wood's Lunar 100, or 0 when not on it.
+
+    The list is a *second* classification of named places, not a geological
+    kind: the same crater remains a crater, and the page decides whether to
+    paint it in the Lunar 100 colour from this number.
+    """
+    lunar100_significance: str = ""
+    """The one-line significance the Lunar 100 gives the item, if any."""
 
     @property
     def radius_km(self) -> float:
@@ -1199,6 +1208,14 @@ class MoonRegion:
     """Set when the frame was sized for a named landform."""
     covering_diameter_km: Optional[float] = None
     """Feature diameter the span was chosen to fit, in kilometres."""
+    target_elevation_km: float = 0.0
+    """Terrain height at the frame centre, above the reference sphere.
+
+    Recorded so an annotation camera can be built from the same target the
+    renderer aimed at.  Sampling the target height again from a coarser terrain
+    would tilt the camera, and at a fine plate scale that tilt is a visible
+    number of pixels -- the high-resolution label drift this field prevents.
+    """
 
     @property
     def surface_span_km(self) -> float:
@@ -1478,6 +1495,13 @@ class MoonRender:
     stats: Dict[str, Any] = field(default_factory=dict)
     region: Optional["MoonRegion"] = None
     """Set when this came from a close-up rather than a whole-disk render."""
+    terrain: Any = None
+    """The terrain actually sampled, when the caller needs to label the frame.
+
+    ``render_region`` may open a finer regional window than the one it was
+    handed; annotations must read the same window or their names will stand on
+    different ground.  This is a Python object, not part of the JSON payload.
+    """
 
     @property
     def height(self) -> int:

@@ -60,6 +60,7 @@ CLASS_COLORS = {
     "imp": "#bcd0a0",
     "impact": "#f0c0a0",
     "albedo": "#c9c9dc",
+    "lunar100": "#d9b8f2",
     "other": "#b9bec9",
 }
 

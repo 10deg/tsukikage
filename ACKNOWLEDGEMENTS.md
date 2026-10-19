@@ -41,6 +41,7 @@ Tsukikage 以 **MIT** 许可发布（见 [`LICENSE`](LICENSE)），不包含任�
 | **Virtual Moon Atlas** | 地貌**分类**（TYPE / SUBTYPE / IAU_FEATURE_TYPE）与目录覆盖 | <https://www.ap-i.net/avl/en/start>，Christian Legrand & Patrick Chevalley；VMA 免费发布 |
 | **Virtual Moon Atlas 的月球地貌数据分类** | **目录扩充**：穹丘、火成碎屑、坑洞、IMP、撞击盆地、蜿蜒月溪、历史遗址等共 1 178 条并入数据库 | 同 VMA；这些条目**暂时以英文原名显示**，`Note` 列写明「待译名」 |
 | **LPND 月球与行星地名库** | 中文译名（`zh`）与完整词条名（`term_zh`，如「维萨里坑」） | 中国科学院国家天文台 国家天文科学数据中心 <https://lpnd.bao.ac.cn/>；部分条目附 NADC 天文学名词词典链接 |
+| **The Lunar 100** | 月面目视观测目标清单，以及“Lunar 100”分类标注（编号、名称、中文名、经纬度、直径） | Charles A. Wood, “Lunar Notebook: Introducing the Lunar 100”, *Sky & Telescope*, 2004 年 4 月号, p. 113；回顾文 <https://skyandtelescope.org/observing/the-lunar-100/>。本仓库按用户提供的 `out/Lunar 100.xlsx` 整理为 `src/moonlib_s/data/lunar100.csv`；列表是事实性目录，署名与引用归原作者 |
 | **LOLA 全球地形 256 像素/度** | 月面高程与阴影（特写） | NASA / GSFC / MIT，USGS Astrogeology 发布，公有领域；int16 半米，相对 1737.4 km 参考球 |
 | **NASA SVS CGI Moon Kit** | 整月面高程（float32 千米）与色彩 | NASA SVS <https://svs.gsfc.nasa.gov/4720>（Ernie Wright / USRA）及 LRO / LROC / LOLA 团队，公有领域；色彩是 LROC WAC 的 Hapke 归一化镶嵌（Sato et al. 2014, *JGR Planets* 119, 1775–1805, <https://doi.org/10.1002/2013JE004580>），**相对反射率**，不是照片 |
 | SPICE 星历内核（DE440/DE441、`moon_pa`、地球定向等） | 月球与太阳的位置、天平动 | NAIF/JPL <https://naif.jpl.nasa.gov/pub/naif/generic_kernels/>、ESA SPICE Service |

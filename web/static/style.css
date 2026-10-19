@@ -1267,7 +1267,7 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 .event-window {
   display: flex;
   flex-direction: column;
-  width: min(920px, 94vw);
+  width: min(1280px, 96vw);
   max-height: min(76vh, 760px);
   overflow: hidden;
   border: 1px solid #39404e;
@@ -1369,6 +1369,10 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   padding: 5px 9px;
   border-bottom: 1px solid var(--line);
   vertical-align: baseline;
+  /* The per-kind tables carry up to sixteen columns; keeping each value on one
+     line is what makes them scannable, and the body scrolls sideways when the
+     window is narrower than the set. */
+  white-space: nowrap;
 }
 .event-table tbody tr { cursor: pointer; }
 .event-table tbody tr:hover { background: var(--panel-2); }
@@ -1376,7 +1380,7 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 .event-table .when { color: var(--ink); font-weight: 600; white-space: nowrap; }
 .event-table .kind { white-space: nowrap; }
 .event-table .height { white-space: nowrap; color: var(--ink-dim); }
-.event-table .detail { color: var(--ink-dim); }
+.event-table .detail { color: var(--ink-dim); white-space: normal; min-width: 16em; }
 .event-window-empty {
   padding: 28px 16px;
   text-align: center;

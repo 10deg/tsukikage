@@ -1,6 +1,6 @@
 """Event forecasts: what is worth putting in a diary.
 
-Nine things, all of them answers to "when should I look?":
+Eleven things, all of them answers to "when should I look?":
 
 ``new_moon`` / ``first_quarter`` / ``full_moon`` / ``last_quarter``
     The four principal phase instants, from :mod:`moonlib_s.phases`.
@@ -16,6 +16,10 @@ Nine things, all of them answers to "when should I look?":
     最高下弦月 -- at the transit altitude that makes it highest for *this*
     observer.  Altitude at transit is a property of the observer's latitude and
     the Moon's declination, so this one genuinely needs a site.
+``lowest_moon``
+    The same four phases, but each at the transit that is *lowest* in the
+    range: the mirror question to the one above, and the same dependence on the
+    site.
 ``lunar_eclipse``
     Penumbral, partial or total, found from the geometry of the Earth's shadow
     rather than from a table of eclipses: the Moon is eclipsed when it passes
@@ -36,14 +40,20 @@ is why the umbra radius carries the conventional 2% allowance.
     (lon -0.5°, lat -58.54°).  X/V uses the Sun's -0.5°–1.5° band with 0.5°
     as the best moment and keeps the colongitude gate at 358°.  L has its own
     band: -0.75°–0.20°, best -0.30°, fitted to the reported one-hour/three-hour/
-    five-hour offsets.  L is paired with the X/V of the same sunrise train,
-    and an overlap is written into the X/V row as "后半段可见 L".
+    five-hour offsets.  L is paired with the X/V of the same sunrise train: one
+    row per X/V is named 月面X/V/L when the two windows overlap, and 月面X/V
+    with the note "L不同时出现" when they do not.
+``jewelled_handle``
+    The "Jewelled Handle" (also called the Golden Handle): the bright arc where
+    the rising Sun first clears the Montes Jura, near Promontorium Laplace.
+    The provisional anchor is 36.54°W, 44.25°N and the provisional solar
+    altitude band is -0.5°–2.0°, best 0.5°.  First described by Patrick Moore.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -52,7 +62,9 @@ import numpy as np
 from .errors import MoonlibError
 from .frames import az_el, direction_in_moon_frame
 from .kernels import kernel_session
-from .moon import geocentric_phase_angle_deg
+from .lunardate import chinese_lunar_date
+from .moon import geocentric_phase_angle_deg, moon_state
+from .moonview import moon_magnitude, view_geometry
 from .numerics import bisect_root, wrap_angle
 from .observer import Observer
 from .phases import PhaseKind, find_phase_events
@@ -63,6 +75,7 @@ __all__ = [
     "EVENT_KINDS",
     "MoonEvent",
     "moon_events",
+    "event_metrics",
 ]
 
 #: Distance at which a full moon counts as a "supermoon", km.
@@ -129,6 +142,15 @@ LXV_SUN_ALTITUDE_BEST_DEG = -0.30
 LXV_ANCHOR_LON_DEG = -0.5
 LXV_ANCHOR_LAT_DEG = -58.54
 
+#: The Jewelled Handle (the Golden Handle), near Promontorium Laplace on the
+#: Montes Jura.  The anchor and the band are the provisional ones requested for
+#: the first test; the best moment is the middle of the band.
+JEWELLED_HANDLE_ANCHOR_LON_DEG = -36.54
+JEWELLED_HANDLE_ANCHOR_LAT_DEG = 44.25
+JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG = -0.5
+JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG = 2.0
+JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = 0.5
+
 KIND_LABELS = {
     "full_moon": "满月",
     "new_moon": "朔月",
@@ -137,8 +159,10 @@ KIND_LABELS = {
     "supermoon": "超级月亮",
     "micromoon": "最小月亮",
     "highest_moon": "最高月亮",
+    "lowest_moon": "最低月亮",
     "lunar_eclipse": "月食",
-    "xvl": "月面 X / V / L",
+    "xvl": "月面 X/V/L",
+    "jewelled_handle": "月面 the jewelled handle",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -152,7 +176,8 @@ ECLIPSE_TITLES = {
 #: Every kind the page can ask for, in the order it shows them.
 EVENT_KINDS: Tuple[str, ...] = (
     "new_moon", "first_quarter", "full_moon", "last_quarter",
-    "supermoon", "micromoon", "highest_moon", "lunar_eclipse", "xvl",
+    "supermoon", "micromoon", "highest_moon", "lowest_moon",
+    "lunar_eclipse", "xvl", "jewelled_handle",
 )
 
 #: Old names kept as aliases so a bookmarked settings file or a saved request
@@ -181,6 +206,68 @@ def _altitude_text(altitude_deg: float) -> str:
     return f"高度 {float(altitude_deg):+.1f}°"
 
 
+def _moon_surface_brightness(
+    magnitude: float, diameter_arcmin: float, illuminated_fraction: float
+) -> Optional[float]:
+    """Mean surface brightness of the illuminated part, mag/arcsec².
+
+    The whole-disk magnitude is a flux.  Spreading it over the *lit* area of
+    the apparent disc turns it into the number an observer compares between
+    phases -- the brightness of the surface itself.  A new moon has no lit area
+    to divide by, so that case is ``None`` rather than an infinity.
+    """
+    fraction = float(illuminated_fraction)
+    if not math.isfinite(fraction) or fraction <= 1e-6:
+        return None
+    radius_arcsec = 0.5 * float(diameter_arcmin) * 60.0
+    area = math.pi * radius_arcsec * radius_arcsec * fraction
+    if not math.isfinite(area) or area <= 0.0:
+        return None
+    return float(magnitude) + 2.5 * math.log10(area)
+
+
+def event_metrics(observer: Any, when: Any) -> Dict[str, Any]:
+    """The table numbers for one event instant.
+
+    One place for phase angle, age, the Chinese calendar date, apparent size,
+    distance, altitude/azimuth and the three brightness numbers, so every event
+    kind reports the same quantity under the same key.  ``observer`` is the
+    site the altitude and azimuth are judged from; the phase geometry is
+    geocentric, which is the convention an almanac uses.
+    """
+    site = Observer.from_value(observer)
+    state = moon_state(site, when)
+    view = view_geometry(site, state.when_utc)
+    phase = state.phase
+    diameter_arcmin = float(state.angular_diameter_arcsec) / 60.0
+    magnitude = moon_magnitude(
+        phase.phase_angle_geo_deg, state.geo_distance_km
+    )
+    surface = _moon_surface_brightness(
+        magnitude, diameter_arcmin, phase.illuminated_fraction_geo
+    )
+    earthshine = float(view.earthshine_apparent_magnitude)
+    if not math.isfinite(earthshine):
+        earthshine = None
+    lunar = chinese_lunar_date(state.when_utc)
+    return {
+        "age_days": float(phase.age_days),
+        "lunar": lunar.label_zh,
+        "lunar_latin": lunar.label_latin,
+        "phase_angle_deg": float(phase.phase_angle_geo_deg),
+        "illumination_percent": float(phase.illuminated_fraction_geo * 100.0),
+        "diameter_arcmin": diameter_arcmin,
+        "altitude_deg": float(state.elevation_deg),
+        "azimuth_deg": float(state.azimuth_deg),
+        "distance_km": float(state.geo_distance_km),
+        "magnitude": float(magnitude),
+        "surface_brightness": surface,
+        "earthshine_magnitude": earthshine,
+        "elongation_deg": float(state.elongation_deg),
+        "colongitude_deg": float(state.libration.colongitude_deg),
+    }
+
+
 @dataclass(frozen=True)
 class MoonEvent:
     """One forecast instant, with the two things a reader needs to judge it."""
@@ -200,6 +287,10 @@ class MoonEvent:
     #: a single instant would throw away the thing the reader is planning around.
     window_start_utc: Optional[datetime] = None
     window_end_utc: Optional[datetime] = None
+    #: The numbers the page's table shows beside the event, in the units the
+    #: column names state.  Kept as a dictionary rather than fifteen fields so
+    #: the six-key JSON contract of 1.4.4 keeps working unchanged.
+    metrics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -218,6 +309,12 @@ class MoonEvent:
             payload["window_start_utc"] = self.window_start_utc.isoformat()
         if self.window_end_utc is not None:
             payload["window_end_utc"] = self.window_end_utc.isoformat()
+        if self.metrics:
+            payload["metrics"] = {
+                key: (None if isinstance(value, float) and not math.isfinite(value)
+                      else value)
+                for key, value in self.metrics.items()
+            }
         return payload
 
 
@@ -318,6 +415,9 @@ def _anchor_normal(lon_deg: float, lat_deg: float) -> np.ndarray:
 #: Unit normals of the two anchors, in MOON_ME.
 _XVL_ANCHOR_NORMAL = _anchor_normal(XVL_ANCHOR_LON_DEG, XVL_ANCHOR_LAT_DEG)
 _LXV_ANCHOR_NORMAL = _anchor_normal(LXV_ANCHOR_LON_DEG, LXV_ANCHOR_LAT_DEG)
+_JEWELLED_HANDLE_ANCHOR_NORMAL = _anchor_normal(
+    JEWELLED_HANDLE_ANCHOR_LON_DEG, JEWELLED_HANDLE_ANCHOR_LAT_DEG
+)
 
 
 def _sun_altitude_at(normal: np.ndarray, et: float) -> float:
@@ -335,6 +435,11 @@ def _xvl_sun_altitude_deg(et: float) -> float:
 def _lxv_sun_altitude_deg(et: float) -> float:
     """The Sun's altitude above the Zach G west anchor, degrees."""
     return _sun_altitude_at(_LXV_ANCHOR_NORMAL, et)
+
+
+def _jewelled_handle_sun_altitude_deg(et: float) -> float:
+    """The Sun's altitude above the Jewelled Handle anchor, degrees."""
+    return _sun_altitude_at(_JEWELLED_HANDLE_ANCHOR_NORMAL, et)
 
 
 def _xvl_colongitude_deg(et: float) -> float:
@@ -387,13 +492,16 @@ def _altitude_windows(altitude_fn, start: float, end: float,
 
 
 def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
-    """The X/V and L windows inside *window*.
+    """The X/V windows inside *window*, with L folded into their notes.
 
     One coarse scan for each anchor's sunrise, a bisection on the solar
     altitude, and a colongitude gate for X/V.  L uses its own altitude band
     (see :data:`LXV_SUN_ALTITUDE_MIN_DEG`) and is paired with the X/V of the
-    same sunrise train.  When the two intervals overlap, the X/V row says that
-    the second half of its window also shows L.
+    same sunrise train.  There is **one row per X/V**: when the L window
+    overlaps it the row is named 月面X/V/L and the detail carries L's best
+    moment; when it does not, the detail says ``L不同时出现``.  Keeping L as a
+    second row made the reader compare two rows to learn that they belong to
+    one sunrise.
     """
     start = float(window.start_et)
     end = float(window.end_et)
@@ -413,8 +521,7 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
         _lxv_sun_altitude_deg, start, end,
         LXV_SUN_ALTITUDE_MIN_DEG, LXV_SUN_ALTITUDE_MAX_DEG,
         LXV_SUN_ALTITUDE_BEST_DEG)
-    paired_l: List[Tuple[float, float, float]] = []
-    overlaps: Dict[float, float] = {}
+    paired_l: Dict[float, Tuple[float, float, float]] = {}
     used: set = set()
     for root, finish, best in xv_windows:
         for position, (l_root, l_finish, l_best) in enumerate(l_windows):
@@ -427,52 +534,97 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
             if not (root - 6.0 * 3600.0 <= l_root <= finish + 30.0 * 3600.0):
                 continue
             used.add(position)
-            overlaps[root] = max(0.0, min(finish, l_finish) - max(root, l_root))
-            paired_l.append((l_root, l_finish, l_best))
+            paired_l[root] = (l_root, l_finish, l_best)
             break
 
     for xv_root, xv_finish, xv_best in xv_windows:
-        moon_altitude = _altitude(xv_best, observer)
+        l_pair = paired_l.get(xv_root)
+        overlap = 0.0
+        if l_pair is not None:
+            l_root, l_finish, l_best = l_pair
+            overlap = max(0.0, min(xv_finish, l_finish) - max(xv_root, l_root))
+        metrics = event_metrics(observer, xv_best)
+        metrics["colongitude_deg"] = _xvl_colongitude_deg(xv_best)
+        if overlap > 0.0:
+            title = "月面X/V/L"
+            l_time = to_utc(l_best).strftime("%H:%M")
+            note = f"L 出现时刻 {l_time} UTC"
+            metrics["l_best_utc"] = to_utc(l_best).isoformat()
+            metrics["l_start_utc"] = to_utc(l_root).isoformat()
+            metrics["l_end_utc"] = to_utc(l_finish).isoformat()
+            metrics["l_overlap"] = True
+        else:
+            title = "月面X/V"
+            note = "L不同时出现"
+            metrics["l_best_utc"] = None
+            metrics["l_start_utc"] = None
+            metrics["l_end_utc"] = None
+            metrics["l_overlap"] = False
+        moon_altitude = float(metrics["altitude_deg"])
         minutes = (xv_finish - xv_root) / 60.0
-        overlap = overlaps.get(xv_root, 0.0)
-        overlap_note = ("；后半段可见 L" if overlap > 5.0 * 60.0 else "")
         events.append(MoonEvent(
             kind="xvl",
             when_utc=to_utc(xv_best),
             altitude_deg=moon_altitude,
-            title="月面 X / V（Blanchinus B）",
+            title=title,
             detail=(
                 f"太阳高度 {XVL_SUN_ALTITUDE_MIN_DEG:g}–"
                 f"{XVL_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
                 f"{XVL_SUN_ALTITUDE_BEST_DEG:g}°　"
                 f"持续 {minutes:.0f} min　"
-                f"余经度 {_xvl_colongitude_deg(xv_root):.1f}°　"
-                f"{_altitude_text(moon_altitude)}{overlap_note}"
+                f"锚点 {XVL_ANCHOR_LON_DEG:g}° / {XVL_ANCHOR_LAT_DEG:g}°　"
+                f"余经度 {metrics['colongitude_deg']:.1f}°　"
+                f"{_altitude_text(moon_altitude)}　{note}"
             ),
             observable=moon_altitude > 0.0,
             window_start_utc=to_utc(xv_root),
             window_end_utc=to_utc(xv_finish),
+            metrics=metrics,
         ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
 
-    for l_root, l_finish, l_best in paired_l:
-        moon_altitude = _altitude(l_best, observer)
-        minutes = (l_finish - l_root) / 60.0
+
+def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
+    """The Jewelled Handle (Golden Handle) windows inside *window*.
+
+    A single solar-altitude scan at the provisional anchor.  ``_altitude_windows``
+    finds only the rising crossing of the lower edge, so the sunset crossing of
+    the same band later in the lunation is not reported: the handle is a sunrise
+    phenomenon.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    events: List[MoonEvent] = []
+    for root, finish, best in _altitude_windows(
+        _jewelled_handle_sun_altitude_deg, start, end,
+        JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG,
+        JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG,
+        JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG,
+    ):
+        metrics = event_metrics(observer, best)
+        metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
+        moon_altitude = float(metrics["altitude_deg"])
+        minutes = (finish - root) / 60.0
         events.append(MoonEvent(
-            kind="xvl",
-            when_utc=to_utc(l_best),
+            kind="jewelled_handle",
+            when_utc=to_utc(best),
             altitude_deg=moon_altitude,
-            title="月面 L（Zach G 西侧）",
+            title="月面 the jewelled handle",
             detail=(
-                f"太阳高度 {LXV_SUN_ALTITUDE_MIN_DEG:g}–"
-                f"{LXV_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
-                f"{LXV_SUN_ALTITUDE_BEST_DEG:g}°　"
+                f"太阳高度 {JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG:g}–"
+                f"{JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
+                f"{JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG:g}°　"
                 f"持续 {minutes:.0f} min　"
-                f"锚点 {LXV_ANCHOR_LON_DEG:g}° / {LXV_ANCHOR_LAT_DEG:g}°　"
-                f"{_altitude_text(moon_altitude)}"
+                f"锚点 {abs(JEWELLED_HANDLE_ANCHOR_LON_DEG):g}°W / "
+                f"{JEWELLED_HANDLE_ANCHOR_LAT_DEG:g}°N　"
+                f"{_altitude_text(moon_altitude)}　"
+                f"最早由 Patrick Moore 描述，又名“the golden handle”"
             ),
             observable=moon_altitude > 0.0,
-            window_start_utc=to_utc(l_root),
-            window_end_utc=to_utc(l_finish),
+            window_start_utc=to_utc(root),
+            window_end_utc=to_utc(finish),
+            metrics=metrics,
         ))
     events.sort(key=lambda event: event.when_utc)
     return events
@@ -505,6 +657,7 @@ def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
     for phase in find_phase_events(window):
         distance, radius_deg, _separation = _geometry(phase.et)
         altitude = _altitude(phase.et, observer)
+        metrics = event_metrics(observer, phase.et)
         size = f"视直径 {_diameter_text(radius_deg)}"
         where = f"地心距 {distance:,.0f} km"
         height = _altitude_text(altitude)
@@ -517,7 +670,7 @@ def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
         events.append(MoonEvent(
             kind=phase.kind.value, when_utc=phase.when_utc,
             altitude_deg=altitude, detail=detail,
-            observable=altitude > 0.0,
+            observable=altitude > 0.0, metrics=dict(metrics),
         ))
         if phase.kind is not PhaseKind.FULL_MOON:
             continue
@@ -525,13 +678,13 @@ def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
             events.append(MoonEvent(
                 kind="supermoon", when_utc=phase.when_utc, altitude_deg=altitude,
                 detail=f"{size}　{where}（≤ {SUPERMOON_KM:,.0f}）　{height}",
-                observable=altitude > 0.0,
+                observable=altitude > 0.0, metrics=dict(metrics),
             ))
         if distance >= MICROMOON_KM:
             events.append(MoonEvent(
                 kind="micromoon", when_utc=phase.when_utc, altitude_deg=altitude,
                 detail=f"{size}　{where}（≥ {MICROMOON_KM:,.0f}）　{height}",
-                observable=altitude > 0.0,
+                observable=altitude > 0.0, metrics=dict(metrics),
             ))
         eclipse = _greatest_eclipse(phase.et)
         if eclipse is not None:
@@ -545,29 +698,38 @@ def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
                 title=ECLIPSE_TITLES[kind_name],
                 detail=f"食分 {magnitude:.2f}　{_altitude_text(height)}",
                 observable=height > 0.0,
+                metrics=event_metrics(observer, at),
             ))
     return events
 
 
-def _highest_phase_event(observer: Observer, window,
-                         kind: PhaseKind, title: str) -> Optional[MoonEvent]:
-    """The highest transit of one phase in the range."""
+def _extreme_phase_event(
+    observer: Observer, window, kind: PhaseKind, title: str, *, lowest: bool
+) -> Optional[MoonEvent]:
+    """The highest (or lowest) transit of one phase in the range."""
     best: Optional[Tuple[float, float]] = None
     for phase in find_phase_events(window, (kind,)):
         height = _transit_altitude(phase.et, observer)
-        if best is None or height > best[0]:
+        if best is None or (height < best[0] if lowest else height > best[0]):
             best = (height, phase.et)
     if best is None:
         return None
     height, et = best
-    # The event is the *transit*, not the phase instant: that is when it is
-    # highest, and for a reader "highest in the sky" is the whole point.
+    # The event is the *transit*, not the phase instant: that is when the Moon
+    # is highest (or lowest) in the sky, and for a reader that is the whole
+    # point.  ``_transit_altitude`` found the extremum over the day; refine the
+    # instant on the same grid, then report the state at that instant.
     grid = np.linspace(et - 12 * 3600.0, et + 12 * 3600.0, 49)
+    # Both extremes are still judged at the *upper* transit: 最低月亮 asks which
+    # phase culminates lowest, not where the Moon is at its lowest point of the
+    # day (which for a circumpolar Moon is the opposite side of the sky).
     transit = max(grid, key=lambda item: _altitude(float(item), observer))
     return MoonEvent(
-        kind="highest_moon", when_utc=to_utc(float(transit)),
+        kind="lowest_moon" if lowest else "highest_moon",
+        when_utc=to_utc(float(transit)),
         altitude_deg=height, title=title,
         detail=f"{title}　中天高度 {height:.1f}°", observable=height > 0.0,
+        metrics=event_metrics(observer, float(transit)),
     )
 
 
@@ -584,7 +746,29 @@ def _highest_moon_events(observer: Observer, window) -> List[MoonEvent]:
                         (PhaseKind.FIRST_QUARTER, "最高上弦月"),
                         (PhaseKind.FULL_MOON, "最高满月"),
                         (PhaseKind.LAST_QUARTER, "最高下弦月")):
-        found = _highest_phase_event(observer, window, kind, title)
+        found = _extreme_phase_event(
+            observer, window, kind, title, lowest=False
+        )
+        if found is not None:
+            events.append(found)
+    return events
+
+
+def _lowest_moon_events(observer: Observer, window) -> List[MoonEvent]:
+    """The mirror of :func:`_highest_moon_events`: the lowest transits.
+
+    Transit altitude is set by the observer's latitude and the Moon's
+    declination, so "最低满月" is as much a property of the site as "最高满月":
+    the same phase can be low from one latitude and high from another.
+    """
+    events: List[MoonEvent] = []
+    for kind, title in ((PhaseKind.NEW_MOON, "最低朔月"),
+                        (PhaseKind.FIRST_QUARTER, "最低上弦月"),
+                        (PhaseKind.FULL_MOON, "最低满月"),
+                        (PhaseKind.LAST_QUARTER, "最低下弦月")):
+        found = _extreme_phase_event(
+            observer, window, kind, title, lowest=True
+        )
         if found is not None:
             events.append(found)
     return events
@@ -633,8 +817,12 @@ def moon_events(
         events.extend(_principal_phase_events(observer, window))
     if "highest_moon" in wanted_set:
         events.extend(_highest_moon_events(observer, window))
+    if "lowest_moon" in wanted_set:
+        events.extend(_lowest_moon_events(observer, window))
     if "xvl" in wanted_set:
         events.extend(_xvl_events(observer, window))
+    if "jewelled_handle" in wanted_set:
+        events.extend(_jewelled_handle_events(observer, window))
     keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)
