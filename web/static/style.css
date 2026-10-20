@@ -868,17 +868,33 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
   min-width: 0;
 }
 .label-bar .caret {
-  /* 三角形是这一块唯一的展开入口：比一行字更大，且用 flex 居中——glyph 自身
-     有左右边距，只放大 font-size 会看着偏左。 */
+  /* 三角形是这一块唯一的展开入口。不要用 ▸ 这个 glyph：它的墨迹在字身框里
+     并不居中（左右边距不等），flex 居中只能居中字身框，看起来总会偏。这里
+     用一个由边框画出的三角形，尺寸固定、按几何中心对齐，旋转换成向下。 */
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 20px;
   padding: 0;
-  line-height: 20px;
-  font-size: 20px;
+  line-height: 0;
+  font-size: 0;
   color: var(--ink-dim);
+}
+.label-bar .caret::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+  border-left: 6px solid currentColor;
+  /* 重心略偏左：把三角形向右挪半像素，视觉上才落在按钮的正中。 */
+  transform: translateX(0.5px);
+  transition: transform .12s ease;
+}
+.label-bar .caret[aria-expanded="true"]::before {
+  transform: translateX(0.5px) rotate(90deg);
 }
 /* The geometric switches start the fold now that the search lives above: no
    rule between them and the picture. */
@@ -1862,6 +1878,17 @@ button .en::before, button .en::after { content: ""; }
 .pane label > input[type="range"] { flex: 1 1 auto; min-width: 4em; max-width: 9em; }
 .pane .grid2 { gap: 4px 8px; }
 .pane .grid2 > label { min-width: 0; }
+/* 中文标签在 flex 行里会被长 select 挤成一列字；给文字一个不可压缩的盒子，
+   让菜单自己收缩。表面 / 去条纹 这类短标签尤其明显。 */
+.pane label.keep-label > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.pane label.keep-label > select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 8.5em;
+}
 .pane input[type="color"] { width: 2em; height: 1.4em; }
 .pane .check.inline { gap: 4px; }
 .pane > p.hint { margin: 2px 0 6px; line-height: 1.45; }
@@ -1892,6 +1919,18 @@ button .en::before, button .en::after { content: ""; }
    the viewport and every edge can be dragged. */
 /* 天空位置示意图的入口现在坐在「月球信息」的标题行里，和 EN 开关同一档：
    高度与 EN 一致（同一行的高矮），宽度由文字自己撑开，不折行。 */
+/* 月球信息这一行现在有两个入口（曲线图、天空位置）和一个语言开关。它们都
+   带 float:right，若只靠 float，DOM 顺序和屏幕上的左右顺序会相反；这里把这
+   一行改成 flex，并把「曲线图」用 auto margin 推到右侧，顺序就是标题、曲线图、
+   天空位置、EN。 */
+h2.moon-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+h2.moon-head .mini { float: none; }
+h2.moon-head .mini.curve-open { margin-left: auto; }
+
 h2 .mini.sky-open {
   margin-left: 6px;
   padding: 0 7px;
@@ -1903,7 +1942,20 @@ h2 .mini.sky-open {
   border-color: var(--accent);
   color: var(--accent);
 }
+h2 .mini.curve-open {
+  margin-left: 6px;
+  padding: 0 7px;
+  line-height: 17px;
+  font-size: 10px;
+  white-space: nowrap;
+  border-color: var(--accent);
+  color: var(--accent);
+}
 h2 .mini.sky-open:hover {
+  background: rgba(122, 162, 247, .12);
+  color: #a9c1ff;
+}
+h2 .mini.curve-open:hover {
   background: rgba(122, 162, 247, .12);
   color: #a9c1ff;
 }
@@ -2008,6 +2060,30 @@ h2 .mini.sky-open:hover {
   text-align: right;
 }
 .sky-controls select { width: auto; }
+/* 曲线图把「月亮8字」的日期/时刻/跨度收在一段里：切到地照曲线时整段隐藏，
+   横轴菜单补位，顶栏不会因为两套参数同时出现而折成三排。 */
+.curve-when,
+.curve-earth,
+#curve-when,
+#curve-earth {
+  display: inline-flex;
+  flex: 1 1 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.curve-when label,
+.curve-earth label,
+#curve-when label,
+#curve-earth label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  white-space: nowrap;
+}
+#curve-date { width: 9.6em; }
+#curve-time { width: 6.2em; }
 .sky-save {
   margin-left: auto;
   display: flex;

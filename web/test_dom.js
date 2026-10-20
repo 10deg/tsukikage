@@ -243,12 +243,34 @@ check('the sky window has a canvas, a close button and its own save row',
 check('the sky button is drawn in the accent blue',
   /h2 \.mini\.sky-open\s*\{[^}]*border-color:\s*var\(--accent\)[^}]*color:\s*var\(--accent\)/
     .test(css));
-/* 折叠箭头是几何标注那一块唯一的入口：20 px，且 flex 居中。 */
-check('the landform fold caret is large and centred',
+/* 折叠箭头是几何标注那一块唯一的入口。它不能是 ▸ 字形：字形的墨迹在字身框里
+   不居中。这里检查的是 CSS 画出的三角形和展开时的旋转。 */
+check('the landform fold caret is a centred CSS triangle',
   /\.label-bar \.caret\s*\{[^}]*display:\s*inline-flex/.test(css) &&
   /\.label-bar \.caret\s*\{[^}]*align-items:\s*center/.test(css) &&
   /\.label-bar \.caret\s*\{[^}]*justify-content:\s*center/.test(css) &&
-  /\.label-bar \.caret\s*\{[^}]*font-size:\s*20px/.test(css));
+  /\.label-bar \.caret\s*\{[^}]*font-size:\s*0/.test(css) &&
+  /\.label-bar \.caret::before\s*\{[^}]*border-left:\s*6px solid currentColor/
+    .test(css) &&
+  /\.label-bar \.caret\[aria-expanded="true"\]::before\s*\{[^}]*rotate\(90deg\)/
+    .test(css));
+/* 曲线图 is a second door in the same heading row, immediately left of
+   天空位置.  Both are accent-coloured entries, not switches. */
+check('the curve button sits left of the sky button',
+  html.indexOf('id="curve-open"') >= 0 &&
+  html.indexOf('id="curve-open"') < html.indexOf('id="sky-open"'));
+check('the curve button is drawn in the accent blue',
+  /h2 \.mini\.curve-open\s*\{[^}]*border-color:\s*var\(--accent\)[^}]*color:\s*var\(--accent\)/
+    .test(css));
+check('the curve window has both chart types and an axis switch',
+  htmlIds.has('curve-kind') && htmlIds.has('curve-xaxis') &&
+  htmlIds.has('curve-canvas') && htmlIds.has('curve-save'));
+/* 模拟设置里的“表面 / 去条纹”标签不能被长菜单挤成一列字：标签文字是
+   不可压缩的 flex 项，菜单自己收缩。 */
+check('the surface and denoise labels keep their text on one line',
+  /class="keep-label"[^>]*><span>表面<\/span>/.test(html) &&
+  /class="keep-label"[^>]*><span>去条纹<\/span>/.test(html) &&
+  /\.pane label\.keep-label > span\s*\{[^}]*white-space:\s*nowrap/.test(css));
 /* 天空位置的新控制：锁定视角、同步主界面，步长按钮独占一行。 */
 check('the sky window has a view lock and a main-clock sync',
   htmlIds.has('sky-lock-view') && htmlIds.has('sky-sync-main') &&

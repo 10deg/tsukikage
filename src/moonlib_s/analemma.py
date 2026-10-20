@@ -104,7 +104,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .errors import MoonlibError, TimeError
 from .frames import az_el
-from .models import AnalemmaPoint, _iso
+from .models import AnalemmaPoint, LunarAnalemmaPoint, _iso
+from .moon import moon_state
 from .observer import Observer
 from .sun import apparent_position, equation_of_time_minutes
 from .timeutil import TimeLike, TimeRange, as_time_range, to_et, to_local
@@ -113,6 +114,7 @@ __all__ = [
     "AnalemmaError",
     "solar_analemma",
     "classical_analemma",
+    "lunar_analemma",
     "analemma_extremes",
     "to_curve",
 ]
@@ -351,6 +353,115 @@ def solar_analemma(
             continue
         points[when_utc] = _sample_point(site, when_utc, day)
     return _dedupe_and_sort(points)
+
+
+def lunar_analemma(
+    observer: Observer,
+    start: Optional[SpanLike] = None,
+    end: Optional[SpanLike] = None,
+    *,
+    local_hour: int = 21,
+    local_minute: int = 0,
+    step_days: float = 1.0,
+    drift_minutes: float = 50.47,
+) -> List[LunarAnalemmaPoint]:
+    """The Moon's figure-eight: the sky position at the same lunar time.
+
+    The Sun returns to the same place in the sky at the same civil clock time
+    every day, so the solar analemma holds the clock fixed.  The Moon does not:
+    it returns to the same place about **51 minutes later** each day.  Holding
+    the civil clock fixed therefore gives a month-long orbit, not an analemma.
+    This sampler advances the clock by *drift_minutes* per sampled day (the mean
+    lunar day is 24 h 50.47 min) and plots the resulting small residual against
+    the Moon's orbital tilt and eccentricity.
+
+    The natural span is one synodic month.  A year is allowed but is not useful:
+    it overlays twelve of these loops.  The curve window draws the returned
+    azimuth/elevation pair, which is the sky representation the solar analemma
+    uses as well; right ascension and declination are returned too for other
+    projections and for the phase-colouring metadata.
+
+    Parameters
+    ----------
+    observer
+        Observing site.  Its timezone defines the civil clock reading; pass
+        ``observer.with_timezone(...)`` to pin a specific offset.
+    start, end
+        Span accepted by :func:`_span_range`.  When both are omitted, the
+        month starting now is sampled.
+    local_hour, local_minute
+        The wall-clock reading of the first sample (default 21:00).
+    step_days
+        Sampling interval in days, rounded up to whole calendar days.
+    drift_minutes
+        How much later the clock is each day.  The default, 50.47 min, is the
+        mean lunar day (24 h 50.47 min) and makes the Moon return to nearly the
+        same sky position; ``0`` gives the fixed-civil-clock month path instead.
+
+    Returns
+    -------
+    list of :class:`~moonlib_s.models.LunarAnalemmaPoint`
+        Sorted by UTC instant.  Each point carries right ascension, declination,
+        the horizontal position, the phase angle and the illuminated percent,
+        so the curve can be coloured by phase without another ephemeris call.
+    """
+    site = Observer.from_value(observer)  # type: ignore[arg-type]
+    if start is None and end is None:
+        anchor = to_utc(to_et(datetime.now(timezone.utc)))
+        span = as_time_range(anchor, anchor + timedelta(days=30))
+    else:
+        span = _span_range(start, end)
+    step = _step_for(step_days)
+
+    tz = site.timezone
+    start_utc = span.start_utc
+    first_day = to_local(start_utc, tz).date()
+    last_day = to_local(span.end_utc, tz).date()
+    days = _iter_local_dates(
+        first_day, last_day, step_days=step, sample_days=None, max_points=MAX_SAMPLES
+    )
+    drift = float(drift_minutes)
+    if not math.isfinite(drift):
+        raise AnalemmaError("drift_minutes must be finite.")
+    # The clock drifts forward across the month, so the last sample can land
+    # after the nominal end instant.  It is still one of the month's samples;
+    # widen the acceptance window by the whole drift rather than dropping it.
+    first_date = days[0] if days else first_day
+    last_date = days[-1] if days else last_day
+    slack = timedelta(minutes=max(0.0, drift) * max(0, (last_date - first_date).days))
+    end_utc = _end_boundary(span, tz) + slack
+
+    points: Dict[datetime, LunarAnalemmaPoint] = {}
+    for day in days:
+        # The lunar clock advances with the calendar, not with the sampling
+        # stride: a two-day step is two lunar days later, not one.
+        offset_days = (day - first_date).days
+        when_local = (
+            datetime(
+                day.year, day.month, day.day,
+                int(local_hour), int(local_minute), tzinfo=tz,
+            )
+            + timedelta(minutes=drift * offset_days)
+        )
+        when_utc = when_local.astimezone(timezone.utc)
+        if when_utc < start_utc or when_utc >= end_utc:
+            continue
+        state = moon_state(site, when_utc)
+        shown_local = when_utc.astimezone(tz)
+        points[when_utc] = LunarAnalemmaPoint(
+            when_utc=when_utc,
+            local_time=shown_local.strftime(LOCAL_TIME_FORMAT),
+            day_of_year=shown_local.timetuple().tm_yday,
+            month=shown_local.month,
+            ra_hours=float(state.ra_hours),
+            declination_deg=float(state.dec_deg),
+            azimuth_deg=float(state.azimuth_deg),
+            elevation_deg=float(state.elevation_deg),
+            phase_angle_deg=float(state.phase.phase_angle_geo_deg),
+            illumination_percent=float(state.phase.illuminated_percent_geo),
+            waxing=bool(state.phase.waxing),
+        )
+    return [points[stamp] for stamp in sorted(points)]
 
 
 def classical_analemma(

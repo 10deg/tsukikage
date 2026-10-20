@@ -46,6 +46,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
   'eventColumnsFor', 'eventCellText', 'eventMetric', 'renderEventHeader',
+  'curveSeries', 'curveTargetView', 'curveOptions', 'curveClampEarthView',
+  'openCurve', 'closeCurve',
+  'saveCurvePng', 'drawCurve',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
   'manualHitTest', 'clearManualMarks', 'overlay'];
 
@@ -193,6 +196,10 @@ function matches(element, selector) {
     return element.type === 'checkbox' && String(element.id).startsWith('class-');
   }
   if (selector === '.view-stack .zoom') return element.dataset && element.dataset.zoom !== undefined;
+  if (selector === '[data-curve-nudge]') {
+    return element.dataset && (element.dataset.curveNudge !== undefined ||
+      element.dataset['curve-nudge'] !== undefined);
+  }
   if (selector === '[title]' || selector === '[placeholder]') return false;
   if (selector === '.tab') return element.dataset && (element.dataset.tab !== undefined ||
                                                      element.dataset.train !== undefined);
@@ -476,7 +483,7 @@ function planFor(body) {
 
 function respond(url, body) {
   if (url === '/api/health') {
-    return { ok: true, limits: { preview_px: 5000, output_px: 8192, disk_px: 10000,
+    return { ok: true, limits: { preview_px: 3000, output_px: 8192, disk_px: 10000,
                                  min_px: 64, terrain_km_per_px: 0.11845058759433393,
                                  label_outline_px: 9, cpu_count: 8 },
              data_sources: SOURCES };
@@ -584,6 +591,92 @@ function respond(url, body) {
           age_days: 0.9, nights_from_new_moon: 1, photo_score: 0.35,
           yallop: 'marginal' },
       ],
+    };
+  }
+  if (url === '/api/curve') {
+    if (body.kind === 'sun8') {
+      const samples = [];
+      for (let index = 0; index < 31; index += 1) {
+        const u = index / 30;
+        samples.push({
+          when_utc: new Date(Date.UTC(2026, 0, 1 + index, 4, 0, 0)).toISOString(),
+          local_time: `2026-01-${String(1 + index).padStart(2, '0')} 12:00:00 CST`,
+          day_of_year: index + 1, month: 1 + Math.floor(index / 10),
+          ra_hours: 18 + 4 * Math.sin(2 * Math.PI * u),
+          declination_deg: -23 + 46 * u,
+          azimuth_deg: 140 + 60 * Math.sin(2 * Math.PI * u),
+          elevation_deg: 20 + 40 * Math.cos(2 * Math.PI * u),
+          equation_of_time_minutes: 0,
+        });
+      }
+      return {
+        kind: 'sun8', site: { lat: 30, lon: 120 }, tz_offset_hours: 8,
+        start_utc: '2026-01-01T00:00:00+00:00',
+        end_utc: '2027-01-01T00:00:00+00:00',
+        local_hour: 12, local_minute: 0, days: 365, drift_minutes: 0,
+        samples,
+        extremes: { azimuth_min_deg: 80, azimuth_max_deg: 200,
+                    elevation_min_deg: -20, elevation_max_deg: 60,
+                    declination_min_deg: -23, declination_max_deg: 23,
+                    equation_of_time_min_minutes: -14,
+                    equation_of_time_max_minutes: 16 },
+      };
+    }
+    if (body.kind === 'earthshine') {
+      const samples = [];
+      for (let index = 0; index <= 36; index += 1) {
+        const phase = 180 - index * 5;
+        const illum = 50 * (1 + Math.cos(phase * Math.PI / 180));
+        const magnitude = phase === 0 ? null
+          : -2.7 + 0.11 * (180 - phase) + 0.0008 * (180 - phase) ** 2;
+        samples.push({
+          phase_angle_deg: phase, illumination_percent: illum,
+          earth_phase_angle_deg: 180 - phase,
+          earthshine_ratio: 1e-4 * Math.max(0.001, 1 - phase / 200),
+          moon_magnitude: -12.73,
+          earthshine_apparent_magnitude: magnitude,
+        });
+      }
+      return {
+        kind: 'earthshine', when_utc: '2026-05-25T07:30:00+00:00',
+        site: { lat: 30, lon: 120 }, tz_offset_hours: 8,
+        earth_geometric_albedo: 0.367,
+        distance_km: 384400, earth_distance_km: 384400,
+        samples,
+        current: {
+          phase_angle_deg: 47.9, illumination_percent: 69.6,
+          earth_phase_angle_deg: 132.1, earthshine_ratio: 4e-5,
+          moon_magnitude: -12.73, earthshine_apparent_magnitude: 1.2,
+        },
+      };
+    }
+    const samples = [];
+    for (let index = 0; index < 30; index += 1) {
+      const u = index / 29;
+      samples.push({
+        when_utc: new Date(Date.UTC(2026, 0, 1 + index, 13, 0, 0)
+          + index * 50.47 * 60000).toISOString(),
+        local_time: `2026-01-${String(1 + index).padStart(2, '0')} 21:`
+          + `${String(Math.round((index * 50.47) % 60)).padStart(2, '0')}:00 CST`,
+        day_of_year: index + 1, month: 1,
+        ra_hours: (1 + 23.5 * u + 1.5 * Math.sin(2 * Math.PI * u)) % 24,
+        declination_deg: 28 * Math.sin(2 * Math.PI * u),
+        azimuth_deg: 90 + 50 * u + 6 * Math.sin(2 * Math.PI * u),
+        elevation_deg: 40 + 30 * Math.sin(2 * Math.PI * u),
+        phase_angle_deg: 180 * u,
+        illumination_percent: 100 * (0.5 + 0.5 * Math.cos(Math.PI * u)),
+        waxing: u < 0.5,
+      });
+    }
+    return {
+      kind: 'moon8', site: { lat: 30, lon: 120 }, tz_offset_hours: 8,
+      start_utc: '2026-01-01T00:00:00+00:00',
+      end_utc: '2026-01-31T00:00:00+00:00',
+      local_hour: 21, local_minute: 0, days: 30, drift_minutes: 50.47,
+      samples,
+      extremes: { ra_min_hours: 1.0, ra_max_hours: 24.0,
+                  declination_min_deg: -28, declination_max_deg: 28,
+                  elevation_min_deg: 10, elevation_max_deg: 70 },
     };
   }
   if (url === '/api/sky') {
@@ -900,10 +993,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     (html.match(/<option value="custom"/g) || []).length === 5,
     (html.match(/<option value="custom"/g) || []).length);
   check('the preview menu offers the sizes the page may ask for',
-    previewMenu.length >= 8 && previewMenu.every((px) => px <= T.LIMITS.preview_px),
+    previewMenu.length >= 7 && previewMenu.every((px) => px <= T.LIMITS.preview_px),
     previewMenu.join(','));
-  check('and includes 5000, the size that moved the cap',
-    previewMenu.includes(5000) && T.LIMITS.preview_px >= 5000, T.LIMITS.preview_px);
+  check('and tops out at 3000, the preview cap',
+    previewMenu.includes(3000) && !previewMenu.includes(4000) &&
+    !previewMenu.includes(5000) && T.LIMITS.preview_px === 3000,
+    T.LIMITS.preview_px);
   check('the save menu stays inside the disk cap',
     diskMenu.length >= 8 && diskMenu.every((px) => px <= T.LIMITS.disk_px),
     diskMenu.join(','));
@@ -1040,6 +1135,32 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('and the optical choices travel with it, not buried in the preview',
     diskBody.photometric_model === 'lunar_lambert' && diskBody.sun_samples === 1,
     JSON.stringify({ model: diskBody.photometric_model, sun: diskBody.sun_samples }));
+  // 黑白地貌 is a render mode, not a display filter: the flag has to travel
+  // with the light block so the DEM-only frame is actually drawn that way.
+  set('surface-texture', 'relief');
+  fire('surface-texture', 'change');
+  fire('refresh', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  check('the surface-texture choice reaches the render',
+    fetchCalls.filter((c) => c.url === '/api/disk').pop().body.surface_texture === false,
+    JSON.stringify(fetchCalls.filter((c) => c.url === '/api/disk').pop().body.surface_texture));
+  set('surface-texture', 'texture');
+  fire('surface-texture', 'change');
+  fire('refresh', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  check('and switching it back asks for the colour mosaic again',
+    fetchCalls.filter((c) => c.url === '/api/disk').pop().body.surface_texture === true);
+  set('terrain-denoise', '2');
+  fire('terrain-denoise', 'change');
+  fire('refresh', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  check('the DEM denoise strength reaches the render',
+    fetchCalls.filter((c) => c.url === '/api/disk').pop().body.terrain_denoise === 2);
+  set('terrain-denoise', '0');
+  fire('terrain-denoise', 'change');
+  fire('refresh', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
   // Sky light is per-point and only shows up in shadow, so it must reach the
   // render as a number -- and a blank field has to mean "off", not NaN.
   set('sky-ambient', 1.5);
@@ -2930,7 +3051,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
                     'noise-poisson', 'noise-gaussian', 'label-shadow', 'back-focus',
                     'label-colour', 'earthshine-gain', 'diffraction',
                     'earth-geometric-albedo', 'earth-samples', 'region-earthshine',
-                    'out-px', 'out-ref', 'out-kmpx', 'out-kmpx-preset',
+                    'out-px', 'out-ref', 'out-kmpx', 'out-kmpx-preset', 'surface-texture', 'terrain-denoise',
                     'mark-equator', 'mark-nearside', 'disk-earthshine']) {
     check('settings record ' + id, values[id] !== undefined);
   }
@@ -3378,6 +3499,191 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fire('sky-close', 'click');
     check('the close button hides the window',
       document.getElementById('sky-backdrop').hidden === true);
+  }
+
+
+  console.log('');
+  console.log('the curve window');
+  {
+    const ctx = document.getElementById('curve-canvas').getContext('2d');
+    ctx.drawn.texts.length = 0;
+    fire('curve-open', 'click');
+    await tick();
+    await tick();
+    const calls = fetchCalls.filter((call) => call.url === '/api/curve');
+    check('the curve button asks for the Moon figure-eight',
+      calls.length === 1 && calls[0].body.kind === 'moon8' &&
+      calls[0].body.drift_minutes === 50.47,
+      calls[0] ? JSON.stringify(calls[0].body) : 'no call');
+    check('the curve window opens on the page date',
+      document.getElementById('curve-backdrop').hidden === false
+      && document.getElementById('curve-date').value ===
+        document.getElementById('when').value.slice(0, 10),
+      `${document.getElementById('curve-backdrop').hidden} / `
+      + document.getElementById('curve-date').value);
+    check('the samples land in the state',
+      !!T.state.curve && T.state.curve.samples.length === 30);
+    check('both axes are labelled',
+      ctx.drawn.texts.some((text) => text.text.includes('方位角'))
+      && ctx.drawn.texts.some((text) => text.text.includes('高度角')));
+    check('the summary names the span and the lunar-day drift',
+      /30 点/.test(document.getElementById('curve-summary').textContent) &&
+      /每天推迟 50\.5 分钟/.test(document.getElementById('curve-summary').textContent),
+      document.getElementById('curve-summary').textContent);
+
+    // 选择本月 / 选择本年: the page's simulated date defines the range.
+    fire('curve-this-month', 'click');
+    await tick(); await tick();
+    const monthBody = fetchCalls.filter((call) => call.url === '/api/curve').pop().body;
+    check('选择本月 sets the first day and the month length',
+      document.getElementById('curve-date').value === '2026-05-01' &&
+      Number(monthBody.days) === 31,
+      `${document.getElementById('curve-date').value} / ${monthBody.days}`);
+    fire('curve-this-year', 'click');
+    await tick(); await tick();
+    const yearBody = fetchCalls.filter((call) => call.url === '/api/curve').pop().body;
+    check('选择本年 sets January 1 and the year length',
+      document.getElementById('curve-date').value === '2026-01-01' &&
+      Number(yearBody.days) === 365,
+      `${document.getElementById('curve-date').value} / ${yearBody.days}`);
+
+    set('curve-kind', 'sun8');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const sunCalls = fetchCalls.filter((call) => call.url === '/api/curve');
+    check('switching to the Sun asks for a solar figure-eight',
+      sunCalls[sunCalls.length - 1].body.kind === 'sun8' &&
+      sunCalls[sunCalls.length - 1].body.days === 365,
+      JSON.stringify(sunCalls[sunCalls.length - 1].body));
+    check('the solar chart is labelled as the Sun',
+      document.getElementById('curve-mode').textContent === '太阳8字');
+    ctx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the solar chart carries the sky axes',
+      ctx.drawn.texts.some((text) => text.text.includes('方位角')) &&
+      ctx.drawn.texts.some((text) => text.text.includes('高度角')));
+
+    set('curve-kind', 'earthshine');
+    fire('curve-kind', 'change');
+    fire('curve-kind', 'change');
+    await tick();
+    await tick();
+    const earthCalls = fetchCalls.filter((call) => call.url === '/api/curve');
+    check('switching the type asks for the earthshine curve',
+      earthCalls.length >= 1 &&
+      earthCalls[earthCalls.length - 1].body.kind === 'earthshine',
+      String(earthCalls.length));
+    check('the earthshine controls replace the date controls',
+      document.getElementById('curve-when').hidden === true &&
+      document.getElementById('curve-earth').hidden === false);
+    check('the axes are locked by default',
+      document.getElementById('curve-lock-axes').checked === true);
+    check('the phase axis cannot leave 0–180°',
+      (() => {
+        const v = T.curveClampEarthView(
+          { xMin: -40, xMax: 240, yMin: -4, yMax: 12 },
+          { kind: 'earthshine', xaxis: 'phase' });
+        return v.xMin === 0 && v.xMax === 180;
+      })());
+    ctx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the earthshine chart labels both quantities',
+      ctx.drawn.texts.some((text) => text.text.includes('相位角'))
+      && ctx.drawn.texts.some((text) => text.text.includes('照明率'))
+      && ctx.drawn.texts.some((text) => text.text.includes('地照亮度')));
+    set('curve-xaxis', 'illum');
+    fire('curve-xaxis', 'change');
+    ctx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the x-axis can be illumination instead of phase angle',
+      ctx.drawn.texts.some((text) => text.text === '照明率 (%)'));
+
+    // The Moon's year button is gone; the Sun keeps it.
+    set('curve-kind', 'moon8');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    check('the Moon has no 选择本年 button',
+      document.getElementById('curve-this-year').hidden === true);
+    set('curve-show-phase', true);
+    fire('curve-show-phase', 'change');
+    check('the Moon can draw each point as a phase icon',
+      T.curveOptions().showPhase === true);
+
+    // Time nudges: the row below the fields walks the start of the span.
+    const beforeNudge = document.getElementById('curve-time').value;
+    const nudgeButton = document.getElementById('curve-nudge-fwd-hour');
+    check('the curve has +1h nudge buttons', !!nudgeButton);
+    nudgeButton.click();
+    await tick(); await tick();
+    check('+1h moves the curve start by an hour',
+      document.getElementById('curve-time').value !== beforeNudge,
+      `${beforeNudge} -> ${document.getElementById('curve-time').value}`);
+
+    // Dragging a movable chart label stores its position.
+    T.drawCurve();
+    const badgeBox = T.state.curveTextBoxes.find((box) => box.key === 'badge');
+    check('the chart badge is a draggable label', !!badgeBox);
+    document.getElementById('curve-canvas').fire('pointerdown', {
+      clientX: badgeBox.x + 2, clientY: badgeBox.y + 2,
+      preventDefault() {}, stopPropagation() {},
+    });
+    document.dispatchEvent({ type: 'pointermove',
+      clientX: badgeBox.x + 70, clientY: badgeBox.y + 28 });
+    document.dispatchEvent({ type: 'pointerup' });
+    check('dragging a label stores its new position',
+      !!T.state.curveText.badge,
+      JSON.stringify(T.state.curveText));
+
+    // Double-clicking an axis title asks for a new one.
+    T.drawCurve();
+    sandbox.window.prompt = () => '自定义 X 轴';
+    const xTitle = T.state.curveTitleBoxes.find((box) => box.key === 'x');
+    document.getElementById('curve-canvas').fire('dblclick', {
+      clientX: xTitle && xTitle.x + 2, clientY: xTitle && xTitle.y + 2,
+    });
+    check('double-clicking the X axis title edits it',
+      T.state.curveTitles.x === '自定义 X 轴', String(T.state.curveTitles.x));
+    sandbox.window.prompt = () => '自定义主标题';
+    fire('curve-heading', 'dblclick', { preventDefault() {} });
+    check('double-clicking the main title edits it',
+      document.getElementById('curve-heading').textContent === '自定义主标题',
+      document.getElementById('curve-heading').textContent);
+    sandbox.window.prompt = undefined;
+
+    // Earthshine: 显示当前 and the movable 当前 label.
+    set('curve-kind', 'earthshine');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const currentCtx = document.getElementById('curve-canvas').getContext('2d');
+    currentCtx.drawn.texts.length = 0;
+    set('curve-show-current', false);
+    fire('curve-show-current', 'change');
+    check('显示当前 can hide the current marker',
+      !currentCtx.drawn.texts.some((text) => text.text === '当前'));
+    set('curve-show-current', true);
+    fire('curve-show-current', 'change');
+
+    // Sun colour switch.
+    set('curve-kind', 'sun8');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const sunCtx = document.getElementById('curve-canvas').getContext('2d');
+    sunCtx.drawn.texts.length = 0;
+    set('curve-colour', false);
+    fire('curve-colour', 'change');
+    T.drawCurve();
+    check('the Sun curve can be drawn in one colour',
+      sunCtx.drawn.texts.some((text) => text.text === '单色'));
+    set('curve-colour', true);
+    fire('curve-colour', 'change');
+
+    T.saveCurvePng();
+    check('the curve window can be saved as a PNG',
+      document.getElementById('curve-summary').textContent.includes('已保存'),
+      document.getElementById('curve-summary').textContent);
+    fire('curve-close', 'click');
+    check('the curve close button hides the window',
+      document.getElementById('curve-backdrop').hidden === true);
   }
 
   console.log('');

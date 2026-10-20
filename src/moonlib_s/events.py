@@ -53,7 +53,7 @@ is why the umbra radius carries the conventional 2% allowance.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -162,7 +162,7 @@ KIND_LABELS = {
     "lowest_moon": "最低月亮",
     "lunar_eclipse": "月食",
     "xvl": "月面 X/V/L",
-    "jewelled_handle": "月面 the jewelled handle",
+    "jewelled_handle": "the jewelled handle（实验功能）",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -610,7 +610,7 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
             kind="jewelled_handle",
             when_utc=to_utc(best),
             altitude_deg=moon_altitude,
-            title="月面 the jewelled handle",
+            title="the jewelled handle（实验功能）",
             detail=(
                 f"太阳高度 {JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG:g}–"
                 f"{JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
@@ -632,6 +632,48 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
 
 def _altitude(et: float, observer: Observer) -> float:
     return float(az_el("MOON", et, observer).elevation_deg)
+
+
+def _sun_altitude(et: float, observer: Observer) -> float:
+    return float(az_el("SUN", et, observer).elevation_deg)
+
+
+def _daylight_fraction(observer: Observer, start_et: float, end_et: float) -> float:
+    """Fraction of an event's interval with the Sun above the horizon.
+
+    A point event is one instant, so it is either daylight or not.  An interval
+    (the X/V window, the Jewelled Handle) is sampled evenly, endpoints included;
+    the question the forecast answers is "will the sky be bright for most of
+    this?", not "is the Sun up at the best moment?" -- a window that starts in
+    darkness and ends in daylight is still mostly a daylight event.
+    """
+    if end_et <= start_et:
+        return 1.0 if _sun_altitude(start_et, observer) > 0.0 else 0.0
+    moments = np.linspace(start_et, end_et, 21)
+    above = sum(
+        1 for moment in moments if _sun_altitude(float(moment), observer) > 0.0
+    )
+    return above / float(moments.size)
+
+
+def _with_daylight(observer: Observer, event: MoonEvent) -> MoonEvent:
+    """Append 白昼 when the Sun is up for most (or all) of the event.
+
+    This is deliberately a note in ``detail`` rather than a new visibility
+    flag: the event itself can still be seen in daylight (a lunar eclipse near
+    the horizon, a full moon at noon), but the reader deserves to know that the
+    sky, not the Moon, is the limiting factor.  The threshold is the one asked
+    for: the whole event or more than half of it.
+    """
+    start = to_et(event.window_start_utc or event.when_utc)
+    end = to_et(event.window_end_utc or event.when_utc)
+    fraction = _daylight_fraction(observer, start, end)
+    if fraction <= 0.5:
+        return event
+    metrics = dict(event.metrics)
+    metrics["sun_altitude_deg"] = _sun_altitude(to_et(event.when_utc), observer)
+    metrics["daylight_fraction"] = fraction
+    return replace(event, detail=f"{event.detail}　白昼", metrics=metrics)
 
 
 def _transit_altitude(et: float, observer: Observer) -> float:
@@ -826,4 +868,4 @@ def moon_events(
     keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)
-    return events
+    return [_with_daylight(observer, event) for event in events]

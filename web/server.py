@@ -38,6 +38,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,15 +98,20 @@ DISK_SHADOW_STEPS = 64
 REGION_SHADOW_STEPS = 256
 
 #: Hard pixel caps.  A preview is re-rendered on every change of time or place,
-#: so its cap is the one that decides how interactive the page feels -- but the
-#: page offers up to 5000 as a deliberate choice (about half a minute of ray
-#: marching), so the cap has to be at least that or the choice would be a lie.
-#: An output render is the user's call -- the pane renders exactly what it is
-#: asked for -- so its cap is only a memory guard against a typo, not a bound on
-#: useful work: 8192x8192 is 67 M pixels and hours of ray marching if anyone
-#: really means it.
-MAX_PREVIEW_PX = 5000
+#: The page's preview menu tops out here.  It is re-rendered on every change of
+#: time or place, so the largest useful interactive size is 3000 px; above that
+#: the wait stops feeling like a preview.  An output render is the user's call
+#: -- the pane renders exactly what it is asked for -- so its cap is only a
+#: memory guard against a typo, not a bound on useful work: 8192x8192 is 67 M
+#: pixels and hours of ray marching if anyone really means it.
+MAX_PREVIEW_PX = 3000
 MAX_OUTPUT_PX = 8192
+#: Default decimation of the colour mosaic cache: 2 keeps the old 19 px/deg
+#: (~1.6 km/px) bake, which is small.  A finer cache (0 is the source's full
+#: 76 px/deg, ~0.4 km/px and ~5.4 GB) can be baked explicitly; the server then
+#: detects and uses the finest cache already on disk without changing this
+#: default for a fresh installation.
+ALBEDO_DETAIL = 2
 #: The full disk has its own, much higher ceiling: it is the one picture worth
 #: rendering at the terrain data's own limit, it is saved deliberately rather
 #: than on every keystroke, and 10 000 px across is where the shipped LOLA
@@ -362,6 +368,31 @@ def _roughness(bag: Any) -> float:
     return max(0.0, min(45.0, _finite((bag or {}).get("roughness_deg"), 0.0)))
 
 
+def _terrain_denoise(bag: Any) -> int:
+    """0 off, 1 light, 2 strong; anything else means off."""
+    try:
+        value = int((bag or {}).get("terrain_denoise") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(2, value))
+
+
+def _surface_texture(bag: Any) -> bool:
+    """Whether the colour albedo mosaic is drawn.
+
+    Missing or empty means yes, which is what every older request and stored
+    .conf expects.  The page sends ``false`` for 黑白地貌.
+    """
+    value = (bag or {}).get("surface_texture")
+    if value is None or value == "":
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {
+        "0", "false", "off", "no", "none", "relief", "mono", "monochrome",
+    }
+
+
 def _tint(value: Any) -> Optional[Tuple[float, float, float]]:
     """The earthshine's spectral weighting, from whatever the request holds.
 
@@ -548,6 +579,34 @@ def parse_observer(when: Dict[str, Any]) -> moonlib_s.Observer:
 # ---------------------------------------------------------------------------
 # the two things the page can ask for
 # ---------------------------------------------------------------------------
+def _finest_baked_albedo_detail(dem_source: Optional[Path]) -> Optional[int]:
+    """The finest colour cache already baked for *dem_source*, if any.
+
+    The default bake stays at ``albedo_detail=2`` so a fresh checkout does not
+    silently spend gigabytes.  A reader who asks for the high-precision colour
+    cache (``albedo_detail=0``) should get it on the next server start without
+    having to edit code, so the server prefers what is already on disk.
+    """
+    if dem_source is None:
+        return None
+    wanted = str(Path(dem_source).expanduser().resolve())
+    root = moonlib_s.terrain.terrain_cache_root()
+    details = []
+    for manifest in sorted(root.glob("*/manifest.json")):
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            source = payload.get("source", {}).get("dem", {}).get("path")
+            request = payload.get("request") or {}
+            if source is None or "albedo_detail" not in request:
+                continue
+            if str(Path(source).expanduser().resolve()) != wanted:
+                continue
+            details.append(int(request["albedo_detail"]))
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+    return min(details) if details else None
+
+
 def _baked_dem_sources() -> Dict[str, float]:
     """``{source path: dem detail}`` for every pyramid already on disk.
 
@@ -565,7 +624,9 @@ def _baked_dem_sources() -> Dict[str, float]:
             detail = int(payload["request"]["dem_detail"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        found[str(Path(source))] = float(detail)
+        # A bake made through the CLI may record a relative path; the menu
+        # discovers absolute ones.  Compare the resolved paths, not the strings.
+        found[str(Path(source).expanduser().resolve())] = float(detail)
     return found
 
 
@@ -598,7 +659,7 @@ def _pyramid_dem_source() -> Optional[Path]:
         return None
     baked = _baked_dem_sources()
     for path, _km in sources:
-        if str(path) in baked:
+        if str(path.expanduser().resolve()) in baked:
             return path
     return sources[0][0]
 
@@ -672,7 +733,11 @@ class MoonService:
         with self._lock:
             if self._terrain is None:
                 started = time.time()
-                self._terrain = moonlib_s.open_terrain(dem=self._dem_source)
+                finest = _finest_baked_albedo_detail(self._dem_source)
+                detail = ALBEDO_DETAIL if finest is None else finest
+                self._terrain = moonlib_s.open_terrain(
+                    dem=self._dem_source, albedo_detail=detail
+                )
                 self._terrain_seconds = time.time() - started
             return self._terrain
 
@@ -927,6 +992,170 @@ class MoonService:
             "eclipse": moonlib_s.eclipse_state(anchor_et).to_dict(),
         }
 
+    # -- curve window ---------------------------------------------------
+    def curve(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Samples for the curve window's two charts.
+
+        ``moon8`` returns a synodic month of the Moon's right ascension and
+        declination at one fixed *local clock reading*: the lunar counterpart of
+        the solar analemma.  ``earthshine`` returns the night-side magnitude as
+        a function of phase angle, computed on a dense grid so the page can plot
+        it against either phase angle or illuminated fraction without another
+        round trip.
+        """
+        kind = str(request.get("kind") or "moon8").strip().lower()
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        offset = _tz_offset(request)
+        zone = timezone(timedelta(hours=offset))
+
+        if kind in ("moon8", "moon_analemma", "lunar_analemma"):
+            raw_start = str(request.get("start") or "").strip()
+            if raw_start:
+                try:
+                    start_day = datetime.fromisoformat(raw_start).date()
+                except ValueError as exc:
+                    raise moonlib_s.MoonlibError(
+                        f"曲线图的起始日期无法解析：{raw_start!r}"
+                    ) from exc
+            else:
+                start_day = moonlib_s.as_utc(
+                    when.get("at") or moonlib_s.utc_now()
+                ).astimezone(zone).date()
+            hour = int(max(0, min(23, _f(request, "hour", 21))))
+            minute = int(max(0, min(59, _f(request, "minute", 0))))
+            days = int(round(max(1.0, min(366.0, _f(request, "days", 30.0)))))
+            drift = max(0.0, min(120.0, _f(request, "drift_minutes", 50.47)))
+            start_local = datetime(
+                start_day.year, start_day.month, start_day.day, tzinfo=zone
+            )
+            end_local = start_local + timedelta(days=days)
+            local_site = site.with_timezone(zone)
+            from moonlib_s.analemma import lunar_analemma
+
+            points = lunar_analemma(
+                local_site, start_local, end_local,
+                local_hour=hour, local_minute=minute,
+                drift_minutes=drift,
+            )
+            rows = [point.to_dict() for point in points]
+            # Extremes are a caption, not a second computation: every point is
+            # already in hand.
+            dec_values = [row["declination_deg"] for row in rows]
+            ra_values = [row["ra_hours"] for row in rows]
+            az_values = [row["azimuth_deg"] for row in rows]
+            el_values = [row["elevation_deg"] for row in rows]
+            return {
+                "kind": "moon8",
+                "site": local_site.as_dict(),
+                "tz_offset_hours": offset,
+                "start_utc": start_local.astimezone(timezone.utc).isoformat(),
+                "end_utc": end_local.astimezone(timezone.utc).isoformat(),
+                "local_hour": hour,
+                "local_minute": minute,
+                "days": days,
+                "drift_minutes": drift,
+                "samples": rows,
+                "extremes": {
+                    "ra_min_hours": min(ra_values) if ra_values else None,
+                    "ra_max_hours": max(ra_values) if ra_values else None,
+                    "declination_min_deg": min(dec_values) if dec_values else None,
+                    "declination_max_deg": max(dec_values) if dec_values else None,
+                    "azimuth_min_deg": min(az_values) if az_values else None,
+                    "azimuth_max_deg": max(az_values) if az_values else None,
+                    "elevation_min_deg": min(el_values) if el_values else None,
+                    "elevation_max_deg": max(el_values) if el_values else None,
+                },
+            }
+
+        if kind in ("sun8", "solar_analemma", "sun_analemma"):
+            raw_start = str(request.get("start") or "").strip()
+            if raw_start:
+                try:
+                    start_day = datetime.fromisoformat(raw_start).date()
+                except ValueError as exc:
+                    raise moonlib_s.MoonlibError(
+                        f"曲线图的起始日期无法解析：{raw_start!r}"
+                    ) from exc
+            else:
+                start_day = moonlib_s.as_utc(
+                    when.get("at") or moonlib_s.utc_now()
+                ).astimezone(zone).date()
+            hour = int(max(0, min(23, _f(request, "hour", 12))))
+            minute = int(max(0, min(59, _f(request, "minute", 0))))
+            days = int(round(max(1.0, min(366.0, _f(request, "days", 365.0)))))
+            start_local = datetime(
+                start_day.year, start_day.month, start_day.day, tzinfo=zone
+            )
+            end_local = start_local + timedelta(days=days)
+            local_site = site.with_timezone(zone)
+            from moonlib_s.analemma import solar_analemma
+
+            points = solar_analemma(
+                local_site, start_local, end_local,
+                local_hour=hour, local_minute=minute,
+            )
+            rows = [point.to_dict() for point in points]
+            az_values = [row["azimuth_deg"] for row in rows]
+            el_values = [row["elevation_deg"] for row in rows]
+            dec_values = [row["declination_deg"] for row in rows]
+            eot_values = [row["equation_of_time_minutes"] for row in rows]
+            return {
+                "kind": "sun8",
+                "site": local_site.as_dict(),
+                "tz_offset_hours": offset,
+                "start_utc": start_local.astimezone(timezone.utc).isoformat(),
+                "end_utc": end_local.astimezone(timezone.utc).isoformat(),
+                "local_hour": hour,
+                "local_minute": minute,
+                "days": days,
+                "drift_minutes": 0.0,
+                "samples": rows,
+                "extremes": {
+                    "azimuth_min_deg": min(az_values) if az_values else None,
+                    "azimuth_max_deg": max(az_values) if az_values else None,
+                    "elevation_min_deg": min(el_values) if el_values else None,
+                    "elevation_max_deg": max(el_values) if el_values else None,
+                    "declination_min_deg": min(dec_values) if dec_values else None,
+                    "declination_max_deg": max(dec_values) if dec_values else None,
+                    "equation_of_time_min_minutes": min(eot_values) if eot_values else None,
+                    "equation_of_time_max_minutes": max(eot_values) if eot_values else None,
+                },
+            }
+
+        if kind in ("earthshine", "ashen", "earthshine_relation"):
+            earth = _earthshine(request.get("earthshine"))
+            anchor = moonlib_s.as_utc(when.get("at") or moonlib_s.utc_now())
+            view = self.view(anchor.isoformat(), site, earth["earth_geometric_albedo"])
+            phase_angles = np.linspace(180.0, 0.0, 361)
+            rows = moonlib_s.moonview.earthshine_relation(
+                phase_angles,
+                distance_km=view.distance_km,
+                earth_distance_km=view.earth_distance_km,
+                earth_albedo=earth["earth_geometric_albedo"],
+            )
+            current = moonlib_s.moonview.earthshine_relation(
+                [view.phase_angle_deg],
+                distance_km=view.distance_km,
+                earth_distance_km=view.earth_distance_km,
+                earth_albedo=earth["earth_geometric_albedo"],
+            )[0]
+            return {
+                "kind": "earthshine",
+                "site": site.as_dict(),
+                "tz_offset_hours": offset,
+                "when_utc": anchor.isoformat(),
+                "earth_geometric_albedo": earth["earth_geometric_albedo"],
+                "distance_km": float(view.distance_km),
+                "earth_distance_km": float(view.earth_distance_km),
+                "samples": rows,
+                "current": current,
+            }
+
+        raise moonlib_s.MoonlibError(
+            f"未知的曲线图类型 {kind!r}；可用 moon8（月亮8字）或 earthshine（地照）。"
+        )
+
     # -- full disk ------------------------------------------------------
     def cancel(self) -> Dict[str, Any]:
         """Stop the frame that is being marched, if there is one.
@@ -1036,6 +1265,12 @@ class MoonService:
             keep_components=True,
             sky_ambient=_sky_ambient(_light_option(request, "preview", "sky_ambient")),
             roughness_deg=_roughness(_light_option(request, "preview", "roughness_deg")),
+            surface_texture=_surface_texture(
+                _light_option(request, "preview", "surface_texture")
+            ),
+            terrain_denoise=_terrain_denoise(
+                _light_option(request, "preview", "terrain_denoise")
+            ),
             **earth,
         )
         started = time.time()
@@ -1165,6 +1400,12 @@ class MoonService:
             keep_components=True,
             sky_ambient=_sky_ambient(_light_option(request, "preview", "sky_ambient")),
             roughness_deg=_roughness(_light_option(request, "output", "roughness_deg")),
+            surface_texture=_surface_texture(
+                _light_option(request, "output", "surface_texture")
+            ),
+            terrain_denoise=_terrain_denoise(
+                _light_option(request, "output", "terrain_denoise")
+            ),
             **earth,
         )
         started = time.time()
@@ -1650,6 +1891,12 @@ class MoonService:
             keep_components=True,
             sky_ambient=_sky_ambient(_light_option(request, "preview", "sky_ambient")),
             roughness_deg=_roughness(_light_option(request, "output", "roughness_deg")),
+            surface_texture=_surface_texture(
+                _light_option(request, "output", "surface_texture")
+            ),
+            terrain_denoise=_terrain_denoise(
+                _light_option(request, "output", "terrain_denoise")
+            ),
             **earth,
         )
         # The file's size is a separate question from the render's: frames can
@@ -2652,11 +2899,6 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
     counts: Dict[str, int] = {}
     for row in rows:
         counts[row["class"]] = counts.get(row["class"], 0) + 1
-    # The class counts partition the rows (the search index is keyed by one
-    # class per row).  The Lunar 100 is a *second* classification on top of
-    # that, so its true total is reported separately and the chip uses it.
-    lunar100_total = sum(1 for feature in catalogue
-                         if getattr(feature, "lunar100", 0))
     return {
         "features": rows,
         "classes": [
@@ -2666,7 +2908,6 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
             if counts.get(key, 0)
         ],
         "count": len(rows),
-        "lunar100_count": lunar100_total,
     }
 
 # ---------------------------------------------------------------------------
@@ -2945,6 +3186,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Samples, not a picture: the window draws, re-ranges and
                 # labels the same tracks without another round trip.
                 return self._json(200, self.service.sky(request))
+            if path == "/api/curve":
+                return self._json(200, self.service.curve(request))
             if path == "/api/cancel":
                 # 终止: the page stops waiting *and* says so.  The render polls
                 # this between bands, which is the difference between a button

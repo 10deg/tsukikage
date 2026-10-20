@@ -82,9 +82,11 @@
     </section>
 
     <section class="group grow">
-      <h2><span class="zh">月球信息</span><span class="en">Moon</span>
+      <h2 class="moon-head"><span class="zh">月球信息</span><span class="en">Moon</span>
         <!-- 天空位置示意图的入口：读的是同一时刻、同一地点，所以归在月球信息
              这一栏的标题行里，紧挨着语言开关。 -->
+        <button class="mini curve-open" id="curve-open"
+                title="打开曲线图：太阳8字、月亮8字与地照亮度曲线">曲线图</button>
         <button class="mini sky-open" id="sky-open"
                 title="按当前时间和地点，画出月亮与太阳在天空中的方位—高度轨迹">天空位置</button>
         <button class="mini" id="moon-lang" aria-pressed="false"
@@ -343,8 +345,6 @@
                 <option value="1500">1500</option>
                 <option value="2000">2000</option>
                 <option value="3000">3000</option>
-                <option value="4000">4000</option>
-                <option value="5000">5000</option>
                 <option value="custom">自定义…</option>
               </select>
               <input type="text" id="preview-px" inputmode="numeric" value="1000" size="5">
@@ -763,6 +763,19 @@
               </label>
               <label title="地照相对阳光的光谱权重，只比值有意义（渲染时按均值归一化）。0.87,0.96,1.17 略偏蓝，是地球散射光的常见表述；留空用这个默认">地照色调
                 <input type="text" id="earthshine-tint" placeholder="0.87,0.96,1.17" size="14">
+              </label>
+              <label class="keep-label" title="彩色纹理：用 LROC 反照率图着色。黑白地貌：不用纹理，只按 DEM、光照与阴影画单色浮雕；近景放大到纹理本身的分辨率以下时，选它可以把纹理的块状与色带从画面里排除"><span>表面</span>
+                <select id="surface-texture">
+                  <option value="texture" selected>彩色纹理</option>
+                  <option value="relief">无纹理</option>
+                </select>
+              </label>
+              <label class="keep-label" title="对用于光照的高程层做 3×3 中值平滑：轻 = 一遍，强 = 两遍。可压低 LOLA 轨道条带/插值格，但也会软化只有几个像素大的小坑与山脊；默认关闭"><span>去条纹</span>
+                <select id="terrain-denoise">
+                  <option value="0" selected>关</option>
+                  <option value="1">轻</option>
+                  <option value="2">强</option>
+                </select>
               </label>
               <label>每像素采样 <span class="en">Samples/px</span>
                 <select id="out-samples">
@@ -1357,6 +1370,120 @@
     <footer class="sky-foot" id="sky-foot">
       <span id="sky-summary">—</span>
       <span class="sky-hint">拖动图框边缘调范围（两轴等比） · 滚轮缩放 · 双击复位</span>
+    </footer>
+  </div>
+</div>
+
+<!-- ── 曲线图：与天空位置图同一套浮窗外壳，主体是三种可切换的曲线 ──────
+     太阳8字：每天同一地方时、一年里的方位—高度轨迹；月亮8字：每天推迟约
+     51 分钟、一个朔望月里的轨迹；地照曲线：月面夜侧的地照亮度随相位角/
+     照明率怎么变。三者都是采样数据，页面自己画，所以上下轴、刻度和标注
+     能跟着窗口一起变。 -->
+<div class="sky-backdrop" id="curve-backdrop" hidden>
+  <div class="sky-window" id="curve-window" role="dialog" aria-modal="true"
+       aria-labelledby="curve-heading">
+    <div class="sky-resize" data-sky-resize="n"></div>
+    <div class="sky-resize" data-sky-resize="s"></div>
+    <div class="sky-resize" data-sky-resize="e"></div>
+    <div class="sky-resize" data-sky-resize="w"></div>
+    <div class="sky-resize" data-sky-resize="ne"></div>
+    <div class="sky-resize" data-sky-resize="nw"></div>
+    <div class="sky-resize" data-sky-resize="se"></div>
+    <div class="sky-resize" data-sky-resize="sw"></div>
+
+    <header class="sky-head" id="curve-head">
+      <div class="sky-heading" id="curve-heading"
+           title="拖动标题栏移动窗口；拖动窗口的四边或四角改变大小；双击可改主标题">曲线图 <span class="en">Curves</span></div>
+      <div class="sky-head-tools">
+        <span class="sky-badge" id="curve-mode">月亮8字</span>
+        <button class="ghost" id="curve-refresh" title="按主界面的地点重新计算">重新计算</button>
+        <button class="ghost" id="curve-reset" title="把坐标范围恢复到自动适配">复位视角</button>
+        <button class="ghost icon" id="curve-close" title="关闭曲线图" aria-label="关闭">×</button>
+      </div>
+    </header>
+
+    <div class="sky-controls" id="curve-controls">
+      <label title="选择要画的曲线">类型
+        <select id="curve-kind">
+          <option value="moon8" selected>月亮8字曲线</option>
+          <option value="sun8">太阳8字曲线</option>
+          <option value="earthshine">地照亮度</option>
+        </select>
+      </label>
+      <label class="check inline"
+             title="锁定后滚轮与拖动都不会改变坐标范围；地照曲线的相位轴始终限制在 0–180°（照明率 0–100%）。关闭后可以缩放/平移，但相位仍不会越界">
+        <input type="checkbox" id="curve-lock-axes" checked>
+        <span>锁定坐标轴</span>
+      </label>
+      <span class="curve-when" id="curve-when">
+        <label title="曲线的第一个本地日期">起始
+          <input type="date" id="curve-date">
+        </label>
+        <label title="第一天的本地时刻；月亮每天推迟约 51 分钟，太阳每天同一时刻（标准8字采样）">时刻
+          <input type="time" id="curve-time" step="60">
+        </label>
+        <button class="ghost mini" id="curve-this-year"
+                title="把起始日期设为本年第一天，跨度设为本年天数">选择本年</button>
+        <button class="ghost mini" id="curve-this-month"
+                title="把起始日期设为当前月份第一天，跨度设为该月天数">选择本月</button>
+        <label title="采样多少天；一个月亮8字约 30 天，太阳8字通常取一年">跨度
+          <input type="number" id="curve-days" min="1" max="366" step="1" value="30">
+          <span class="unit">天</span>
+        </label>
+        <button class="ghost mini" id="curve-from-main"
+                title="把主界面的日期与时刻填进来">取主界面时刻</button>
+        <label class="check inline" id="curve-phase-label"
+               title="把每个采样点画成该时刻的月相图标，而不是小圆点">
+          <input type="checkbox" id="curve-show-phase">
+          <span>显示月相</span>
+        </label>
+        <label class="check inline" id="curve-colour-label"
+               title="关闭后太阳8字的点用单色，而不是按月份着色">
+          <input type="checkbox" id="curve-colour" checked>
+          <span>彩色</span>
+        </label>
+        <span class="sky-nudge" id="curve-nudge">
+          <button class="ghost mini" id="curve-nudge-back-day" data-curve-nudge="-1d">-1d</button>
+          <button class="ghost mini" id="curve-nudge-back-hour" data-curve-nudge="-1h">-1h</button>
+          <button class="ghost mini" id="curve-nudge-back-minute" data-curve-nudge="-1m">-1m</button>
+          <button class="ghost mini" id="curve-nudge-fwd-minute" data-curve-nudge="+1m">+1m</button>
+          <button class="ghost mini" id="curve-nudge-fwd-hour" data-curve-nudge="+1h">+1h</button>
+          <button class="ghost mini" id="curve-nudge-fwd-day" data-curve-nudge="+1d">+1d</button>
+        </span>
+      </span>
+      <span class="curve-earth" id="curve-earth" hidden>
+        <label title="横轴用相位角还是照明率（页面上的照亮比例）；另一个会画在顶部">横轴
+          <select id="curve-xaxis">
+            <option value="phase" selected>相位角</option>
+            <option value="illum">照明率</option>
+          </select>
+        </label>
+        <label class="check inline" title="在曲线上标出主界面当前月相的位置">
+          <input type="checkbox" id="curve-show-current" checked>
+          <span>显示当前</span>
+        </label>
+      </span>
+      <span class="sky-save">
+        <label title="按长边或短边给保存的图片定分辨率">保存
+          <select id="curve-save-ref">
+            <option value="long" selected>长边</option>
+            <option value="short">短边</option>
+          </select>
+        </label>
+        <input type="number" id="curve-save-px" value="2400" min="320" max="10000" step="10">
+        <span class="unit">px</span>
+        <button class="gold" id="curve-save">保存 PNG</button>
+      </span>
+    </div>
+
+    <div class="sky-plot" id="curve-plot">
+      <canvas id="curve-canvas"></canvas>
+      <div class="sky-empty" id="curve-empty">正在计算曲线…</div>
+    </div>
+
+    <footer class="sky-foot" id="curve-foot">
+      <span id="curve-summary">—</span>
+      <span class="sky-hint">拖动窗口四边或四角改大小 · 滚轮缩放 · 双击图内文字可拖动 / 双击轴标题改名 · 双击空白复位</span>
     </footer>
   </div>
 </div>

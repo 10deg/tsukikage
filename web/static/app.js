@@ -67,6 +67,19 @@ const state = {
   skyWindow: null,     // {left, top, width, height} of the floating window
   skyDrag: null,       // in-progress window or plot drag
   skyHoverEdge: null,  // plot edge under the pointer, for the cursor and grips
+  curve: null,         // last /api/curve payload
+  curveSeries: null,   // samples in plotting coordinates
+  curveView: null,     // {xMin, xMax, yMin, yMax} or null for auto-fit
+  curveLayout: null,   // plot rectangle of the last paint
+  curveProjection: null, // data <-> canvas mapping of the last paint
+  curveSeq: 0,         // guards a stale /api/curve reply
+  curveOpen: false,
+  curveWindow: null,   // {left, top, width, height} of the floating window
+  curveDrag: null,     // in-progress window, plot or text drag
+  curveText: {},       // movable chart labels: key -> {fx, fy} in plot fractions
+  curveTextBoxes: [],  // last painted movable-label boxes, for hit testing
+  curveTitles: { header: null, x: null, y: null, top: null },
+  curveTitleBoxes: [], // last painted axis-title hit boxes
 };
 
 /* One zoom state per view, in CSS transform units.  Zooming is a transform on
@@ -123,7 +136,8 @@ const LAND_CLASSES = [
     color: '#d9b8f2',
     title: 'Charles A. Wood 的 The Lunar 100（Sky & Telescope 2004 年 4 月，p.113）：'
       + '100 个目视观测目标。前 3 项（月球本体、地照、月海/月陆二分）没有月面点，'
-      + '不参与标注；其余按点位标注，月溪、辐射纹、区域等没有直径的项目只画点。' },
+      + '不参与标注；其余 97 项各自按表中的原名与序号标注，选中后全部显示、不受密度限制，'
+      + '月溪、辐射纹、区域等没有直径的项目只画点。' },
   { key: 'other',        zh: '其他',                 en: 'Other',                color: '#b9bec9' },
 ];
 
@@ -410,6 +424,8 @@ function lightPayload() {
     sun_samples: Number($('sun-samples').value) || 1,
     sky_ambient: sky === null || sky < 0 ? 0 : sky,
     roughness_deg: rough === null || rough < 0 ? 0 : rough,
+    surface_texture: !$('surface-texture') || $('surface-texture').value !== 'relief',
+    terrain_denoise: Number(($('terrain-denoise') || {}).value) || 0,
     earthshine: earthshinePayload(),
   };
 }
@@ -546,7 +562,8 @@ const RESETTABLE_SLIDERS = [
 const OUTPUT_FIELDS = [
   'out-kmpx-preset', 'out-kmpx', 'out-scale', 'photometric-model', 'sun-samples',
   'roughness', 'sky-ambient', 'earthshine-gain', 'earth-geometric-albedo',
-  'earth-samples', 'earthshine-tint', 'out-samples', 'parallel', 'light-advanced',
+  'earth-samples', 'earthshine-tint', 'surface-texture', 'terrain-denoise',
+  'out-samples', 'parallel', 'light-advanced',
 ];
 
 /** 后期处理: the atmosphere, the instrument and the sensor. */
@@ -1448,9 +1465,9 @@ function updateDownloadLink() {
 //: publishes as a memory guard, not a clamp the page applies quietly.
 const LIMITS = {
   //: The preview's own cap.  It is re-rendered on every change of time or
-  //: place, but 5000 px is offered as a deliberate choice, so it has to be
-  //: allowed rather than silently clamped.
-  preview_px: 5000,
+  //: place, so the menu tops out at 3000 px; the server publishes the same cap
+  //: and anything finer would stop feeling like a preview.
+  preview_px: 3000,
   output_px: 8192,
   //: The full disk has its own ceiling, far above the preview's: it is rendered
   //: when the save button is pressed, not on every keystroke.
@@ -2123,16 +2140,11 @@ function buildClassToggles() {
 }
 
 /** Put the catalogue's own counts on the chips, once /api/features has arrived. */
-function fillClassCounts(classes, lunar100Count) {
+function fillClassCounts(classes) {
   if (!classes) return;
   const byKey = Object.fromEntries(classes.map((entry) => [entry.key, entry.count]));
   for (const chip of document.querySelectorAll('.cls-chip em')) {
-    const key = chip.dataset.count;
-    // The Lunar 100 is a second classification, not a partition: its total is
-    // the number of tagged places, which is larger than the number of rows
-    // whose primary class is lunar100.
-    const count = key === 'lunar100' && Number.isFinite(Number(lunar100Count))
-      ? Number(lunar100Count) : byKey[key];
+    const count = byKey[chip.dataset.count];
     chip.textContent = count ? String(count) : '';
   }
 }
@@ -4405,7 +4417,7 @@ async function loadFeatureIndex() {
       feature.haystack = `${feature.zh} ${feature.en}`.toLowerCase();
     }
     state.featureByLabel = new Map(state.features.map((f) => [f.label, f]));
-    fillClassCounts(payload.classes, payload.lunar100_count);
+    fillClassCounts(payload.classes);
     // A class key the server knows and the page does not would silently never be
     // filtered; the two lists are meant to be the same list.
     const known = new Set(LAND_CLASSES.map((entry) => entry.key));
@@ -6113,6 +6125,1146 @@ function saveSkyPng() {
   });
 }
 
+/* ── 曲线图 ──────────────────────────────────────────────────────────────
+ *
+ * Two charts, one window.  Both are drawn from server samples rather than from
+ * a rendered image, for the same reason the sky window is: the axes, the ticks
+ * and the labels have to move together when the reader resizes the window.
+ *
+ *   月亮8字  right ascension against declination at one fixed civil clock
+ *            reading over a synodic month.  This is the lunar analogue of the
+ *            solar analemma: the Sun's figure-eight is a year of declination
+ *            against equation of time, the Moon's is a month of declination
+ *            against RA.
+ *   地照      the night-side magnitude against phase angle (or illuminated
+ *            fraction), with the other quantity on the top axis.
+ */
+
+const CURVE_MIN_WIDTH = 520;
+const CURVE_MIN_HEIGHT = 400;
+const CURVE_MARGIN = { left: 64, right: 24, top: 38, bottom: 54 };
+const CURVE_MAX_MAGNITUDE = 12.0;
+
+function curvePlotLayout(area) {
+  return {
+    x: area.x + CURVE_MARGIN.left,
+    y: area.y + CURVE_MARGIN.top,
+    w: Math.max(10, area.w - CURVE_MARGIN.left - CURVE_MARGIN.right),
+    h: Math.max(10, area.h - CURVE_MARGIN.top - CURVE_MARGIN.bottom),
+  };
+}
+
+function curveCanvasMetrics() {
+  const canvas = $('curve-canvas');
+  const rect = canvas && canvas.getBoundingClientRect
+    ? canvas.getBoundingClientRect() : null;
+  return {
+    canvas,
+    width: Math.max(320, (rect && rect.width) || 760),
+    height: Math.max(240, (rect && rect.height) || 520),
+    dpr: window.devicePixelRatio || 1,
+  };
+}
+
+function curveOptions() {
+  return {
+    kind: ($('curve-kind') && $('curve-kind').value) || 'moon8',
+    xaxis: ($('curve-xaxis') && $('curve-xaxis').value) || 'phase',
+    locked: !$('curve-lock-axes') || $('curve-lock-axes').checked,
+    colour: !$('curve-colour') || $('curve-colour').checked,
+    showPhase: !!($('curve-show-phase') && $('curve-show-phase').checked),
+    showCurrent: !$('curve-show-current') || $('curve-show-current').checked,
+  };
+}
+
+/** Period-aware unwrap for a circular coordinate (RA hours, not azimuth). */
+function curveWrapPeriod(value, period) {
+  const half = period / 2;
+  return ((Number(value) + half) % period + period) % period - half;
+}
+
+function curveUnwrapAround(values, centre, anchor, period) {
+  const out = new Array(values.length);
+  if (!values.length) return out;
+  const index = Math.max(0, Math.min(values.length - 1, centre));
+  out[index] = anchor;
+  for (let i = index + 1; i < values.length; i += 1) {
+    out[i] = out[i - 1] + curveWrapPeriod(values[i] - values[i - 1], period);
+  }
+  for (let i = index - 1; i >= 0; i -= 1) {
+    out[i] = out[i + 1] + curveWrapPeriod(values[i] - values[i + 1], period);
+  }
+  return out;
+}
+
+/** The samples in plotting coordinates.  Pure: no DOM and no state. */
+function curveSeries(data, options) {
+  if (!data || !Array.isArray(data.samples) || !data.samples.length) return [];
+  if (options.kind === 'sun8') {
+    const samples = data.samples;
+    const centre = Math.floor((samples.length - 1) / 2);
+    const azValues = samples.map((row) => Number(row.azimuth_deg));
+    const az = curveUnwrapAround(azValues, centre, azValues[centre], 360);
+    return samples.map((row, index) => ({
+      x: az[index],
+      y: Number(row.elevation_deg),
+      month: Number(row.month),
+      illum: null,
+      row,
+    })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  }
+  if (options.kind === 'earthshine') {
+    return data.samples
+      .map((row) => ({
+        x: options.xaxis === 'illum'
+          ? Number(row.illumination_percent)
+          : Number(row.phase_angle_deg),
+        y: row.earthshine_apparent_magnitude === null
+          ? null : Number(row.earthshine_apparent_magnitude),
+        illum: Number(row.illumination_percent),
+        row,
+      }))
+      .filter((point) => Number.isFinite(point.x))
+      .sort((left, right) => left.x - right.x);
+  }
+  const samples = data.samples;
+  const centre = Math.floor((samples.length - 1) / 2);
+  // Azimuth is circular: unwrap around the middle so a track that crosses
+  // north is one line, not a 359 -> 1 jump.
+  const azValues = samples.map((row) => Number(row.azimuth_deg));
+  const az = curveUnwrapAround(azValues, centre, azValues[centre], 360);
+  return samples.map((row, index) => ({
+    x: az[index],
+    y: Number(row.elevation_deg),
+    illum: Number(row.illumination_percent),
+    waxing: Boolean(row.waxing),
+    row,
+  })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+}
+
+function curveTargetView(data, options) {
+  const series = curveSeries(data, options);
+  if (options.kind === 'earthshine') {
+    return {
+      xMin: 0,
+      xMax: options.xaxis === 'illum' ? 100 : 180,
+      yMin: -4,
+      yMax: CURVE_MAX_MAGNITUDE,
+    };
+  }
+  if (!series.length) {
+    return { xMin: 0, xMax: 24, yMin: -30, yMax: 30 };
+  }
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const point of series) {
+    xMin = Math.min(xMin, point.x); xMax = Math.max(xMax, point.x);
+    yMin = Math.min(yMin, point.y); yMax = Math.max(yMax, point.y);
+  }
+  let xPad = Math.max(0.5, (xMax - xMin) * 0.08);
+  let yPad = Math.max(2.0, (yMax - yMin) * 0.10);
+  xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
+  if (xMax - xMin < 6.0) {
+    const middle = 0.5 * (xMin + xMax);
+    xMin = middle - 3.0; xMax = middle + 3.0;
+  }
+  if (yMax - yMin < 10.0) {
+    const middle = 0.5 * (yMin + yMax);
+    yMin = middle - 5.0; yMax = middle + 5.0;
+  }
+  return { xMin, xMax, yMin, yMax };
+}
+
+/** Give the sky chart one scale for both axes: azimuth and altitude are angles.
+ *
+ * The fitted box is padded independently, which is fine for a relationship
+ * chart but would stretch the Moon's figure-eight when the window is wide or
+ * tall.  Growing the short axis keeps a degree the same size on both axes
+ * without cropping the curve.
+ */
+function curveEqualize(view, aspect) {
+  const ratio = Math.max(1e-4, aspect);
+  const xSpan = Math.max(1e-6, view.xMax - view.xMin);
+  const ySpan = Math.max(1e-6, view.yMax - view.yMin);
+  if (xSpan / ySpan > ratio) {
+    const wanted = xSpan / ratio;
+    const middle = 0.5 * (view.yMin + view.yMax);
+    view.yMin = middle - 0.5 * wanted;
+    view.yMax = middle + 0.5 * wanted;
+  } else {
+    const wanted = ySpan * ratio;
+    const middle = 0.5 * (view.xMin + view.xMax);
+    view.xMin = middle - 0.5 * wanted;
+    view.xMax = middle + 0.5 * wanted;
+  }
+}
+
+function curveEnsureView(plot, data, options) {
+  if (!state.curveView) {
+    state.curveView = curveTargetView(data, options);
+    if (options.kind !== 'earthshine') {
+      curveEqualize(state.curveView, plot.w / Math.max(1, plot.h));
+    }
+  }
+  return state.curveView;
+}
+
+function curveProjection(plot, view) {
+  const xSpan = Math.max(1e-6, view.xMax - view.xMin);
+  const ySpan = Math.max(1e-6, view.yMax - view.yMin);
+  return {
+    x: (value) => plot.x + (value - view.xMin) / xSpan * plot.w,
+    y: (value) => plot.y + (view.yMax - value) / ySpan * plot.h,
+    xv: (pixel) => view.xMin + (pixel - plot.x) / Math.max(1, plot.w) * xSpan,
+    yv: (pixel) => view.yMax - (pixel - plot.y) / Math.max(1, plot.h) * ySpan,
+  };
+}
+
+function curvePhaseColor(percent) {
+  const t = skyClamp((Number(percent) || 0) / 100, 0, 1);
+  return `rgb(${Math.round(118 + 128 * t)},${Math.round(136 + 104 * t)},`
+    + `${Math.round(168 + 82 * t)})`;
+}
+
+function curveMonthColor(month) {
+  const index = Math.max(1, Math.min(12, Number(month) || 1));
+  return `hsl(${(index - 1) * 30}, 62%, 70%)`;
+}
+
+/** One simulated moon-phase glyph, at a point on the curve. */
+function curvePaintPhaseMarker(ctx, x, y, radius, fraction, waxing) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = '#151a23';
+  ctx.fill();
+  const lit = Math.max(0, Math.min(1, Number(fraction) || 0));
+  if (lit > 1e-4) {
+    ctx.beginPath();
+    phaseShape(lit, waxing ? Math.PI / 2 : -Math.PI / 2, radius, 24)
+      .forEach(([px, py], index) => {
+        if (index) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+      });
+    ctx.closePath();
+    ctx.fillStyle = '#e8ecf5';
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(230,232,238,.5)';
+  ctx.lineWidth = 0.7;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function curveTickText(value, unit) {
+  const rounded = Math.abs(value - Math.round(value)) < 1e-6
+    ? String(Math.round(value)) : value.toFixed(1);
+  return unit ? `${rounded}${unit}` : rounded;
+}
+
+function curvePaintGrid(ctx, plot, view, options) {
+  const xStep = niceSkyStep(view.xMax - view.xMin, Math.max(3, plot.w / 100));
+  const yStep = niceSkyStep(view.yMax - view.yMin, Math.max(3, plot.h / 62));
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.lineWidth = 0.6;
+  for (let x = Math.ceil(view.xMin / xStep) * xStep;
+       x <= view.xMax + 1e-9; x += xStep) {
+    const px = plot.x + (x - view.xMin) / Math.max(1e-6, view.xMax - view.xMin) * plot.w;
+    ctx.strokeStyle = 'rgba(120,134,156,.14)';
+    ctx.beginPath(); ctx.moveTo(px, plot.y); ctx.lineTo(px, plot.y + plot.h); ctx.stroke();
+  }
+  for (let y = Math.ceil(view.yMin / yStep) * yStep;
+       y <= view.yMax + 1e-9; y += yStep) {
+    const py = plot.y + (view.yMax - y) / Math.max(1e-6, view.yMax - view.yMin) * plot.h;
+    ctx.strokeStyle = Math.abs(y) < 1e-9
+      ? 'rgba(150,165,185,.28)' : 'rgba(120,134,156,.14)';
+    ctx.beginPath(); ctx.moveTo(plot.x, py); ctx.lineTo(plot.x + plot.w, py); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(150,165,185,.34)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+  return { xStep, yStep };
+}
+
+/** Resolve a movable chart label to a top-left corner in canvas coordinates. */
+function curveTextBox(key, plot, defaultX, defaultY, align, baseline,
+                      width, height) {
+  const stored = state.curveText[key];
+  if (stored) {
+    return {
+      key,
+      left: plot.x + stored.fx * plot.w,
+      top: plot.y + stored.fy * plot.h,
+      width,
+      height,
+      stored: true,
+    };
+  }
+  let left = defaultX;
+  if (align === 'right') left -= width;
+  else if (align === 'center') left -= width / 2;
+  let top = defaultY;
+  if (baseline === 'bottom') top -= height;
+  else if (baseline === 'middle') top -= height / 2;
+  return { key, left, top, width, height, stored: false };
+}
+
+/** Draw a chart label and record its box for the drag hit test.
+ *
+ * `state.curveText[key]` stores the *top-left* as a fraction of the plot, so a
+ * label the reader has moved stays where they put it when the window is
+ * resized.  A moved label is always redrawn left/top aligned; the default
+ * alignment only decides where it starts.
+ */
+function curveDrawLabel(ctx, key, text, plot, defaultX, defaultY, options) {
+  const opts = options || {};
+  if (!text) return null;
+  const font = opts.font || '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.font = font;
+  const pad = opts.padding || 0;
+  const height = opts.height || 15;
+  const width = ctx.measureText(text).width + 2 * pad;
+  const box = curveTextBox(key, plot, defaultX, defaultY,
+    opts.align || 'left', opts.baseline || 'top', width, height);
+  if (opts.box) {
+    ctx.fillStyle = 'rgba(122,162,247,.10)';
+    ctx.fillRect(box.left, box.top, width, height);
+    ctx.strokeStyle = 'rgba(122,162,247,.55)';
+    ctx.lineWidth = 0.8;
+    ctx.strokeRect(box.left, box.top, width, height);
+  }
+  ctx.fillStyle = opts.color || 'rgba(190,205,232,.72)';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, box.left + pad, box.top + height / 2);
+  state.curveTextBoxes.push({
+    key, x: box.left, y: box.top, w: width, h: height,
+  });
+  return box;
+}
+
+function curveTitle(key, fallback) {
+  const value = state.curveTitles[key];
+  return value === null || value === undefined || value === ''
+    ? fallback : String(value);
+}
+
+function curveAskText(label, current) {
+  if (typeof window.prompt !== 'function') return null;
+  const value = window.prompt(label, current);
+  return value === null || value === undefined ? null : String(value);
+}
+
+function curvePaintMoonChart(ctx, plot, view, series, data, options) {
+  const projection = curveProjection(plot, view);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
+
+  if (view.yMin < 0 && view.yMax > 0) {
+    const horizon = projection.y(0);
+    ctx.beginPath();
+    ctx.moveTo(plot.x, horizon);
+    ctx.lineTo(plot.x + plot.w, horizon);
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = 'rgba(150,165,185,.55)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(170,184,204,.62)';
+    ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('地平线', plot.x + 5, horizon - 3);
+  }
+
+  if (series.length > 1) {
+    ctx.beginPath();
+    series.forEach((point, index) => {
+      const x = projection.x(point.x);
+      const y = projection.y(point.y);
+      if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = (!options.colour && options.kind === 'sun8')
+      ? 'rgba(230,194,122,.78)' : 'rgba(190,205,232,.78)';
+    ctx.lineWidth = 1.35;
+    ctx.stroke();
+  }
+  const solar = options.kind === 'sun8';
+  for (const point of series) {
+    const x = projection.x(point.x);
+    const y = projection.y(point.y);
+    if (options.showPhase && !solar) {
+      curvePaintPhaseMarker(ctx, x, y, 4.6, point.illum / 100, point.waxing);
+      continue;
+    }
+    ctx.beginPath();
+    ctx.arc(x, y, 2.4, 0, Math.PI * 2);
+    ctx.fillStyle = !options.colour
+      ? (solar ? '#e6c27a' : '#dfe4ee')
+      : (solar ? curveMonthColor(point.month) : curvePhaseColor(point.illum));
+    ctx.fill();
+  }
+  if (series.length) {
+    const first = series[0];
+    const last = series[series.length - 1];
+    for (const [point, colour, label] of [
+      [first, '#9ece6a', '起点'],
+      [last, '#e0af68', '终点'],
+    ]) {
+      const x = projection.x(point.x);
+      const y = projection.y(point.y);
+      ctx.beginPath();
+      ctx.arc(x, y, 5.0, 0, Math.PI * 2);
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+      const text = `${label} ${String(point.row.local_time || '').slice(5, 10)}`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(7,9,13,.9)';
+      ctx.strokeText(text, x + 7, y - 5);
+      ctx.fillStyle = colour;
+      ctx.fillText(text, x + 7, y - 5);
+    }
+  }
+  ctx.restore();
+
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillStyle = '#8b93a3';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const step = niceSkyStep(view.xMax - view.xMin, Math.max(3, plot.w / 100));
+  for (let x = Math.ceil(view.xMin / step) * step;
+       x <= view.xMax + 1e-9; x += step) {
+    const px = plot.x + (x - view.xMin) / Math.max(1e-6, view.xMax - view.xMin) * plot.w;
+    const normal = ((Math.round(x) % 360) + 360) % 360;
+    ctx.fillText(`${normal}°`, px, plot.y + plot.h + 5);
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const yStep = niceSkyStep(view.yMax - view.yMin, Math.max(3, plot.h / 62));
+  for (let y = Math.ceil(view.yMin / yStep) * yStep;
+       y <= view.yMax + 1e-9; y += yStep) {
+    const py = plot.y + (view.yMax - y) / Math.max(1e-6, view.yMax - view.yMin) * plot.h;
+    ctx.fillText(`${curveTickText(y, '°')}`, plot.x - 7, py);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#98a0b0';
+  const xTitle = curveTitle('x', '方位角 (°) · 0 = 北 · 90 = 东');
+  const xTitleY = plot.y + plot.h + CURVE_MARGIN.bottom - 2;
+  ctx.fillText(xTitle, plot.x + plot.w / 2, xTitleY);
+  const xTitleWidth = ctx.measureText(xTitle).width;
+  state.curveTitleBoxes.push({
+    key: 'x', text: xTitle, x: plot.x + plot.w / 2 - xTitleWidth / 2,
+    y: xTitleY - 15, w: xTitleWidth, h: 16,
+  });
+  const yTitle = curveTitle('y', '高度角 (°)');
+  ctx.save();
+  ctx.translate(plot.x - 44, plot.y + plot.h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(yTitle, 0, 0);
+  ctx.restore();
+  state.curveTitleBoxes.push({
+    key: 'y', text: yTitle, x: plot.x - 64, y: plot.y + plot.h / 2 - 50,
+    w: 50, h: 100,
+  });
+
+  const legend = options.kind === 'sun8'
+    ? (options.colour ? '点的颜色 = 月份' : '单色')
+    : (options.showPhase ? '每个点 = 该时刻的月相' : '点的亮度 = 月球照亮比例');
+  curveDrawLabel(ctx, 'legend', legend, plot,
+    plot.x + plot.w - 8, plot.y + 7,
+    { align: 'right', color: 'rgba(190,205,232,.72)' });
+}
+
+function curvePaintEarthChart(ctx, plot, view, series, data, options) {
+  const projection = curveProjection(plot, view);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(plot.x, plot.y, plot.w, plot.h); ctx.clip();
+
+  // Solid where the curve is in range; the last segment before full moon goes
+  // off the top (the night side vanishes), so it is drawn dashed to the edge.
+  let segment = [];
+  const flush = () => {
+    if (segment.length > 1) {
+      ctx.beginPath();
+      segment.forEach((point, index) => {
+        const x = projection.x(point.x);
+        const y = projection.y(Math.min(point.y, view.yMax));
+        if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      });
+      ctx.strokeStyle = '#9ece6a';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+    segment = [];
+  };
+  for (const point of series) {
+    if (point.y === null || !Number.isFinite(point.y)
+        || point.y > view.yMax + 0.4) {
+      flush();
+      continue;
+    }
+    segment.push(point);
+  }
+  flush();
+  if (series.length) {
+    const finite = series.filter((point) => point.y !== null
+      && Number.isFinite(point.y) && point.y <= view.yMax + 0.4);
+    if (finite.length) {
+      const last = finite[finite.length - 1];
+      const next = series[series.indexOf(last) + 1];
+      if (next) {
+        const x0 = projection.x(last.x);
+        const y0 = projection.y(last.y);
+        const x1 = projection.x(next.x);
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, plot.y);
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = 'rgba(158,206,106,.55)';
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+  for (const point of series) {
+    if (point.y === null || !Number.isFinite(point.y) || point.y > view.yMax) continue;
+    ctx.beginPath();
+    ctx.arc(projection.x(point.x), projection.y(point.y), 1.8, 0, Math.PI * 2);
+    ctx.fillStyle = curvePhaseColor(point.illum);
+    ctx.fill();
+  }
+
+  // Current phase, from the main page's instant.
+  const current = data.current;
+  if (options.showCurrent && current) {
+    const cx = options.xaxis === 'illum'
+      ? Number(current.illumination_percent) : Number(current.phase_angle_deg);
+    const cy = current.earthshine_apparent_magnitude === null
+      ? null : Number(current.earthshine_apparent_magnitude);
+    if (Number.isFinite(cx) && cy !== null && Number.isFinite(cy) && cy <= view.yMax + 0.4) {
+      const x = projection.x(cx);
+      const y = projection.y(Math.min(cy, view.yMax));
+      ctx.beginPath();
+      ctx.arc(x, y, 4.8, 0, Math.PI * 2);
+      ctx.strokeStyle = '#7aa2f7';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      curveDrawLabel(ctx, 'current', '当前', plot, x + 7, y - 4,
+        { baseline: 'bottom', color: '#9db8f5' });
+    }
+  }
+  ctx.restore();
+
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillStyle = '#8b93a3';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xStep = niceSkyStep(view.xMax - view.xMin, Math.max(3, plot.w / 100));
+  for (let x = Math.ceil(view.xMin / xStep) * xStep;
+       x <= view.xMax + 1e-9; x += xStep) {
+    const px = plot.x + (x - view.xMin) / Math.max(1e-6, view.xMax - view.xMin) * plot.w;
+    ctx.fillText(`${curveTickText(x)}`, px, plot.y + plot.h + 5);
+    // The other quantity on the top axis: illumination for a phase x-axis,
+    // phase angle for an illumination x-axis.
+    const top = options.xaxis === 'illum'
+      ? 180.0 * (1.0 - x / 100.0)
+      : 100.0 * (1.0 - x / 180.0);
+    ctx.fillStyle = '#6f7788';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`${curveTickText(top, options.xaxis === 'illum' ? '°' : '%')}`,
+      px, plot.y - 5);
+    ctx.fillStyle = '#8b93a3';
+    ctx.textBaseline = 'top';
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const yStep = niceSkyStep(view.yMax - view.yMin, Math.max(3, plot.h / 62));
+  for (let y = Math.ceil(view.yMin / yStep) * yStep;
+       y <= view.yMax + 1e-9; y += yStep) {
+    const py = plot.y + (view.yMax - y) / Math.max(1e-6, view.yMax - view.yMin) * plot.h;
+    ctx.fillText(`${curveTickText(y)}`, plot.x - 7, py);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#98a0b0';
+  const xTitle = curveTitle('x', options.xaxis === 'illum' ? '照明率 (%)' : '相位角 (°)');
+  const xTitleY = plot.y + plot.h + CURVE_MARGIN.bottom - 2;
+  ctx.fillText(xTitle, plot.x + plot.w / 2, xTitleY);
+  const xTitleWidth = ctx.measureText(xTitle).width;
+  state.curveTitleBoxes.push({
+    key: 'x', text: xTitle, x: plot.x + plot.w / 2 - xTitleWidth / 2,
+    y: xTitleY - 15, w: xTitleWidth, h: 16,
+  });
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#6f7788';
+  const topTitle = curveTitle('top',
+    options.xaxis === 'illum' ? '相位角 (°)' : '照明率 (%)');
+  ctx.fillText(topTitle, plot.x + plot.w / 2, plot.y - 34);
+  const topWidth = ctx.measureText(topTitle).width;
+  state.curveTitleBoxes.push({
+    key: 'top', text: topTitle, x: plot.x + plot.w / 2 - topWidth / 2,
+    y: plot.y - 50, w: topWidth, h: 16,
+  });
+  const yTitle = curveTitle('y', '地照亮度（星等，向上更亮）');
+  ctx.save();
+  ctx.translate(plot.x - 44, plot.y + plot.h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#98a0b0';
+  ctx.fillText(yTitle, 0, 0);
+  ctx.restore();
+  state.curveTitleBoxes.push({
+    key: 'y', text: yTitle, x: plot.x - 64, y: plot.y + plot.h / 2 - 60,
+    w: 50, h: 120,
+  });
+
+  curveDrawLabel(ctx, 'note', '满月附近夜面消失 · 曲线在 12 等处截断',
+    plot, plot.x + plot.w - 8, plot.y + 7,
+    { align: 'right', color: 'rgba(158,206,106,.72)' });
+}
+
+function paintCurveChart(ctx, area, data, view, options) {
+  const plot = curvePlotLayout(area);
+  ctx.save();
+  ctx.fillStyle = '#07090d';
+  ctx.fillRect(area.x, area.y, area.w, area.h);
+  const series = curveSeries(data, options);
+  curvePaintGrid(ctx, plot, view, options);
+  if (options.kind === 'earthshine') {
+    curvePaintEarthChart(ctx, plot, view, series, data, options);
+  } else {
+    curvePaintMoonChart(ctx, plot, view, series, data, options);
+  }
+  // Mode badge (a movable legend, like every other chart label).
+  const badge = options.kind === 'earthshine' ? '地照亮度'
+    : options.kind === 'sun8' ? '太阳8字' : '月亮8字';
+  curveDrawLabel(ctx, 'badge', badge, plot, plot.x + 4, plot.y + 4, {
+    box: true, padding: 7, height: 17, color: '#9db8f5',
+    font: '10px -apple-system, "PingFang SC", sans-serif',
+  });
+  ctx.restore();
+  return { plot, projection: curveProjection(plot, view), series };
+}
+
+function drawCurve() {
+  if (!state.curve) return;
+  const metrics = curveCanvasMetrics();
+  if (!metrics.canvas) return;
+  const { canvas, width, height, dpr } = metrics;
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const options = curveOptions();
+  const plot = curvePlotLayout({ x: 0, y: 0, w: width, h: height });
+  const view = curveEnsureView(plot, state.curve, options);
+  state.curveTextBoxes = [];
+  state.curveTitleBoxes = [];
+  const painted = paintCurveChart(ctx, { x: 0, y: 0, w: width, h: height },
+    state.curve, view, options);
+  state.curveLayout = painted.plot;
+  state.curveProjection = painted.projection;
+  state.curveSeries = painted.series;
+  $('curve-empty').hidden = true;
+  metrics.canvas.style.cursor = options.locked ? 'default' : 'crosshair';
+  $('curve-mode').textContent = options.kind === 'earthshine' ? '地照亮度'
+    : options.kind === 'sun8' ? '太阳8字' : '月亮8字';
+  fillCurveSummary(state.curve, options);
+}
+
+function fillCurveSummary(data, options) {
+  const summary = $('curve-summary');
+  if (!summary || !data) return;
+  if (options.kind === 'earthshine') {
+    const current = data.current || {};
+    const illum = Number(current.illumination_percent);
+    const rawMag = current.earthshine_apparent_magnitude;
+    const mag = rawMag === null || rawMag === undefined ? NaN : Number(rawMag);
+    summary.textContent = `相位角 ${fmt(current.phase_angle_deg, 1)}° · 照明率 `
+      + `${Number.isFinite(illum) ? illum.toFixed(1) : '—'}% · 当前地照亮度 `
+      + `${Number.isFinite(mag) ? mag.toFixed(2) : '趋于无穷'} mag`
+      + ' · 顶轴为另一量';
+    return;
+  }
+  const samples = data.samples || [];
+  const first = samples[0] || {};
+  const last = samples[samples.length - 1] || {};
+  const extremes = data.extremes || {};
+  const offset = Number(data.tz_offset_hours) || 0;
+  const sun = options.kind === 'sun8';
+  const day = (iso) => {
+    const stamp = Date.parse(iso);
+    if (!Number.isFinite(stamp)) return '—';
+    return new Date(stamp + offset * 3600000).toISOString().slice(5, 10);
+  };
+  const firstClock = String(first.local_time || '').slice(11, 16) || '—';
+  const drift = Number(data.drift_minutes) || 0;
+  summary.textContent = `${day(first.when_utc)}–${day(last.when_utc)} · 首日 `
+    + `${firstClock}（UTC${offset >= 0 ? '+' : ''}${offset}） · `
+    + (sun ? '每天同一时刻' : `每天推迟 ${drift.toFixed(1)} 分钟`)
+    + ` · ${samples.length} 点 · 高度 `
+    + `${fmt(extremes.elevation_min_deg, 1)}°…${fmt(extremes.elevation_max_deg, 1)}°`;
+}
+
+/** The year/month the range buttons mean: the page's simulated date. */
+function curveReferenceDate() {
+  const value = $('when') && $('when').value;
+  const stamp = Date.parse(String(value || '') + ':00Z');
+  return Number.isFinite(stamp) ? new Date(stamp) : new Date();
+}
+
+function curveSetRange(kind) {
+  const reference = curveReferenceDate();
+  const year = reference.getUTCFullYear();
+  const month = reference.getUTCMonth();
+  const start = kind === 'year'
+    ? Date.UTC(year, 0, 1)
+    : Date.UTC(year, month, 1);
+  const days = kind === 'year'
+    ? (new Date(Date.UTC(year + 1, 0, 1)) - new Date(Date.UTC(year, 0, 1))) / 86400000
+    : new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  $('curve-date').value = new Date(start).toISOString().slice(0, 10);
+  $('curve-days').value = String(Math.round(days));
+}
+
+function nudgeCurve(step) {
+  const next = shiftInstant(curveFieldsValue() || $('when').value, step);
+  if (!next) return;
+  setCurveFields(next);
+  refreshCurve();
+}
+
+function curveFieldsValue() {
+  const date = $('curve-date').value;
+  if (!date) return '';
+  const time = $('curve-time').value || '00:00';
+  return `${date}T${time.slice(0, 5)}`;
+}
+
+function setCurveFields(localValue) {
+  if (!localValue) return;
+  const [date, time = '00:00'] = String(localValue).split('T');
+  $('curve-date').value = date;
+  $('curve-time').value = time.slice(0, 5);
+}
+
+function curveFieldsFromMain() {
+  setCurveFields($('when').value);
+}
+
+/** Show only the controls that belong to the selected chart. */
+function syncCurveControls() {
+  const options = curveOptions();
+  const moon = options.kind !== 'earthshine';
+  $('curve-when').hidden = !moon;
+  $('curve-earth').hidden = moon;
+  $('curve-this-year').hidden = options.kind === 'moon8';
+  $('curve-nudge').hidden = !moon;
+  $('curve-phase-label').hidden = options.kind !== 'moon8';
+  $('curve-colour-label').hidden = options.kind !== 'sun8';
+  $('curve-mode').textContent = options.kind === 'sun8' ? '太阳8字' : '月亮8字';
+}
+
+async function refreshCurve() {
+  const sequence = ++state.curveSeq;
+  $('curve-empty').hidden = false;
+  $('curve-empty').textContent = '正在计算曲线…';
+  const options = curveOptions();
+  syncCurveControls();
+  const body = {
+    kind: options.kind,
+    when: whenPayload(),
+    tz_offset_hours: Number($('tz').value) || 0,
+    earthshine: earthshinePayload(),
+  };
+  if (options.kind === 'moon8' || options.kind === 'sun8') {
+    body.start = $('curve-date').value;
+    const [hour, minute] = ($('curve-time').value
+      || (options.kind === 'sun8' ? '12:00' : '21:00')).split(':');
+    body.hour = Number(hour) || 0;
+    body.minute = Number(minute) || 0;
+    body.days = Number($('curve-days').value) || (options.kind === 'sun8' ? 365 : 30);
+    if (options.kind === 'moon8') {
+      // The Moon returns ~51 minutes later each day; this is the sampling rule
+      // that makes the chart an analemma rather than a month-long orbit.
+      body.drift_minutes = 50.47;
+    }
+  }
+  try {
+    const payload = await post('/api/curve', body);
+    if (sequence !== state.curveSeq) return;
+    state.curve = payload;
+    state.curveView = null;
+    drawCurve();
+  } catch (error) {
+    if (sequence !== state.curveSeq) return;
+    state.curve = null;
+    $('curve-empty').hidden = false;
+    $('curve-empty').textContent = '曲线计算失败：'
+      + String((error && error.message) || error);
+  }
+}
+
+function curveWindowBox() {
+  const viewportWidth = window.innerWidth || 1280;
+  const viewportHeight = window.innerHeight || 800;
+  return { viewportWidth, viewportHeight };
+}
+
+function applyCurveWindow(rect) {
+  const box = curveWindowBox();
+  const minWidth = Math.min(CURVE_MIN_WIDTH, Math.max(300, box.viewportWidth - 16));
+  const minHeight = Math.min(CURVE_MIN_HEIGHT, Math.max(260, box.viewportHeight - 16));
+  const width = skyClamp(rect.width, minWidth, Math.max(minWidth, box.viewportWidth - 16));
+  const height = skyClamp(rect.height, minHeight, Math.max(minHeight, box.viewportHeight - 16));
+  const left = skyClamp(rect.left, 8, Math.max(8, box.viewportWidth - width - 8));
+  const top = skyClamp(rect.top, 8, Math.max(8, box.viewportHeight - height - 8));
+  const node = $('curve-window');
+  node.style.left = left + 'px';
+  node.style.top = top + 'px';
+  node.style.width = width + 'px';
+  node.style.height = height + 'px';
+  state.curveWindow = { left, top, width, height };
+}
+
+function positionCurveWindow(reset) {
+  const box = curveWindowBox();
+  if (reset || !state.curveWindow) {
+    const maxWidth = Math.min(1180, Math.max(300, box.viewportWidth - 16));
+    const maxHeight = Math.min(820, Math.max(260, box.viewportHeight - 16));
+    const width = Math.round(skyClamp(box.viewportWidth * 0.72,
+      Math.min(620, maxWidth), maxWidth));
+    const height = Math.round(skyClamp(box.viewportHeight * 0.72,
+      Math.min(500, maxHeight), maxHeight));
+    state.curveWindow = {
+      left: Math.round((box.viewportWidth - width) / 2),
+      top: Math.round((box.viewportHeight - height) / 2),
+      width,
+      height,
+    };
+  }
+  applyCurveWindow(state.curveWindow);
+}
+
+function openCurve() {
+  state.curveOpen = true;
+  if (!curveFieldsValue()) curveFieldsFromMain();
+  syncCurveControls();
+  $('curve-backdrop').hidden = false;
+  positionCurveWindow(false);
+  $('curve-close').focus();
+  refreshCurve();
+}
+
+function closeCurve() {
+  state.curveOpen = false;
+  state.curveSeq += 1;
+  state.curveDrag = null;
+  $('curve-backdrop').hidden = true;
+  $('curve-open').focus();
+}
+
+function curveCanvasPoint(event) {
+  const canvas = $('curve-canvas');
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX || 0) - rect.left,
+    y: (event.clientY || 0) - rect.top,
+  };
+}
+
+/** Keep the earthshine phase/illumination axis inside its physical range. */
+function curveClampEarthView(view, options) {
+  if (options.kind !== 'earthshine') return view;
+  const limit = options.xaxis === 'illum' ? 100 : 180;
+  let span = Math.min(limit, Math.max(10, view.xMax - view.xMin));
+  let low = Math.max(0, Math.min(limit - span, view.xMin));
+  return {
+    ...view,
+    xMin: low,
+    xMax: low + span,
+  };
+}
+
+function curveCanvasDown(event) {
+  if (!state.curve || !state.curveLayout) return;
+  const point = curveCanvasPoint(event);
+  const plot = state.curveLayout;
+  const hit = state.curveTextBoxes.slice().reverse().find((box) => (
+    point.x >= box.x - 2 && point.x <= box.x + box.w + 2
+    && point.y >= box.y - 2 && point.y <= box.y + box.h + 2
+  ));
+  if (hit) {
+    event.preventDefault();
+    state.curveDrag = {
+      kind: 'text', key: hit.key,
+      dx: point.x - hit.x, dy: point.y - hit.y,
+    };
+    return;
+  }
+  if (curveOptions().locked) return;
+  if (point.x < plot.x || point.x > plot.x + plot.w
+      || point.y < plot.y || point.y > plot.y + plot.h) return;
+  event.preventDefault();
+  state.curveDrag = { kind: 'pan', start: point, view: { ...state.curveView } };
+}
+
+function curveDragPlot(event) {
+  const drag = state.curveDrag;
+  if (!drag || drag.kind !== 'pan' || !state.curveLayout) return;
+  const point = curveCanvasPoint(event);
+  const plot = state.curveLayout;
+  const projection = curveProjection(plot, drag.view);
+  const dx = projection.xv(drag.start.x) - projection.xv(point.x);
+  const dy = projection.yv(drag.start.y) - projection.yv(point.y);
+  state.curveView = curveClampEarthView({
+    xMin: drag.view.xMin + dx,
+    xMax: drag.view.xMax + dx,
+    yMin: drag.view.yMin + dy,
+    yMax: drag.view.yMax + dy,
+  }, curveOptions());
+  drawCurve();
+}
+
+function curveCanvasWheel(event) {
+  if (!state.curve || !state.curveLayout || curveOptions().locked) return;
+  const point = curveCanvasPoint(event);
+  const plot = state.curveLayout;
+  if (point.x < plot.x || point.x > plot.x + plot.w
+      || point.y < plot.y || point.y > plot.y + plot.h) return;
+  event.preventDefault();
+  const view = state.curveView;
+  const projection = curveProjection(plot, view);
+  const x = projection.xv(point.x);
+  const y = projection.yv(point.y);
+  const scale = event.deltaY > 0 ? 1.16 : 1 / 1.16;
+  const xSpan = (view.xMax - view.xMin) * scale;
+  const ySpan = (view.yMax - view.yMin) * scale;
+  if (xSpan < 0.5 || ySpan < 0.5) return;
+  const fx = (point.x - plot.x) / Math.max(1, plot.w);
+  const fy = (point.y - plot.y) / Math.max(1, plot.h);
+  state.curveView = curveClampEarthView({
+    xMin: x - fx * xSpan,
+    xMax: x + (1 - fx) * xSpan,
+    yMin: y - (1 - fy) * ySpan,
+    yMax: y + fy * ySpan,
+  }, curveOptions());
+  drawCurve();
+}
+
+function curveCanvasDoubleClick(event) {
+  const point = curveCanvasPoint(event);
+  const hit = state.curveTitleBoxes.slice().reverse().find((box) => (
+    point.x >= box.x && point.x <= box.x + box.w
+    && point.y >= box.y && point.y <= box.y + box.h
+  ));
+  if (hit) {
+    const names = { x: 'X 轴标题', y: 'Y 轴标题', top: '顶部轴标题' };
+    const current = hit.text || curveTitle(hit.key, '');
+    const value = curveAskText(names[hit.key] || '轴标题', current);
+    if (value !== null) {
+      state.curveTitles[hit.key] = value.trim();
+      drawCurve();
+    }
+    return;
+  }
+  // A double-click on a movable label should not throw that label's position
+  // away by resetting the view underneath it.
+  const label = state.curveTextBoxes.some((box) => (
+    point.x >= box.x - 2 && point.x <= box.x + box.w + 2
+    && point.y >= box.y - 2 && point.y <= box.y + box.h + 2
+  ));
+  if (label) return;
+  state.curveView = null;
+  drawCurve();
+}
+
+function curveResizeStart(event, direction) {
+  event.preventDefault();
+  const box = state.curveWindow || { left: 0, top: 0, width: 800, height: 600 };
+  state.curveDrag = {
+    kind: 'resize',
+    direction,
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...box },
+  };
+}
+
+function curveHeadDown(event) {
+  const target = event.target || {};
+  if (String(target.tagName || '').toUpperCase() === 'BUTTON') return;
+  if (!state.curveWindow) return;
+  event.preventDefault();
+  state.curveDrag = {
+    kind: 'move',
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...state.curveWindow },
+  };
+}
+
+function curvePointerMove(event) {
+  const drag = state.curveDrag;
+  if (!drag) return;
+  if (drag.kind === 'text') {
+    if (!state.curveLayout) return;
+    const point = curveCanvasPoint(event);
+    const plot = state.curveLayout;
+    const stored = {
+      fx: (point.x - drag.dx - plot.x) / Math.max(1, plot.w),
+      fy: (point.y - drag.dy - plot.y) / Math.max(1, plot.h),
+    };
+    state.curveText[drag.key] = stored;
+    drawCurve();
+    return;
+  }
+  if (drag.kind === 'pan') { curveDragPlot(event); return; }
+  if (drag.kind === 'resize') {
+    const dx = (event.clientX || 0) - drag.startX;
+    const dy = (event.clientY || 0) - drag.startY;
+    const box = { ...drag.box };
+    if (drag.direction.includes('e')) box.width += dx;
+    if (drag.direction.includes('w')) { box.width -= dx; box.left += dx; }
+    if (drag.direction.includes('s')) box.height += dy;
+    if (drag.direction.includes('n')) { box.height -= dy; box.top += dy; }
+    const viewport = curveWindowBox();
+    if (box.width < CURVE_MIN_WIDTH) {
+      if (drag.direction.includes('w')) box.left -= CURVE_MIN_WIDTH - box.width;
+      box.width = CURVE_MIN_WIDTH;
+    }
+    if (box.height < CURVE_MIN_HEIGHT) {
+      if (drag.direction.includes('n')) box.top -= CURVE_MIN_HEIGHT - box.height;
+      box.height = CURVE_MIN_HEIGHT;
+    }
+    box.width = Math.min(box.width, viewport.viewportWidth - 8);
+    box.height = Math.min(box.height, viewport.viewportHeight - 8);
+    applyCurveWindow(box);
+    drawCurve();
+  } else if (drag.kind === 'move') {
+    const dx = (event.clientX || 0) - drag.startX;
+    const dy = (event.clientY || 0) - drag.startY;
+    applyCurveWindow({
+      left: drag.box.left + dx,
+      top: drag.box.top + dy,
+      width: drag.box.width,
+      height: drag.box.height,
+    });
+  }
+}
+
+function curvePointerUp() {
+  state.curveDrag = null;
+}
+
+function curveExportSummary(data, options) {
+  if (options.kind === 'earthshine') {
+    const current = data.current || {};
+    return `相位角 ${fmt(current.phase_angle_deg, 1)}° · 照亮 `
+      + `${fmt(current.illumination_percent, 1)}% · 地照亮度 `
+      + `${fmt(current.earthshine_apparent_magnitude, 2)} mag`;
+  }
+  const samples = data.samples || [];
+  const first = samples[0] || {};
+  const last = samples[samples.length - 1] || {};
+  const offset = Number(data.tz_offset_hours) || 0;
+  const day = (iso) => {
+    const stamp = Date.parse(iso);
+    return Number.isFinite(stamp)
+      ? new Date(stamp + offset * 3600000).toISOString().slice(0, 10) : '—';
+  };
+  const firstClock = String(first.local_time || '').slice(11, 16) || '—';
+  const drift = Number(data.drift_minutes) || 0;
+  const sun = options.kind === 'sun8';
+  return `${day(first.when_utc)} – ${day(last.when_utc)} · 首日 `
+    + `${firstClock}（UTC${offset >= 0 ? '+' : ''}${offset}） · `
+    + (sun ? '每天同一时刻' : `每天推迟 ${drift.toFixed(1)} 分钟`)
+    + ` · ${samples.length} 个样本`;
+}
+
+function paintCurveExport(ctx, width, height, data, view, options) {
+  ctx.fillStyle = '#171a21';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#39404e';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#e6e8ee';
+  ctx.font = '600 15px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(state.curveTitles.header || (options.kind === 'earthshine'
+    ? '曲线图 · 地照亮度'
+    : options.kind === 'sun8' ? '曲线图 · 太阳8字' : '曲线图 · 月亮8字'),
+    16, 26);
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(curveExportSummary(data, options), 16, 44);
+  paintCurveChart(ctx, { x: 10, y: 54, w: width - 20, h: height - 54 - 28 },
+    data, view, options);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#98a0b0';
+  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(options.kind === 'earthshine'
+    ? '实线 地照亮度（夜面星等） · 顶轴为另一量'
+    : options.kind === 'sun8' ? '实线 太阳轨迹 · 点颜色 月份 · 绿色起点 / 橙色终点'
+    : '实线 月亮轨迹 · 点颜色 照亮比例 · 绿色起点 / 橙色终点',
+    16, height - 14);
+}
+
+function saveCurvePng() {
+  if (!state.curve) {
+    $('curve-empty').hidden = false;
+    $('curve-empty').textContent = '还没有曲线数据可保存。';
+    return;
+  }
+  const rect = $('curve-window').getBoundingClientRect();
+  const baseWidth = Math.max(520, rect.width || 900);
+  const baseHeight = Math.max(400, rect.height || 640);
+  const target = skyClamp(Number($('curve-save-px').value) || 2400, 320, 10000);
+  $('curve-save-px').value = String(Math.round(target));
+  const reference = $('curve-save-ref').value === 'short' ? 'short' : 'long';
+  const scale = target / Math.max(1,
+    reference === 'short' ? Math.min(baseWidth, baseHeight) : Math.max(baseWidth, baseHeight));
+  let width = Math.round(baseWidth * scale);
+  let height = Math.round(baseHeight * scale);
+  if (Math.max(width, height) > 10000) {
+    const shrink = 10000 / Math.max(width, height);
+    width = Math.round(width * shrink);
+    height = Math.round(height * shrink);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(320, width);
+  canvas.height = Math.max(240, height);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(canvas.width / baseWidth, canvas.height / baseHeight);
+  const options = curveOptions();
+  const plot = curvePlotLayout({ x: 0, y: 0, w: baseWidth, h: baseHeight });
+  const view = state.curveView || curveTargetView(state.curve, options);
+  paintCurveExport(ctx, baseWidth, baseHeight, state.curve, view, options);
+  // paintCurveExport walks the same label code at export scale; repaint the
+  // on-screen chart before the pointer can hit stale boxes.
+  drawCurve();
+  const stamp = (state.curve.start_utc || state.curve.when_utc || new Date().toISOString())
+    .slice(0, 10);
+  const name = `moon-curve-${options.kind}-${stamp}.png`;
+  skyCanvasBlob(canvas, (blob) => {
+    if (!blob) return;
+    downloadUrl(URL.createObjectURL(blob), name);
+    $('curve-summary').textContent = `已保存 ${canvas.width}×${canvas.height} px · ${name}`;
+  });
+}
+
 /* ── window resizing and dragging ──────────────────────────────────────── */
 
 function skyResizeStart(event, direction) {
@@ -7448,7 +8600,8 @@ const SETTING_FIELDS = [
   'data-source',
   'earthshine-gain', 'earth-geometric-albedo', 'earth-samples',
   'earthshine-tint',
-  'out-px', 'out-ref', 'out-scale', 'out-kmpx', 'out-samples', 'parallel',
+  'out-px', 'out-ref', 'out-scale', 'out-kmpx', 'out-samples', 'surface-texture',
+  'terrain-denoise', 'parallel',
   'sky-span', 'sky-label-step', 'sky-labels', 'sky-elongation', 'sky-closeup',
   'sky-save-ref', 'sky-save-px',
   'seeing', 'seeing-num',
@@ -8565,7 +9718,7 @@ function buildEventKinds() {
     ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
     ['highest_moon', '最高月亮'], ['lowest_moon', '最低月亮'],
     ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
-    ['jewelled_handle', '月面 the jewelled handle'],
+    ['jewelled_handle', 'the jewelled handle（实验功能）'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
@@ -11410,7 +12563,8 @@ function init() {
   }
 
   // Output size and selection change what has to be ray-marched.
-  for (const id of ['out-px', 'out-ref', 'out-scale', 'out-samples']) {
+  for (const id of ['out-px', 'out-ref', 'out-scale', 'out-samples',
+                    'surface-texture', 'terrain-denoise']) {
     const element = $(id);
     if (!element) continue;
     element.addEventListener('change', () => setStatus('参数已变，请点「更新模拟」'));
@@ -11497,7 +12651,7 @@ function init() {
   $('sky-canvas').addEventListener('wheel', skyCanvasWheel, { passive: false });
   $('sky-canvas').addEventListener('dblclick', skyCanvasDoubleClick);
   $('sky-head').addEventListener('pointerdown', skyHeadDown);
-  for (const handle of document.querySelectorAll('.sky-resize')) {
+  for (const handle of document.querySelectorAll('#sky-window .sky-resize')) {
     handle.addEventListener('pointerdown', (event) => {
       skyResizeStart(event, handle.dataset.skyResize || 'se');
     });
@@ -11505,8 +12659,96 @@ function init() {
   document.addEventListener('pointermove', skyPointerMove);
   document.addEventListener('pointerup', skyPointerUp);
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.skyOpen) closeSky();
+    if (event.key !== 'Escape') return;
+    if (state.curveOpen) closeCurve();
+    else if (state.skyOpen) closeSky();
   });
+  // 曲线图: the door, the window and its two chart modes.
+  $('curve-open').addEventListener('click', openCurve);
+  $('curve-close').addEventListener('click', closeCurve);
+  $('curve-refresh').addEventListener('click', refreshCurve);
+  $('curve-reset').addEventListener('click', () => {
+    state.curveView = null;
+    drawCurve();
+  });
+  $('curve-kind').addEventListener('change', () => {
+    const kind = curveOptions().kind;
+    const days = Number($('curve-days').value) || 30;
+    // Titles belong to one chart, not to the window: switching type must not
+    // put the Moon's caption on the Sun's axes.
+    state.curveTitles = { header: null, x: null, y: null, top: null };
+    state.curveText = {};
+    $('curve-heading').textContent = '曲线图';
+
+    // A solar figure-eight needs a year; a lunar one needs a month.  Move to
+    // the useful default when the reader switches type, but leave a range
+    // they have deliberately chosen (e.g. a month of the Sun) alone.
+    if (kind === 'sun8' && days <= 90) curveSetRange('year');
+    if (kind === 'sun8') {
+      const hour = Number(String($('curve-time').value || '12:00').slice(0, 2));
+      if (!(hour >= 6 && hour < 18)) $('curve-time').value = '12:00';
+    }
+    if (kind === 'moon8' && days > 120) $('curve-days').value = '30';
+    syncCurveControls();
+    refreshCurve();
+  });
+  $('curve-xaxis').addEventListener('change', () => {
+    state.curveView = null;
+    drawCurve();
+  });
+  $('curve-lock-axes').addEventListener('change', () => {
+    // Locking returns the chart to its fitted range; unlocking leaves the
+    // current one where it is, ready for a drag.
+    if (curveOptions().locked) state.curveView = null;
+    drawCurve();
+  });
+  for (const id of ['curve-date', 'curve-time', 'curve-days']) {
+    $(id).addEventListener('change', refreshCurve);
+  }
+  for (const id of ['curve-nudge-back-day', 'curve-nudge-back-hour',
+                    'curve-nudge-back-minute', 'curve-nudge-fwd-minute',
+                    'curve-nudge-fwd-hour', 'curve-nudge-fwd-day']) {
+    const button = $(id);
+    if (!button) continue;
+    button.addEventListener('click', () => nudgeCurve(
+      button.dataset.curveNudge || button.dataset['curve-nudge']));
+  }
+  for (const id of ['curve-show-phase', 'curve-colour', 'curve-show-current']) {
+    $(id).addEventListener('change', drawCurve);
+  }
+  $('curve-from-main').addEventListener('click', () => {
+    curveFieldsFromMain();
+    refreshCurve();
+  });
+  $('curve-this-month').addEventListener('click', () => {
+    curveSetRange('month');
+    refreshCurve();
+  });
+  $('curve-this-year').addEventListener('click', () => {
+    curveSetRange('year');
+    refreshCurve();
+  });
+  $('curve-save').addEventListener('click', saveCurvePng);
+  $('curve-heading').addEventListener('dblclick', (event) => {
+    event.preventDefault();
+    const value = curveAskText('主标题', state.curveTitles.header || '曲线图');
+    if (value === null) return;
+    state.curveTitles.header = value.trim() || null;
+    $('curve-heading').textContent = state.curveTitles.header || '曲线图';
+  });
+  $('curve-canvas').addEventListener('pointerdown', curveCanvasDown);
+  $('curve-canvas').addEventListener('wheel', curveCanvasWheel, { passive: false });
+  $('curve-canvas').addEventListener('dblclick', curveCanvasDoubleClick);
+  $('curve-head').addEventListener('pointerdown', curveHeadDown);
+  for (const handle of document.querySelectorAll('#curve-window .sky-resize')) {
+    handle.addEventListener('pointerdown', (event) => {
+      curveResizeStart(event, handle.dataset.skyResize || 'se');
+    });
+  }
+  document.addEventListener('pointermove', curvePointerMove);
+  document.addEventListener('pointerup', curvePointerUp);
+  syncCurveControls();
+
   // 并行数 is a per-render ceiling, not a preference that needs a re-render
   // by itself: the next render reads it.  Saying so is enough.
   $('parallel').addEventListener('change', () => {
@@ -11525,6 +12767,10 @@ function init() {
     if (state.skyOpen) {
       positionSkyWindow(false);
       drawSky();
+    }
+    if (state.curveOpen) {
+      positionCurveWindow(false);
+      drawCurve();
     }
   });
   if (window.ResizeObserver) {

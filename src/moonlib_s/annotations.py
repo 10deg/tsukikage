@@ -374,7 +374,8 @@ _DEFAULT_FONT_PX = 13.0
 #: mountain chain has a diameter in the gazetteer too, but it is the length of
 #: something that is not a circle, and drawing a circle round it would invent a
 #: shape the Moon does not have.
-_OUTLINE_CLASSES = frozenset({"basin", "crater", "mare", "lacus", "sinus", "palus"})
+_OUTLINE_CLASSES = frozenset({"basin", "crater", "mare", "lacus", "sinus", "palus",
+                               "lunar100"})
 
 #: Classes whose marker may be recentred on the drawn rim.  Only the genuinely
 #: round ones: a mare's gazetteer diameter is the width of an irregular patch,
@@ -490,10 +491,15 @@ def load_lunar100(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
                 significance = (row.get("Significance") or "").strip()
                 if diameter <= 0.0:
                     diameter = LUNAR100_POINT_DIAMETER_KM
+                chinese = (row.get("名称") or "").strip()
                 features.append(
                     SurfaceFeature(
-                        name_en=name,
-                        name_zh=(row.get("名称") or "").strip(),
+                        # The number is part of the name the reader sees: it is
+                        # the key back to the published table, and keeping it in
+                        # the name (rather than only in a side field) makes the
+                        # label, the search box and the status line agree.
+                        name_en=f"{number} {name}",
+                        name_zh=(f"{number} {chinese}" if chinese else ""),
                         lat_deg=lat,
                         lon_deg=((lon + 180.0) % 360.0) - 180.0,
                         diameter_km=float(diameter),
@@ -536,13 +542,11 @@ def annotation_catalogue(
     Clavius 克拉维斯环形山, the official table calls it 克拉维斯, and the
     official name is the one the page should show.
 
-    The Lunar 100 is a second, curated classification layered on top of the
-    gazetteer rather than a parallel catalogue.  A name the gazetteer already
-    has (Clavius, Tycho, Mare Crisium) is the same row with
-    ``lunar100`` set; only the list's descriptive entries that the IAU does not
-    name (``Straight Wall``, ``Altai Scarp``, ``Hadley Rille``) are added as
-    rows of their own.  That is what lets the page show one label per place
-    whether the Lunar 100 switch is on or off.
+    The Lunar 100 is appended as its own list, not merged with the gazetteer:
+    a name the gazetteer also has (Clavius, Tycho, Mare Crisium) stays a
+    separate Lunar 100 row, at the position and diameter the published list
+    gives.  The list is a numbered observing sequence, so its entries must stay
+    one-to-one with the table even where they name the same place twice.
     """
     primary = tuple(showpieces) if showpieces is not None else load_features()
     gazetteer = load_nomenclature(path)
@@ -576,24 +580,12 @@ def annotation_catalogue(
         shown.add(feature.name_en)
         features.append(_with_gazetteer_kind(feature))
 
-    # The Lunar 100 is an observing list, not a geological family: tag the
-    # place that is already in the catalogue, and add only the descriptive
-    # names the IAU gazetteer does not carry.  The first three list entries
-    # have no position and were skipped by the loader.
-    by_key = {_name_key(feature.name_en): index
-              for index, feature in enumerate(features)}
-    for entry in load_lunar100(lunar100_path):
-        key = _name_key(entry.name_en)
-        if key in by_key:
-            index = by_key[key]
-            features[index] = replace(
-                features[index],
-                lunar100=int(entry.lunar100),
-                lunar100_significance=entry.lunar100_significance,
-            )
-        else:
-            by_key[key] = len(features)
-            features.append(entry)
+    # The Lunar 100 is an independent observing list, not a set of aliases for
+    # gazetteer rows: every list entry is its own feature, even when the name
+    # or the place also appears above.  That is what the list *is* -- a second
+    # catalogue the reader follows item by item -- and it keeps the numbering
+    # and the published name intact.
+    features.extend(load_lunar100(lunar100_path))
     return tuple(features)
 
 
@@ -1387,15 +1379,23 @@ def _display_label(feature: SurfaceFeature, language: str,
     satellite craters, which are the only features that have one.
     """
     chinese, english = feature.name_zh, feature.name_en
-    letter = _satellite_letter(english)
-    if satellite == "letter" and letter:
-        return letter
+    number = int(feature.lunar100 or 0)
+    # The Lunar 100 names already carry their list number.  In the "both" form
+    # the number belongs to the caption once, not twice.
+    if not number:
+        letter = _satellite_letter(english)
+        if satellite == "letter" and letter:
+            return letter
     if feature_class(feature.kind, feature.diameter_km) == "crater":
         chinese = _crater_caption(chinese)
     if language == "en" or not chinese:
         return english
     if language == "zh":
         return chinese
+    if number:
+        prefix = f"{number} "
+        if english.startswith(prefix):
+            english = english[len(prefix):]
     return f"{chinese} {english}"
 
 
@@ -1721,7 +1721,6 @@ def plan_annotations(
 
     candidates: List[Tuple[float, int, str]] = []
     groups: Dict[int, str] = {}
-    display_groups: Dict[int, str] = {}
     unlit = too_small = in_frame = 0
     for index, feature in enumerate(features):
         if not inside[index]:
@@ -1730,19 +1729,16 @@ def plan_annotations(
         if allowed is not None and feature.kind not in allowed:
             continue
         group = feature_class(feature.kind, feature.diameter_km)
-        # The new Lunar 100 rows have no ordinary family; they exist only while
-        # the switch is on.  Tagged gazetteer rows keep their own class when it
-        # is off, so the default catalogue plan is unchanged.
+        # The Lunar 100 rows are an independent list; they exist only while the
+        # switch is on, and their duplicates of gazetteer names are deliberate.
         if group == "lunar100" and not lunar100_active:
             continue
-        # The Lunar 100 is a second classification, not a physical kind.  When
-        # its switch is on, a tagged place is painted in the Lunar 100 colour
-        # even if its own class is also on; when the switch is off it stays in
-        # its ordinary class and nothing about the page changes.
-        show_as_lunar100 = bool(feature.lunar100) and lunar100_active
-        if wanted is not None and group not in wanted and not show_as_lunar100:
+        if (
+            wanted is not None
+            and group not in wanted
+            and not (group == "lunar100" and lunar100_active)
+        ):
             continue
-        display_group = "lunar100" if show_as_lunar100 else group
         # Landing sites are exempt from the size floor: a 1 km site is a dot on
         # a full disk, and it is still the thing the reader is looking for.
         # Lunar 100 entries are exempt too: several are a dome field, a ray or a
@@ -1752,7 +1748,7 @@ def plan_annotations(
         # it into names.
         focus_here = bool(in_focus[index])
         floor = min_radius_px * (0.35 if focus_here else 1.0)
-        exempt = is_landing_site(feature) or show_as_lunar100
+        exempt = is_landing_site(feature) or group == "lunar100"
         if not exempt and (
             feature.diameter_km < min_diameter_km or radius[index] < floor
         ):
@@ -1770,12 +1766,11 @@ def plan_annotations(
             _size_score(float(radius[index]), unit)
             + _KIND_BONUS.get(feature.kind, 0.0)
             + (_HIGHLIGHT_BONUS if _name_key(feature.name_en) in highlighted else 0.0)
-            + (_LUNAR100_BONUS if show_as_lunar100 else 0.0)
+            + (_LUNAR100_BONUS if group == "lunar100" else 0.0)
             + 6.0 * centrality
             + (0.0 if luminous else -8.0)
         )
         groups[index] = group
-        display_groups[index] = display_group
         family = _family(feature.kind, group)
         # Only the sites themselves are exempt: a landmark inside one is a name
         # like any other.  `_family` cannot tell them apart -- both are `Statio`
@@ -1797,6 +1792,20 @@ def plan_annotations(
         focus_budget = max(8, int(round(max_labels * 0.8)))
         focus_chosen, _focus_over = _select_by_family(focus_candidates, focus_budget)
         chosen.extend(focus_chosen)
+    # The Lunar 100 is a checklist, not a density setting: every active list
+    # entry is chosen, even beyond the label budget.  Its captions are placed by
+    # the same layout, but a list entry that cannot find a free slot still gets
+    # its own overlapping slot below, so "全部显示" really means all of them.
+    forced_indices: Set[int] = set()
+    if lunar100_active:
+        already = {index for _score, index, _family in chosen}
+        forced = [
+            item for item in candidates
+            if groups.get(item[1]) == "lunar100" and item[1] not in already
+        ]
+        chosen.extend(forced)
+        forced_indices = {index for _score, index, _family in forced}
+        over_budget = max(0, over_budget - len(forced))
     # Sites were taken first and are not counted against the budget.
     over_budget = max(0, over_budget)
     # Landmarks first: the highlighted showpieces, and each family's leader.
@@ -1813,6 +1822,9 @@ def plan_annotations(
             index for index, feature in enumerate(features)
             if any(name in feature.name_en for name in highlight)
         )
+    # The Lunar 100 entries are the reason the switch was turned on; give their
+    # captions the first claim on the layout.
+    important_indices.update(forced_indices)
 
     if center_on_rim and terrain is not None:
         # The catalogue centre projects onto the ground under it; the rim the
@@ -1909,6 +1921,21 @@ def plan_annotations(
             )
             if box is not None:
                 placements[entry["key"]] = box
+    # A forced Lunar 100 caption is allowed to overlap when the free-slot search
+    # finds nothing: the list is a reference sheet, and hiding half of it would
+    # defeat the switch.  The fallback still clamps to the frame.
+    for entry in wanted:
+        key = entry["key"]
+        if key not in forced_indices or key in placements:
+            continue
+        box = _place_label(
+            float(entry["anchor"][0]), float(entry["anchor"][1]),
+            float(entry["radius_px"]), float(entry["width"]),
+            float(entry["height"]), frame.width, frame.height,
+            (), 0.0, unit=1.0,
+        )
+        if box is not None:
+            placements[key] = box
 
     items: List[Annotation] = []
     unplaced = 0
@@ -1973,7 +2000,7 @@ def plan_annotations(
                 label_h=label_height,
                 leader=bool(leader),
                 outline=outline,
-                feature_class=display_groups.get(index, groups.get(index, "other")),
+                feature_class=groups.get(index, "other"),
                 highlight=feature.name_en in related_names,
             )
         )
@@ -1992,10 +2019,6 @@ def plan_annotations(
             if only_illuminated and float(incidence[index]) >= 90.0:
                 continue
             group = feature_class(feature.kind, feature.diameter_km)
-            display_group = (
-                "lunar100"
-                if feature.lunar100 and lunar100_active else group
-            )
             outline = None
             if (
                 group in _OUTLINE_CLASSES
@@ -2031,63 +2054,8 @@ def plan_annotations(
                     label_h=0.0,
                     leader=False,
                     outline=outline,
-                    feature_class=display_group,
+                    feature_class=group,
                     highlight=True,
-                )
-            )
-
-    if lunar100_active:
-        # The list is a checklist: every target that is on the near side gets a
-        # marker and, where the physical kind has a rim, an outline, even when
-        # the label budget or the layout could not find room for its caption.
-        # This is what makes the switch useful at the low densities too -- the
-        # reader sees all the points and gets names where they fit.
-        present = {item.name_en for item in items}
-        for index, feature in enumerate(features):
-            if not feature.lunar100 or feature.name_en in present:
-                continue
-            if not bool(inside[index]):
-                continue
-            if only_illuminated and float(incidence[index]) >= 90.0:
-                continue
-            group = feature_class(feature.kind, feature.diameter_km)
-            outline = None
-            if (
-                group in _OUTLINE_CLASSES
-                and float(radius[index]) >= outline_min_radius_px
-            ):
-                outline = rim_outline(
-                    frame,
-                    float(feature.lat_deg),
-                    float(feature.lon_deg),
-                    float(feature.diameter_km),
-                    points=int(outline_points),
-                    terrain=terrain if group in _TERRAIN_LIFT_CLASSES else None,
-                    terrain_level=terrain_level,
-                )
-            items.append(
-                Annotation(
-                    name_en=feature.name_en,
-                    name_zh=feature.name_zh,
-                    kind=feature.kind,
-                    lat_deg=float(feature.lat_deg),
-                    lon_deg=float(feature.lon_deg),
-                    diameter_km=float(feature.diameter_km),
-                    x=float(x[index]),
-                    y=float(y[index]),
-                    radius_px=float(radius[index]),
-                    incidence_deg=float(incidence[index]),
-                    illuminated=float(incidence[index]) < 90.0,
-                    score=0.0,
-                    label="",
-                    label_x=None,
-                    label_y=None,
-                    label_w=0.0,
-                    label_h=0.0,
-                    leader=False,
-                    outline=outline,
-                    feature_class="lunar100",
-                    highlight=False,
                 )
             )
 

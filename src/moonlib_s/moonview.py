@@ -90,6 +90,7 @@ __all__ = [
     "apply_tone_mapping",
     "VISUAL_ASINH_SOFTENING",
     "moon_magnitude",
+    "earthshine_relation",
     "view_summary",
     "selection_footprint",
 ]
@@ -622,6 +623,84 @@ def view_geometry(
         ),
         moon_elevation_deg=moon_elevation,
     )
+
+
+def earthshine_relation(
+    phase_angles_deg: Sequence[float],
+    *,
+    distance_km: Optional[float] = None,
+    earth_distance_km: Optional[float] = None,
+    earth_albedo: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Earthshine brightness across a range of lunar phase angles.
+
+    One row per phase angle, with both x-axes the curve window offers:
+    ``phase_angle_deg`` (0 = full, 180 = new) and ``illumination_percent``.
+    The dependent quantity is the one the page calls 地照亮度: the apparent
+    magnitude of the Moon's *night side* in our sky, lit by the Earth.  It is
+    finite at new moon (the night side is the whole disk and the Earth is
+    full) and diverges at full moon (there is no night side left); the latter
+    is returned as ``None`` rather than an infinity so the payload stays strict
+    JSON.
+
+    The calculation mirrors :func:`view_geometry` -- the Earth is a Lambert
+    sphere of geometric albedo *earth_albedo* at the Moon's distance, the Moon
+    is Allen's magnitude fit -- without repeating the SPICE call for every
+    sample.  Distances default to the mean Earth-Moon distance.
+    """
+    earth_distance = (
+        MEAN_LUNAR_DISTANCE_KM
+        if earth_distance_km is None else float(earth_distance_km)
+    )
+    moon_distance = (
+        MEAN_LUNAR_DISTANCE_KM if distance_km is None else float(distance_km)
+    )
+    if not math.isfinite(earth_distance) or earth_distance <= 0.0:
+        raise MoonlibError("earth_distance_km must be positive.")
+    albedo = (
+        DEFAULT_EARTH_GEOMETRIC_ALBEDO
+        if earth_albedo is None else float(earth_albedo)
+    )
+    if not math.isfinite(albedo) or albedo <= 0.0:
+        albedo = DEFAULT_EARTH_GEOMETRIC_ALBEDO
+    earth_radius = kernel_session().constants.earth_radius_km
+    rows: List[Dict[str, Any]] = []
+    for value in phase_angles_deg:
+        alpha = float(value)
+        if not math.isfinite(alpha):
+            raise MoonlibError("phase angle must be finite.")
+        alpha = min(180.0, max(0.0, alpha))
+        illuminated = 0.5 * (1.0 + math.cos(math.radians(alpha)))
+        night = 1.0 - illuminated
+        earth_phase = 180.0 - alpha
+        ratio = (
+            albedo
+            * _lambert_sphere_phase(earth_phase)
+            * (earth_radius / earth_distance) ** 2
+        )
+        # The earthshine-lit surface is seen and lit from the same direction,
+        # so its photometric phase is zero whatever the Moon's phase is: only
+        # the *area* of the night side changes.  Using moon_magnitude(alpha)
+        # here would dim it twice and disagree with view_geometry.
+        magnitude = moon_magnitude(0.0, moon_distance)
+        apparent = None
+        if ratio > 0.0 and night > 1e-12:
+            apparent = (
+                magnitude
+                - 2.5 * math.log10(ratio)
+                - 2.5 * math.log10(night)
+            )
+        rows.append({
+            "phase_angle_deg": alpha,
+            "illumination_percent": 100.0 * illuminated,
+            "earth_phase_angle_deg": earth_phase,
+            "earthshine_ratio": float(ratio),
+            "moon_magnitude": float(magnitude),
+            "earthshine_apparent_magnitude": (
+                None if apparent is None else float(apparent)
+            ),
+        })
+    return rows
 
 
 def _lambert_sphere_phase(phase_angle_deg: float) -> float:
@@ -1514,24 +1593,37 @@ def _shade_rays(
     hit_points = points[hit]
     lon, lat = _spherical_from_cartesian(hit_points)
     normals = np.asarray(terrain.normals(lon, lat, level), dtype=np.float64)
-    albedo = terrain.albedo_rgb(lon, lat, albedo_level)
-    if albedo is None:
-        block["albedo_source"] = "flat 0.5 (no colour product)"
-        albedo = np.full((hit_points.shape[0], 3), 0.5, dtype=np.float64)
-    else:
-        block["albedo_source"] = (
-            terrain.sources.albedo_path.name if terrain.sources.albedo_path else "none"
+    if not options.surface_texture:
+        # No colour product: the DEM, the photometric function and the shadows
+        # draw the picture on a uniform surface.  This is the monochrome relief
+        # mode -- it cannot remove an artefact that lives in the height field,
+        # but it removes the one that lives in the albedo texture.
+        block["albedo_source"] = "flat normal albedo (texture off)"
+        albedo = np.full(
+            (hit_points.shape[0], 3), options.normal_albedo, dtype=np.float64
         )
-        # Relative mosaic -> normal albedo, using the mosaic's own global mean
-        # so that normal_albedo means the disk average.
-        reference_mean = float(getattr(terrain.albedo, "relative_mean", 0.0) or 0.0)
-        albedo = np.asarray(albedo, dtype=np.float64)
-        if reference_mean > 0.0:
-            albedo = albedo / reference_mean
-        else:  # pragma: no cover - a cache without the summary level
-            albedo = albedo / max(float(np.mean(albedo)), _TINY)
-        block["albedo_relative_mean"] = reference_mean
-    albedo = albedo * options.normal_albedo
+    else:
+        albedo = terrain.albedo_rgb(lon, lat, albedo_level)
+        if albedo is None:
+            block["albedo_source"] = "flat 0.5 (no colour product)"
+            albedo = np.full((hit_points.shape[0], 3), 0.5, dtype=np.float64)
+        else:
+            block["albedo_source"] = (
+                terrain.sources.albedo_path.name
+                if terrain.sources.albedo_path else "none"
+            )
+            # Relative mosaic -> normal albedo, using the mosaic's own global
+            # mean so that normal_albedo means the disk average.
+            reference_mean = float(
+                getattr(terrain.albedo, "relative_mean", 0.0) or 0.0
+            )
+            albedo = np.asarray(albedo, dtype=np.float64)
+            if reference_mean > 0.0:
+                albedo = albedo / reference_mean
+            else:  # pragma: no cover - a cache without the summary level
+                albedo = albedo / max(float(np.mean(albedo)), _TINY)
+            block["albedo_relative_mean"] = reference_mean
+        albedo = albedo * options.normal_albedo
 
     view_direction = flat[hit]
     mu = np.clip(np.einsum("ij,ij->i", normals, -view_direction), 0.0, 1.0)
@@ -2121,6 +2213,9 @@ def render_moon(
         if terrain.albedo is not None
         else 0
     )
+    terrain = _terrain_with_denoised_level(
+        terrain, level, int(options.terrain_denoise)
+    )
     steps = _estimate_ray_steps(
         origin, forward, right, up, columns, rows, 1.0, terrain, level, options
     )
@@ -2178,6 +2273,79 @@ def _validate_settings(options: MoonRenderSettings) -> None:
         raise MoonlibError("disk_fraction must lie in [0.05, 1.0].")
     if options.ray_steps_min > options.ray_steps_max:
         raise MoonlibError("ray_steps_min must not exceed ray_steps_max.")
+    if int(options.terrain_denoise) not in (0, 1, 2):
+        raise MoonlibError("terrain_denoise must be 0 (off), 1 (light) or 2 (strong).")
+
+
+def _median3x3_level(array: Any, passes: int) -> np.ndarray:
+    """A banded 3x3 median over one DEM level.
+
+    The filter is applied in row bands with a one-row halo so a full-disk level
+    (tens of millions of samples) never needs nine full arrays in memory at
+    once.  One pass is the light setting; two passes are the strong one.
+    """
+    source = np.asarray(array)
+    for _ in range(max(0, int(passes))):
+        height, width = source.shape[:2]
+        out = np.empty((height, width), dtype=np.float32)
+        band_rows = max(16, min(512, height))
+        for start in range(0, height, band_rows):
+            stop = min(height, start + band_rows)
+            low = max(0, start - 1)
+            high = min(height, stop + 1)
+            block = source[low:high]
+            padded = np.pad(block, ((1, 1), (1, 1)), mode="edge")
+            rows = high - low
+            stack = np.stack(
+                [
+                    padded[dy:dy + rows, dx:dx + width]
+                    for dy in range(3)
+                    for dx in range(3)
+                ],
+                axis=0,
+            )
+            smoothed = np.median(stack, axis=0)
+            out[start:stop] = smoothed[start - low:stop - low]
+        source = out
+    return np.asarray(source, dtype=np.float32)
+
+
+def _terrain_with_denoised_level(
+    terrain: MoonTerrain, level: int, passes: int
+) -> MoonTerrain:
+    """A shallow terrain copy whose *level* has been median-filtered.
+
+    The cache (and the caller's terrain) is never mutated: the other levels are
+    shared, so a filtered frame does not leak into the next unfiltered one.
+    The result is cached on the terrain object, which is what keeps an
+    animation from filtering the same level for every frame.
+    """
+    if passes <= 0:
+        return terrain
+    level = max(0, min(int(level), terrain.dem.n_levels - 1))
+    key = (level, int(passes))
+    cache = getattr(terrain, "_denoise_cache", None)
+    if cache is not None and key in cache:
+        return cache[key]
+    filtered = _median3x3_level(terrain.dem.level(level), passes)
+    levels = list(terrain.dem.levels)
+    levels[level] = filtered
+    dem = replace(terrain.dem, levels=levels)
+    result = MoonTerrain(
+        dem,
+        terrain.albedo,
+        terrain.sources,
+        terrain.cache_path,
+        terrain.manifest,
+    )
+    if cache is None:
+        cache = {}
+        try:
+            setattr(terrain, "_denoise_cache", cache)
+        except (AttributeError, TypeError):  # pragma: no cover - defensive
+            pass
+    cache[key] = result
+    return result
 
 
 
@@ -2432,6 +2600,9 @@ def render_region(
         terrain.albedo.level_for_ground_scale(sample_km)
         if terrain.albedo is not None
         else 0
+    )
+    terrain = _terrain_with_denoised_level(
+        terrain, level, int(options.terrain_denoise)
     )
     steps = _estimate_ray_steps(
         observer_position, forward, right, up, columns, rows, 1.0,

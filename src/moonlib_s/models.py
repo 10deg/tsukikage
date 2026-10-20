@@ -736,6 +736,36 @@ class AnalemmaPoint:
         return payload
 
 
+@dataclass(frozen=True)
+class LunarAnalemmaPoint:
+    """One sample of the Moon's figure-eight at the same lunar time.
+
+    The solar analemma keeps one civil clock reading because the Sun returns to
+    the same place every day.  The Moon returns about 51 minutes later, so the
+    lunar counterpart advances the clock by one lunar day per sample and plots
+    the resulting sky position: azimuth/elevation for the curve window, with
+    right ascension and declination carried alongside for other projections.
+    The small residual from the orbital tilt and eccentricity is the figure.
+    """
+
+    when_utc: datetime
+    local_time: str
+    day_of_year: int
+    month: int
+    ra_hours: float
+    declination_deg: float
+    azimuth_deg: float
+    elevation_deg: float
+    phase_angle_deg: float
+    illumination_percent: float
+    waxing: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = _fields_dict(self)
+        payload["when_utc"] = _iso(self.when_utc)
+        return payload
+
+
 # ---------------------------------------------------------------------------
 # lunar limb targets
 # ---------------------------------------------------------------------------
@@ -1312,6 +1342,26 @@ class MoonRenderSettings:
     converts it into photometric units; the mosaic is divided by its own global
     mean first, which makes the parameter the disk average (Lane & Irvine 1973
     give 0.136).  Bright fresh material lands near 0.25-0.30, as it should.
+    """
+    surface_texture: bool = True
+    """Use the colour albedo mosaic, or draw the relief without it.
+
+    ``False`` sets the surface albedo to one constant and lets the DEM, the
+    photometric function and the shadows carry the picture.  The result is a
+    monochrome shaded-relief image: useful when a close-up is magnified past
+    the colour mosaic's own resolution, where the texture can only contribute
+    its own blocks, and useful as a diagnostic because it isolates what the
+    topography contributes from what the colour product contributes.
+    """
+    terrain_denoise: int = 0
+    """Median smoothing of the DEM level used for shading: 0 off, 1 light, 2 strong.
+
+    The LOLA products carry orbit-track and gap-interpolation structure that
+    survives a change of DEM and cannot be removed by texture filtering.  A
+    small 3x3 median (light) or two passes (strong) suppresses that
+    pixel-scale structure while leaving the larger relief alone; it is a
+    deliberate, optional trade because it also softens craters only a few
+    pixels across.
     """
     ray_steps: int = 16
     """Floor for the number of shell-marching steps of a primary ray.
