@@ -140,6 +140,7 @@ const builtins = new Set([
   'rgba', 'rgb', 'hsla', 'hsl', 'blur',
   // Browser globals the harness has no stub for.
   'getComputedStyle', 'ResizeObserver', 'requestAnimationFrame',
+  'cancelAnimationFrame',
   // Browser globals the save path uses; `callback` is a parameter name the
   // regex reads as a call because it is invoked.
   'atob', 'btoa', 'decodeURIComponent', 'encodeURIComponent', 'Blob',
@@ -179,12 +180,15 @@ check('chips were removed', !html.includes('class="chip'));
 check('the animation pane and its button are both 生成动画',
   html.includes('data-proc="animation" aria-pressed="false">生成动画<') &&
   html.includes('id="anim-run">生成动画 '));
-/* 时间步长 offers a ladder of common steps and still accepts any number: a
-   datalist is the only native control that is both. */
-check('时间步长 is a typable field with a list of common steps',
-  /id="anim-step"[^>]*list="anim-step-presets"/.test(html) &&
+/* 时间步长 is a real menu now: a datalist filtered its options by the text
+   already typed, so a step of 10 hid every other choice.  Custom stays
+   available through the 自定义 option and its own number field. */
+check('时间步长 is a menu with every common step and a custom field',
+  /id="anim-step"[^>]*>/.test(html) &&
+  /id="anim-step-custom"/.test(html) &&
   ['1', '5', '10', '15', '30', '60']
-    .every((value) => new RegExp(`<option value="${value}"></option>`).test(html)));
+    .every((value) => new RegExp(`<option value="${value}"`).test(html)) &&
+  /<option value="custom">自定义…<\/option>/.test(html));
 /* 地貌搜索 is an always-visible entry point now: it sits in the label bar, and
    the geometric marks take its old place four to a row. */
 check('the landform search lives in the always-visible label bar',
@@ -218,13 +222,14 @@ check('区域高清补片的下载 button cannot be squeezed into a vertical lab
    full-width row whose explanatory paragraph cost another line. */
 check('the advanced block carries a CPU worker control',
   htmlIds.has('parallel') && /id="parallel"[^>]*min="1"/.test(html));
-check('并行数 shares the 每像素采样 row',
+/* 每像素采样 moved beside 物理分辨率, where the frame it describes is chosen;
+    the advanced block keeps 并行数 as the compact ceiling it always was. */
+check('每像素采样 sits beside 物理分辨率, not in 高级设置',
   (() => {
-    const from = html.indexOf('id="out-samples"');
-    const to = html.indexOf('id="parallel"');
-    const between = from >= 0 && to > from ? html.slice(from, to) : '';
-    return between.length > 0 && !between.includes('</div>')
-      && !between.includes('wide-field');
+    const kmpx = html.indexOf('id="out-kmpx-preset"');
+    const samples = html.indexOf('id="out-samples"');
+    const advanced = html.indexOf('id="light-advanced"');
+    return kmpx >= 0 && samples > kmpx && advanced > samples;
   })());
 check('the 并行数 explanation is a tooltip, not a paragraph',
   /<label title="[^"]*渲染按横带分给多个线程[^"]*">\s*并行数/
@@ -265,6 +270,16 @@ check('the curve button is drawn in the accent blue',
 check('the curve window has both chart types and an axis switch',
   htmlIds.has('curve-kind') && htmlIds.has('curve-xaxis') &&
   htmlIds.has('curve-canvas') && htmlIds.has('curve-save'));
+/* Parameter rows used to be stacked above the plot; style and range are now
+   two toggled panels, and the save controls sit in the footer. */
+check('the curve window tucks style and range into panels',
+  htmlIds.has('curve-style') && htmlIds.has('curve-limits') &&
+  htmlIds.has('curve-style-toggle') && htmlIds.has('curve-limits-toggle') &&
+  htmlIds.has('curve-reset-format') && htmlIds.has('curve-yaxis'));
+check('the curve save controls live in the footer',
+  html.indexOf('id="curve-save"') > html.indexOf('id="curve-foot"'));
+check('every curve annotation has a hide button in the script',
+  js.includes('curvePaintClose') && js.includes('curveHideLabel'));
 /* 模拟设置里的“表面 / 去条纹”标签不能被长菜单挤成一列字：标签文字是
    不可压缩的 flex 项，菜单自己收缩。 */
 check('the surface and denoise labels keep their text on one line',
@@ -339,6 +354,14 @@ check('reset buttons are the word 复位, set small',
   /button\.reset\s*\{[^}]*line-height:\s*17px/.test(css) &&
   !/button\.reset\s*\{[^}]*width:\s*100%/.test(css));
 
+/* 衍射环 is its own fold handle: text, then a triangle, then the slider on
+   the same row; the PSF fields open underneath. */
+check('衍射环 is the fold handle with the triangle after the text',
+  /id="diffraction-toggle"[\s\S]{0,220}?>衍射环<i class="psf-caret"/.test(html) &&
+  /<div class="psf-panel" id="diffraction-psf" hidden>/.test(html) &&
+  /\.psf-caret\s*\{[^}]*border-left:/.test(css));
+check('the sharpen-method menu is wide enough for 高斯锐化 / 小波锐化',
+  /\.sharpen-method-select\s*\{[^}]*width:\s*8\.4em/.test(css));
 check('the HDR switches are labelled HDR, not 带 HDR',
   !html.includes('带 HDR') && (html.match(/<span>HDR<\/span>/g) || []).length === 2);
 check('every nudge button is labelled with its own step',
@@ -346,11 +369,9 @@ check('every nudge button is labelled with its own step',
     const nudges = [...html.matchAll(/data-nudge="([^"]+)"[\s\S]{0,160}?>([^<\n]*)</g)]
       .map((m) => [m[1], m[2].trim()]);
     // 8 for the observer's instant, 16 for the animation (a row under 开始 *and*
-    // one under 结束) and 8 inside the sky window, which walks its own instant.
-    // 事件预报 has none any more -- its two ends are typed, and a whole row of
-    // decade/month steps above them was eight buttons to move a window nobody
-    // moves that way.
-    return nudges.length === 32 && nudges.every(([step, text]) => step === text);
+    // one under 结束), 8 inside the sky window and 8 in 实验功能, which walks its
+    // whole range.  事件预报 has none: its two ends are typed.
+    return nudges.length === 40 && nudges.every(([step, text]) => step === text);
   })());
 check('and every range nudge says which range it moves',
   (() => {
@@ -363,7 +384,8 @@ check('and every range nudge says which range it moves',
     // The animation's two rows are *not* one range: the row under 开始 moves
     // the start and the row under 结束 moves the end.
     return (!counts.events && counts['anim-start'] === 8
-            && counts['anim-end'] === 8 && counts['sky'] === 8);
+            && counts['anim-end'] === 8 && counts['sky'] === 8
+            && counts.experiment === 8);
   })());
 /* Two rows of nudges, each with the steps that row is about: the observer's
    instant (w/d/h/m) and a range in the animation (d/h/15m/m). */

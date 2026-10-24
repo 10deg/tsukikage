@@ -8,7 +8,7 @@
 ```
 
 用哪个解释器：`.venv` 里装了 numpy / spiceypy / matplotlib，建议一律用
-`./.venv/bin/python`。脚本开头有一段 bootstrap：如果 `import moonlib_s` 失败，
+`./.venv/bin/python`。脚本开头有一段 bootstrap：如果 `import moonlib` 失败，
 会自动把仓库的 `src/` 加进 `sys.path`，所以**没有做可编辑安装**也能直接运行；
 如果连解释器本身都缺依赖，会打印出应当使用的解释器路径。
 
@@ -20,7 +20,7 @@
 ```bash
 ./.venv/bin/python tools/bake_terrain.py            # 默认层级，约 350 MB
 ./.venv/bin/python tools/bake_terrain.py --full     # 保留 64 像素/度的高程
-./.venv/bin/python -m moonlib_s terrain --clear       # 清理
+./.venv/bin/python -m moonlib terrain --clear       # 清理
 ```
 
 局部特写（`08_region_closeup.py`）还需要一块区域高分辨率高程，按需下载一次：
@@ -42,5 +42,5 @@
 | `08_region_closeup.py` | — （M2 新增） | **月面局部特写**：以克拉维斯环形山为例，对比 64 与 256 像素/度高程 |
 | `09_photograph.py` | — （M2 新增） | **一次拍摄**：一条命令出一张图，仪器与后期全参数化 |
 
-> 第二列指的是**重构前 moonlib_s 自带的那批示例笔记本**。它们是那个旧库的输出，不随本仓库
+> 第二列指的是**重构前 moonlib 自带的那批示例笔记本**。它们是那个旧库的输出，不随本仓库
 > 发布；这一列只说清每个示例替换了哪一段旧用法，不是在指仓库里的文件。

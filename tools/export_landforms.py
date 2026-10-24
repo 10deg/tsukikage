@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the landform database as one JSON file under ``out/``.
 
-The database itself is a CSV (``src/moonlib_s/data/lunar_nomenclature.csv``)
+The database itself is a CSV (``src/moonlib/data/lunar_nomenclature.csv``)
 because it is built and merged by scripts and diffed by hand.  A JSON copy
 exists for the *other* half of the project: the labeler reads a translation
 table keyed by the IAU English name, and so does anything else that wants
@@ -40,18 +40,18 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from moonlib_s.annotations import (  # noqa: E402
+from moonlib.annotations import (  # noqa: E402
     FEATURE_CLASSES,
     canonical_kind,
     feature_class,
 )
 
-DB = ROOT / "src" / "moonlib_s" / "data" / "lunar_nomenclature.csv"
+DB = ROOT / "src" / "moonlib" / "data" / "lunar_nomenclature.csv"
 LPND = ROOT / "out" / "lunar_chinese_names.json"
 TARGET = ROOT / "out" / "lunar_nomenclature.json"
 
 HEADER = {
-    "source": "moonlib_s 月球地貌数据库（IAU 行星命名表 + LPND 月球与行星地名库 + "
+    "source": "moonlib 月球地貌数据库（IAU 行星命名表 + LPND 月球与行星地名库 + "
               "Virtual Moon Atlas 分类）",
     "source_urls": [
         "https://planetarynames.wr.usgs.gov/Page/MOON/target",

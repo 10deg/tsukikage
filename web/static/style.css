@@ -1058,7 +1058,7 @@ button.outline:hover { border-color: var(--ink); color: var(--ink); }
 
 /* 并行数: a short integer, not a sentence.  It shares the 2-column grid with
    每像素采样, so the field keeps a fixed width instead of stretching. */
-#parallel { width: 6em; text-align: right; }
+#parallel { width: 100%; text-align: right; }
 
 /* A number typed beside its slider, and the two mirror icons. */
 input.num-inline {
@@ -1152,6 +1152,10 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   padding: 1px 5px;
 }
 #proc-animation .param-row select { width: auto; max-width: 100%; }
+/* 时间步长's menu carries 自定义… as an option, so it needs room for four
+   Chinese characters; the custom field beside it holds only a short number. */
+#proc-animation #anim-step { width: 6.4em; text-align: left; }
+#proc-animation #anim-step-custom { width: 4.8em; }
 /* 物理分辨率's menu is the one select here whose options are long enough to
    eat the row; the 原生 option is 10 full-width characters, which left the
    km/px unit sitting ~11 px off the right edge.  The label is shorter now, and
@@ -1727,6 +1731,7 @@ details.fold > .hint { margin: 0 0 6px; }
    above, so it wins. */
 .proc-panel .param-row .unit { flex: 0 0 auto; white-space: nowrap; }
 .proc-panel .slider-row.wide { margin-bottom: 9px; }
+.proc-panel .slider-row[hidden] { display: none; }
 .proc-panel .slider-row.wide .slider-label { flex: 0 0 5.4em; }
 .proc-panel .slider-row.wide input[type="range"] {
   flex: 1 1 auto;
@@ -1878,6 +1883,26 @@ button .en::before, button .en::after { content: ""; }
 .pane label > input[type="range"] { flex: 1 1 auto; min-width: 4em; max-width: 9em; }
 .pane .grid2 { gap: 4px 8px; }
 .pane .grid2 > label { min-width: 0; }
+/* 模拟设置 / 高级设置: every field in a two-column block is a header line over
+   a control that fills the cell.  Left as inline rows, a long Chinese label
+   such as 物理分辨率 wrapped around its menu and pushed that one field a line
+   lower than its neighbour, so the column of labels stopped reading as a
+   column.  The width is the cell, not the content, which also makes every
+   menu and number field in the block exactly the same size. */
+.pane .grid2 > label { display: block; }
+.pane .grid2 > label > select,
+.pane .grid2 > label > input[type="number"],
+.pane .grid2 > label > input[type="text"] {
+  width: 100%;
+  max-width: none;
+}
+.pane .grid2 > label > .pick-row { width: 100%; }
+.pane .grid2 > label > .pick-row > select {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: none;
+}
+.pane .grid2 > label > .pick-row > input { flex: 0 0 6em; }
 /* 中文标签在 flex 行里会被长 select 挤成一列字；给文字一个不可压缩的盒子，
    让菜单自己收缩。表面 / 去条纹 这类短标签尤其明显。 */
 .pane label.keep-label > span {
@@ -1888,6 +1913,12 @@ button .en::before, button .en::after { content: ""; }
   flex: 0 1 auto;
   min-width: 0;
   max-width: 8.5em;
+}
+/* Inside a two-column settings block the menu fills its cell like every other
+   field; the 8.5 em cap above belongs to the compact inline instrument rows. */
+.pane .grid2 > label.keep-label > select {
+  width: 100%;
+  max-width: none;
 }
 .pane input[type="color"] { width: 2em; height: 1.4em; }
 .pane .check.inline { gap: 4px; }
@@ -2060,22 +2091,32 @@ h2 .mini.curve-open:hover {
   text-align: right;
 }
 .sky-controls select { width: auto; }
-/* 曲线图把「月亮8字」的日期/时刻/跨度收在一段里：切到地照曲线时整段隐藏，
-   横轴菜单补位，顶栏不会因为两套参数同时出现而折成三排。 */
+/* 曲线图的主工具栏只放"画哪一种、看哪一段、横纵轴是什么"；线型、点样式、
+   坐标范围和反向轴收进两个下拉面板，避免窗口上方折成四五排。 */
+.curve-toolbar {
+  position: relative;
+  flex: 0 0 auto;
+}
+#curve-controls {
+  gap: 4px 7px;
+  padding: 4px 9px;
+}
 .curve-when,
 .curve-earth,
+.curve-axis,
 #curve-when,
-#curve-earth {
-  display: inline-flex;
-  flex: 1 1 100%;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 8px;
+#curve-earth,
+#curve-axis {
+  /* The group itself disappears as a box; its children become ordinary flex
+     items of the toolbar and wrap only when the row is genuinely full. */
+  display: contents;
 }
 .curve-when label,
 .curve-earth label,
+.curve-axis label,
 #curve-when label,
-#curve-earth label {
+#curve-earth label,
+#curve-axis label {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -2084,6 +2125,88 @@ h2 .mini.curve-open:hover {
 }
 #curve-date { width: 9.6em; }
 #curve-time { width: 6.2em; }
+#curve-nudge {
+  flex: 0 1 auto;
+  gap: 2px;
+}
+#curve-nudge button.mini {
+  float: none;
+  padding: 0 5px;
+  line-height: 16px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+#curve-kind { max-width: 9.5em; }
+#curve-xaxis, #curve-yaxis { max-width: 7.4em; }
+#curve-earth-model { max-width: 13.5em; }
+
+/* The two secondary panels float over the top of the plot, so opening them
+   does not resize the canvas or change the equal-aspect view underneath. */
+.curve-panel {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .42);
+  font-size: 11px;
+}
+.curve-panel-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.curve-panel label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  white-space: nowrap;
+}
+.curve-panel-note {
+  color: #6b7280;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.curve-panel input[type="color"] {
+  width: 2.6em;
+  height: 1.65em;
+  padding: 1px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+}
+.curve-panel input[type="number"] {
+  width: 4.2em;
+  padding: 1px 4px;
+  text-align: right;
+}
+#curve-limits input[type="number"] {
+  width: 6.4em;
+}
+#curve-style-toggle[aria-pressed="true"],
+#curve-limits-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#curve-foot .sky-hint { display: none; }
+#curve-foot #curve-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#curve-foot .sky-save {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
 .sky-save {
   margin-left: auto;
   display: flex;
@@ -2182,4 +2305,173 @@ h2 .mini.curve-open:hover {
   line-height: 17px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+/* Header tools can hold a checkbox beside buttons; keep its baseline and
+   spacing the same as the buttons it sits between. */
+.sky-head-tools .curve-lock {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.sky-head-tools .curve-lock input { margin: 0 3px 0 0; }
+.curve-animation-line { align-items: center; }
+.curve-anim-icon {
+  min-width: 26px;
+  font-size: 12px;
+  line-height: 17px;
+  letter-spacing: -1px;
+  padding: 1px 5px;
+}
+.curve-anim-speed {
+  min-width: 2.6em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+#curve-animation .curve-panel-note { margin-left: auto; }
+/* A select inside a wide processing row is a value, not a stretching layout:
+   it keeps a sensible width and leaves the row's remaining space alone. */
+.proc-panel .slider-row.wide select.proc-select {
+  flex: 0 1 auto;
+  min-width: 7em;
+  max-width: 11em;
+}
+/* 锐化方式 is the row's label, so it takes the same gutter as 视宁度 / 模糊强度
+   and does not stretch: the slider beside it is the value. */
+.proc-panel .slider-row.wide select.sharpen-method-select {
+  /* Wide enough for 高斯锐化 / 小波锐化 plus the native arrow: at 6.4 em the
+     menu clipped the fourth character on some browsers. */
+  flex: 0 0 8.4em;
+  width: 8.4em;
+  min-width: 0;
+  max-width: 8.4em;
+  padding: 1px 4px;
+  color: var(--ink);
+}
+/* 衍射环 ▸ — the label is the fold handle, so it must look like the other
+   slider labels and not like a button.  The triangle is drawn with borders and
+   sits after the text; opening rotates it down. */
+.slider-row .psf-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 5.4em;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.slider-row .psf-toggle:hover { color: var(--ink); }
+.psf-caret {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transform: translateY(0.5px);
+  transition: transform .12s ease;
+}
+.psf-toggle[aria-expanded="true"] .psf-caret {
+  transform: translateY(0.5px) rotate(90deg);
+}
+.psf-panel { padding: 0 0 8px; }
+.psf-panel .grid2 { margin-top: 0; }
+/* 成像模拟 / 后期处理: the tab strip is this group's title. */
+#proc-panel > .tabs:first-child { margin-bottom: 6px; }
+#proc-panel .train-pane { padding-top: 0; }
+/* ── 实验功能：月相图正下方的小入口与它的浮窗 ───────────────────── */
+.phase-column {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.experiment-open {
+  padding: 0 6px;
+  line-height: 16px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+/* The entry belongs to the phase strip's row, not to the 72 px picture: it
+   sits below the whole readout, left-aligned with the panel. */
+.experiment-entry {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin: 5px 11px 9px;
+}
+.experiment-window { min-width: 640px; min-height: 460px; }
+.experiment-controls { flex-wrap: wrap; align-items: flex-end; }
+.experiment-controls > label { font-size: 10.5px; }
+.experiment-controls input[type="datetime-local"] { width: 11.4em; }
+.experiment-mark-pick select { max-width: 10.5em; }
+.experiment-range-bar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 0 8px 4px;
+}
+.experiment-step-wrap,
+.experiment-range {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.experiment-range-bar label { font-size: 10.5px; margin-bottom: 0; }
+.experiment-range-bar input[type="number"] { width: 4.8em; }
+.experiment-table th.sortable { cursor: pointer; user-select: none; }
+.experiment-table th.sortable:hover { color: var(--ink); }
+.experiment-table th.sortable[data-order]::after {
+  content: " " attr(data-order);
+  font-size: 9px;
+  color: var(--accent);
+}
+.experiment-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 1.25fr) minmax(260px, 1fr);
+  gap: 6px;
+  padding: 6px 8px;
+  overflow: hidden;
+}
+.experiment-plot {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--viewport);
+  overflow: hidden;
+}
+.experiment-plot > canvas { display: block; width: 100%; height: 100%; }
+.experiment-table-wrap {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.experiment-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.experiment-table th, .experiment-table td {
+  padding: 2px 6px;
+  border-bottom: 1px solid rgba(120,134,156,.18);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.experiment-table th:first-child, .experiment-table td:first-child { text-align: left; }
+.experiment-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--ink-dim);
+  font-weight: 500;
 }

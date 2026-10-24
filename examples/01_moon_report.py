@@ -14,7 +14,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from _cli import moonlib_s  # noqa: E402
+from _cli import moonlib  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,20 +33,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon, height_km=args.height)
+    observer = moonlib.Observer(lat=args.lat, lon=args.lon, height_km=args.height)
     when = args.at or datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # 1. The full report: state + moonrise / transit / moonset
     # ------------------------------------------------------------------
-    report = moonlib_s.moon_report(observer, when, rise_set_mode=args.rise_set_mode)
-    print(moonlib_s.reporting.format_moon_report(report))
+    report = moonlib.moon_report(observer, when, rise_set_mode=args.rise_set_mode)
+    print(moonlib.reporting.format_moon_report(report))
 
     # ------------------------------------------------------------------
     # 2. The lightweight entry point.  Same physics, no rise/set search:
     #    about 0.5 ms instead of 15 ms, which is what scanning code wants.
     # ------------------------------------------------------------------
-    state = moonlib_s.moon_state(observer, when)
+    state = moonlib.moon_state(observer, when)
     print(
         f"quick check: illum {state.illuminated_percent:.3f}%  "
         f"alt {state.elevation_deg:+.2f} deg  "
@@ -58,7 +58,7 @@ def main() -> int:
     # 3. Every result is a frozen dataclass with a JSON-safe view, which is
     #    exactly what the future web/APP layer will consume.
     # ------------------------------------------------------------------
-    payload = moonlib_s.service.lunar_report(observer, when)
+    payload = moonlib.service.lunar_report(observer, when)
     encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
     print(f"\nservice payload: {len(encoded):,} bytes, kind={payload['kind']!r}, "
           f"schema={payload['schema']!r}")

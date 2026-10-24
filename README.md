@@ -1,6 +1,6 @@
 # Tsukikage — 本地月球计算服务
 
-**当前版本 / Version：1.4.6**
+**当前版本 / Version：1.5.0**
 
 一套**完全离线**的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
 **位置、月相、升落、天平动、月牙可见性与边缘目标预报**，并能用 NASA SVS 的 LOLA 高程与
@@ -29,7 +29,7 @@ python3 -m venv .venv
 确认装好了：
 
 ```bash
-./.venv/bin/python -c "import moonlib_s; print(moonlib_s.__version__)"
+./.venv/bin/python -c "import moonlib; print(moonlib.__version__)"
 ```
 
 > 上面建了虚拟环境，所以下文一律用 `./.venv/bin/python`。没有做可编辑安装时，
@@ -38,16 +38,17 @@ python3 -m venv .venv
 ## 简单运行
 
 ```bash
-./.venv/bin/python -m moonlib_s info                          # 内核与历表覆盖范围
-./.venv/bin/python -m moonlib_s moon --at 2026-05-25T15:30:00 --language zh
+./.venv/bin/python -m moonlib info                          # 内核与历表覆盖范围
+./.venv/bin/python -m moonlib moon --at 2026-05-25T15:30:00 --language zh
+./.venv/bin/python -m moonlib sunpoint --moon-lon 0 --moon-lat 0 --lat 30 --lon 120 --at 2026-05-25T15:30:00 --language zh
 ```
 
 ```python
-import moonlib_s
+import moonlib
 
-site = moonlib_s.Observer(lat=30, lon=120)
-report = moonlib_s.moon_report(site, "2026-05-25T15:30:00")
-print(moonlib_s.reporting.format_moon_report(report))
+site = moonlib.Observer(lat=30, lon=120)
+report = moonlib.moon_report(site, "2026-05-25T15:30:00")
+print(moonlib.reporting.format_moon_report(report))
 ```
 
 ```
@@ -74,7 +75,7 @@ print(moonlib_s.reporting.format_moon_report(report))
 
 | 路径 | 为什么需要 |
 |---|---|
-| `src/moonlib_s/` | 库本身 |
+| `src/moonlib/` | 库本身 |
 | `pyproject.toml` | 安装、依赖声明、`moon` 命令行入口 |
 | `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，随仓库发布 |
 
@@ -114,7 +115,7 @@ USGS 的全球 256 像素/度高程：
 （`ldem_64` + EXR 约 350 MB；换成 256 像素/度的全球高程约 3 GB）。
 
 色彩镶嵌优先用线性的 `lroc_color.exr`（自带解码器，无需额外依赖）。若手头只有
-`lroc_color_16bit_srgb.tif`，则需要 Pillow（`pip install 'moonlib-s[tiff]'`；装了
+`lroc_color_16bit_srgb.tif`，则需要 Pillow（`pip install -e '.[tiff]'`；装了
 matplotlib 就有），两条路径结果一致。
 
 ### 高程数据源与切换
@@ -123,7 +124,7 @@ matplotlib 就有），两条路径结果一致。
 这是不额外占盘的默认值。想要更细的颜色，可以显式烘焙高精度缓存：
 
 ```bash
-./.venv/bin/python -m moonlib_s terrain --bake --albedo-detail 0
+./.venv/bin/python -m moonlib terrain --bake --albedo-detail 0
 ```
 
 `albedo_detail=0` 是源图完整的 76 px/deg（约 0.4 km/px），缓存约 **5.4 GB**；
@@ -138,21 +139,32 @@ matplotlib 就有），两条路径结果一致。
 | `ldem_64.tif`（SVS） | 64 ppd | 474 m | 1.0 GB | 最低限度的一套 |
 | `Lunar_LRO_LOLA_Global_LDEM_118m_Mar2014.tif`（USGS） | 256 ppd | 118.5 m | 8.5 GB | 长期以来的默认件 |
 | `ldem_512.tif`（PDS LOLA GDR V3.0 拼接） | 512 ppd | **59.2 m** | 34 GB | 本仓库脚本可下可拼 |
-| `SLDEM2015` 512 ppd（PDS） | 512 ppd | 59.2 m | 34 GB | 熔岩间轨道缝由辉夜号立体补测，**需自行拼接** |
+| `SLDEM2015_512.tif`（SLDEM2015 + LOLA 极区） | 512 ppd | **59.2 m** | 34 GB | ±60° 内由辉夜号 TC 立体填缝，极区复用 LOLA 512 |
 
-前两份各有一条命令：
+前三份各有一条命令：
 
 ```bash
 ./.venv/bin/python tools/fetch_lola_global.py     # 8.5 GB，USGS 256 ppd
 ./.venv/bin/python tools/fetch_lola_512.py        # 34 GB，PDS LOLA GDR 512 ppd
+./.venv/bin/python tools/fetch_sldem_512.py       # 45 GB 下载 → 34 GB，SLDEM2015 + 极区
 ```
 
 `fetch_lola_512.py` 逐张下载 16 块瓦片、写进预分配的 `kernels/ldem_512.tif`、删掉瓦片，
 所以磁盘峰值是 34 GB 加一块瓦片，而不是 68 GB；中途断了重跑会接着下。
 
+`fetch_sldem_512.py` 处理的是 **32 块 ±60° 瓦片（约 45 GB）**：SLDEM2015 没有 512 ppd
+的极区产品，所以 ±60–90° 从本机已有的 `ldem_512.tif` 直接复制，结果仍是 59.2 m 的全球
+2:1 栅格。它按 512 行一块（45 MB）边下边写进预分配的 34 GB BigTIFF，不落整块瓦片；
+写完后半成品带 `.incomplete` 边车，网页在完成前不会把它列成数据源。中途断了重跑会
+从已写的块继续。
+
 只想把某一处看得更清楚时，不必搬整份产品：高级设置里的「区域高清补片」按**当前选框**
 从在线产品里只下那一块（`POST /api/patch`，后台任务带进度），落在 `<cache>/regions/`，
-近景会自动改用它。可选的在线产品见 `moonlib_s.online.catalogue()`。
+近景会自动改用它。可选的在线产品见 `moonlib.online.catalogue()`。
+
+补片下载完成后，「数据源」会多出一组**当前近景补片**并选中它，「物理分辨率」的下限
+也随之降到补片的分辨率（59.2 m 的补片会让 60 m 档亮起）；两者都描述**这一帧实际用的
+地形**，不是把补片谎称为全球产品。选框移出补片范围后，两个菜单会自动回退到全局数据源。
 
 **换了数据源不会重烘焙整月面的金字塔**：10000 px 画幅时一个月面像素是 370 m，
 渲染只采样到 474 m 那一层，再细的高程在那里用不上；而近景是从源文件直接裁窗口的，
@@ -185,18 +197,29 @@ DEM 层做 3×3 中值（轻一遍、强两遍），可压低 LOLA 的轨道条�
 食分，天空位置图的月亮也换成被地影咬过的样子。天空位置窗口可以**锁定当前视角**，
 拨动时间步长时坐标轴不再自动跳走，也可以一键把主界面的时间/时区同步成图上的时刻。
 月球信息标题行里「天空位置」左侧还有**曲线图**：同一套浮窗外壳，上方选类型与参数，
-下方画图，四边可拖动改大小。**太阳8字曲线**沿用太阳八字曲线的采样法：同一个本地
-时刻、按本地日历日采样一年，画**方位角—高度角**轨迹。**月亮8字曲线**则要按月亮
-自己的节奏采样：太阳每天同一时刻回到同一位置，月亮却每天晚约 51 分钟才回到相近
-位置。所以它从选定的本地时刻开始，每天推迟 50.47 分钟，画一个朔望月里的轨迹；
-这个残差来自轨道的倾斜与偏心率，形成交叉的 8 字。**地照亮度曲线**
-画月面夜侧的地照星等随相位角/照明率的变化，另一个量画在顶部轴上，满月附近夜面消失、
-曲线在 12 等处截断。地照曲线的相位轴锁定在 0–180°，默认用「锁定坐标轴」禁止拖动
-缩放坐标；关闭后可缩放/平移，相位仍不会越界。月亮图不再有「选择本年」（太阳图保留），
-两者都有「选择本月」和 -1d/-1h/-1m/+1m/+1h/+1d 时间步长；月亮图可把每个点换成
-模拟月相图标，太阳图可关掉彩色按单色画，地照图可开关「显示当前」。图内的类型徽标、
-说明文字和「当前」标注都可以拖动，三张图的主标题与 X/Y 轴标题都可以双击修改。
-三张图都能存成 PNG。
+下方画图，四边可拖动改大小。曲线图有六种类型：**太阳8字**、**月亮8字**、**地照亮度**、
+**月球高度**、**视直径**与**天平动**。太阳8字沿用太阳八字曲线的采样法：同一个本地
+时刻、按本地日历日采样一年，画**方位角—高度角**轨迹。月亮8字则按月亮自己的节奏
+采样：太阳每天同一时刻回到同一位置，月亮却每天晚约 51 分钟才回到相近位置，所以它
+从选定的本地时刻开始，每天推迟 50.47 分钟，画一个朔望月里的轨迹；这个残差来自轨道
+的倾斜与偏心率，形成交叉的 8 字。地照曲线画月面夜侧的地照星等随相位角/照明率的
+变化，另一个量画在顶部轴上，满月附近夜面消失、曲线在 12 等处截断；还可以叠加
+**月面亮度与地照亮度的比值**曲线（对数右轴；满月附近地照趋零，比值断开）。地照曲线
+还可以切换地球模型：跟随模拟设置的 Lambert、Allen 1976 的 0.367、现代 V 波段的 0.434、
+Robinson 2026 的 0.242，或 Robinson 2026 的 HG 相位拟合（0.23）；这些只影响曲线，不改变主界面月面渲染。高度、视直径等量合并在**月球几何量**
+一张图里，横轴和纵轴都可以从时间、相位角、照明率、高度角、方位角、视直径中任选；
+**天平动相位图**固定以天平动经度为 X、纬度为 Y，直接看一个月里视圆面中心在天平动
+平面上的轨迹。
+
+8字曲线与天平动相位图按**等角度比例**绘制：一个度数在两个轴上的像素长度相同，
+改变窗口大小只改变可见天区，不会把 8 字拉扁。每条线都可以从下拉菜单选中后单独
+设置：隐藏线条（保留数据点）、颜色、粗细、实线/虚线/点线/点划线；数据点可改大小、
+颜色、形状（圆/方/三角/菱形/十字/星形）与空心。所有曲线都支持手动输入 X/Y 上下限、
+把 X 或 Y 轴反向，以及在图上添加可拖动、双击可编辑（留空删除）的文本框。图上的
+主标题、轴标题、图例、起点/终点、当前点和文本框都可以拖动，双击可改文字
+（留空恢复默认），也可以点右上角 × 隐藏；「复位格式」会恢复默认线型、文字位置并重新显示所有被隐藏的文字（自定义文字内容保留）。保存 PNG 时按画布
+当前的比例、视野与标注位置重绘，不在导出图里另加窗口标题或摘要，因此保存结果与窗口
+所见一致。
 事件预报里，如果太阳在地平线上的时段占整个事件的一半以上（点事件就是事件那一刻），
 详情末尾会补上**白昼**——事件本身未必看不见，但读者需要知道天是亮的。事件预报结果
 可以放进独立的表格窗口，导出或导入同格式 CSV；表格按事件类型给出不同的列
@@ -221,27 +244,28 @@ L 用 Zach G 西侧锚点单独拟合的 -0.75°–0.20°（-0.3° 最佳）；�
 
 | 能力 | 入口 |
 |---|---|
-| 月球位置、距离、视直径、赤经赤纬、方位高度 | `moonlib_s.moon_state` |
-| 月相（地心 + 站心）、月龄、朔望弦搜索与全年历表 | `moon_state().phase`、`moonlib_s.phase_calendar` |
-| 月出 / 中天 / 月落（含下次升落与中天上边缘高度） | `moonlib_s.moon_report` |
+| 月球位置、距离、视直径、赤经赤纬、方位高度 | `moonlib.moon_state` |
+| 月相（地心 + 站心）、月龄、朔望弦搜索与全年历表 | `moon_state().phase`、`moonlib.phase_calendar` |
+| 月出 / 中天 / 月落（含下次升落与中天上边缘高度） | `moonlib.moon_report` |
 | 天平动、月面地球直下点与日下点 | `moon_state().libration` |
-| 按照明率反查月亮（按视直径排名） | `moonlib_s.find_moons_by_illumination` |
-| 极限月牙拍摄窗口与可见性判据（Danjon / Odeh / Yallop） | `moonlib_s.crescent` |
-| 边缘／极区目标的天平动可见性预报（53 个目标） | `moonlib_s.libration` |
-| 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib_s.sun`、`moonlib_s.analemma`、`moonlib_s.plotting` |
-| 月面地形：高程与反照率采样、金字塔缓存、三维网格导出 | `moonlib_s.terrain` |
-| **观测模拟**：按观测点与时刻渲染月面（地形阴影、明暗界线、地照） | `moonlib_s.moonview` |
-| **月面特写与自动取景**：按目标真实直径决定视场，并报告地形数据是否够用 | `moonlib_s.moonview.render_region`、`moonlib_s.render_feature` |
-| **月食模拟**：半影／偏食／全食自动判定；本影的铜红反照与大气折射的绿松石带 | `moonlib_s.eclipse`、`moonlib_s.moonview` |
-| **月面 X / V / L 与 the jewelled handle 预报**：X/V 用 -0.5°–1.5°（0.5° 最佳），L 用 -0.75°–0.20°（-0.3° 最佳），金柄暂用 -0.5°–2.0° | `moonlib_s.events` |
-| **最高／最低月亮**：四个主相各取中天最高／最低的一行，带站点相关的高度角 | `moonlib_s.events` |
-| **地貌标注**：10 431 项（中文名覆盖 99.9%），按分类着色并逐类开关，中／英切换 | `moonlib_s.annotations` |
-| **The Lunar 100 标注**：Charles A. Wood 的 100 项目视清单，97 个可定位目标；独立编号列表，不与 IAU 条目合并 | `moonlib_s.annotations` |
-| **曲线图**：太阳8字（每日同一时刻，一年）、月亮8字（每日推迟约 51 分钟，一个朔望月）、地照亮度—相位角/照明率，可存 PNG | `web/static/app.js`、`moonlib_s.analemma`、`moonlib_s.moonview` |
-| **与实拍对齐**：衍射（含副镜遮挡）、像素采样、视宁度、噪声、锐化、旋转与后截距补偿 | `moonlib_s.instrument` |
-| **动画 → MP4**：H.264，或 10 bit HEVC / HDR10 PQ，可带逐帧时间戳；**HDR 保存**（ISO 21496-1 增益图 JPEG） | `moonlib_s.anim`、`moonlib_s.encode`、`moonlib_s.hdr` |
+| 按照明率反查月亮（按视直径排名） | `moonlib.find_moons_by_illumination` |
+| 极限月牙拍摄窗口与可见性判据（Danjon / Odeh / Yallop） | `moonlib.crescent` |
+| 边缘／极区目标的天平动可见性预报（53 个目标） | `moonlib.libration` |
+| 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib.sun`、`moonlib.analemma`、`moonlib.plotting` |
+| **月面点太阳高度/方位角**：给定月面经纬度、观测地与时刻（或时间范围） | `moonlib.lunar_surface_solar`、`moonlib.lunar_surface_solar_series`、`moon sunpoint` |
+| 月面地形：高程与反照率采样、金字塔缓存、三维网格导出 | `moonlib.terrain` |
+| **观测模拟**：按观测点与时刻渲染月面（地形阴影、明暗界线、地照） | `moonlib.moonview` |
+| **月面特写与自动取景**：按目标真实直径决定视场，并报告地形数据是否够用 | `moonlib.moonview.render_region`、`moonlib.render_feature` |
+| **月食模拟**：半影／偏食／全食自动判定；本影的铜红反照与大气折射的绿松石带 | `moonlib.eclipse`、`moonlib.moonview` |
+| **月面 X / V / L 与 the jewelled handle 预报**：X/V 用 -0.5°–1.5°（0.5° 最佳），L 用 -0.75°–0.20°（-0.3° 最佳），金柄暂用 -0.5°–2.0° | `moonlib.events` |
+| **最高／最低月亮**：四个主相各取中天最高／最低的一行，带站点相关的高度角 | `moonlib.events` |
+| **地貌标注**：10 431 项（中文名覆盖 99.9%），按分类着色并逐类开关，中／英切换 | `moonlib.annotations` |
+| **The Lunar 100 标注**：Charles A. Wood 的 100 项目视清单，97 个可定位目标；独立编号列表，不与 IAU 条目合并 | `moonlib.annotations` |
+| **曲线图**：太阳8字、月亮8字、地照亮度（可叠加月面/地照亮度比）、可自选 X/Y 的月球几何量、天平动相位图；可调线型/点样式/坐标范围/反向轴，可加文本框、隐藏任意标注，所见即所得存 PNG | `web/static/app.js`、`moonlib.analemma`、`moonlib.moonview` |
+| **与实拍对齐**：衍射（含副镜遮挡）、像素采样、视宁度、噪声、锐化、旋转与后截距补偿 | `moonlib.instrument` |
+| **动画 → MP4**：H.264，或 10 bit HEVC / HDR10 PQ，可带逐帧时间戳；**HDR 保存**（ISO 21496-1 增益图 JPEG） | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |
 | **本地网页**：全月面与 1:1 特写、框选与旋转、地貌搜索、设置存成 .conf | `web/server.py` |
-| JSON 服务契约 | `moonlib_s.service` |
+| JSON 服务契约 | `moonlib.service` |
 
 ---
 
@@ -293,7 +317,9 @@ node web/test_dom.js && node web/test_page.js && node web/test_projection.js
   说明某张特写是否已经越过了数据本身的极限。
 - 色彩图是 Hapke 光度**归一化**的相对反射率，不是照片也不是法向反照率；其绝对值经
   人为调整，因此 `normal_albedo` 取「全球平均法向反照率」这一约定（默认 0.136，
-  Lane & Irvine 1973）。**地照与日照的比值不受该约定影响**。
+  Lane & Irvine 1973）。**地照与日照的比值不受该约定影响**。地球/月球反照率的
+  具体数值范围与文献引用见 [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) 的
+  「反照率与光度参数」一节。
 - 色彩图 70°N–70°S 之外是单色填补，极区因此偏灰。
 - `tone="srgb"`/`"linear"` 是辐射度忠实的「拍摄」结果；由于暗面比亮面暗约 12 个星等，
   单次曝光必然看不到地照。`tone="visual"` 是**目视近似**（自适应 asinh 压缩），属感知
@@ -315,7 +341,7 @@ node web/test_dom.js && node web/test_page.js && node web/test_projection.js
 
 `render_region` 会自己发现它、按需从本地文件里裁出画幅所需的那一小块，于是任意目标
 都能拿到 118 m/px，无需联网。换一份自己的 DEM 也可以：
-`export MOONLIB_DEM=/path/to/dem.tif`，单位按文件名识别（见 `moonlib_s.terrain._dem_scale`）。
+`export MOONLIB_DEM=/path/to/dem.tif`，单位按文件名识别（见 `moonlib.terrain._dem_scale`）。
 
 ---
 

@@ -17,13 +17,13 @@ Four details matter and are easy to get wrong:
   46 080 x 23 040 samples (2 123 366 400 bytes).  A row is 92 160 bytes.
 * **No rescaling.**  The stored sample is already height in half-metres above
   the 1737.4 km sphere (``SCALING_FACTOR = 0.5``), which is exactly what
-  :data:`moonlib_s.terrain._KNOWN_DEM_SCALES` expects of ``ldem_<ppd>.tif``, so
+  :data:`moonlib.terrain._KNOWN_DEM_SCALES` expects of ``ldem_<ppd>.tif``, so
   the stitch is a byte copy.
 * **Column order.**  The repository reads a global raster as 180 W .. 180 E
   (``x = (lon + 180) * ppd``, see ``terrain.extract_region``), while the PDS
   tiles start at 0 E.  Each 90-degree tile therefore lands at a rotated column.
 * **Strip layout.**  The result is an uncompressed, non-tiled BigTIFF with one
-  strip per 16 rows: :class:`moonlib_s.terrain._StrippedTiff` reads a row by
+  strip per 16 rows: :class:`moonlib.terrain._StrippedTiff` reads a row by
   strip offset and refuses tiled or compressed files.
 
 Usage
@@ -304,7 +304,7 @@ def repair_band_seams(destination: Path) -> None:
 
 
 def check() -> int:
-    from moonlib_s import terrain
+    from moonlib import terrain
 
     if not OUTPUT.is_file():
         print(f"missing {OUTPUT}")

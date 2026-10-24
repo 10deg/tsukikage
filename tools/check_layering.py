@@ -31,7 +31,7 @@ from typing import Dict, List, Set, Tuple
 
 from _bootstrap import ROOT  # noqa: E402
 
-PACKAGE = ROOT / "src" / "moonlib_s"
+PACKAGE = ROOT / "src" / "moonlib"
 
 #: Layer index per module; a module may import any module with a *lower* index,
 #: plus anything in the same "peer" set.

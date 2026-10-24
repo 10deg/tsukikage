@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib_s  # noqa: E402
+from _cli import add_output_argument, moonlib  # noqa: E402
 
 OBLIQUITY_DEG = 23.4392911
 LUNAR_INCLINATION_DEG = 5.145
@@ -51,18 +51,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon)
+    observer = moonlib.Observer(lat=args.lat, lon=args.lon)
 
     now = datetime.now(timezone.utc)
     span_years = max(1.0, args.years)
     if args.long_ephemeris or span_years > 100.0:
-        moonlib_s.init_kernels(mode="long")
+        moonlib.init_kernels(mode="long")
 
-    window = moonlib_s.TimeRange.covering_years(
+    window = moonlib.TimeRange.covering_years(
         now.year - int(span_years), now.year + int(span_years)
     )
     started = time.perf_counter()
-    full_moons = moonlib_s.find_full_moons(window)
+    full_moons = moonlib.find_full_moons(window)
     print(
         f"{len(full_moons)} full moons between {window.start_utc:%Y} and "
         f"{window.end_utc:%Y} ({time.perf_counter() - started:.2f} s)"
@@ -76,7 +76,7 @@ def main() -> int:
     # its declination within a few degrees of it.
     candidates = []
     for event in full_moons:
-        state = moonlib_s.moon_state(observer, event.when_utc)
+        state = moonlib.moon_state(observer, event.when_utc)
         candidates.append((abs(state.dec_deg - args.lat), event, state.dec_deg))
     candidates.sort(key=lambda item: item[0])
 
@@ -85,7 +85,7 @@ def main() -> int:
 
     results = []
     for _, event, declination in shortlist:
-        details = moonlib_s.riseset.transit_details(observer, event.et)
+        details = moonlib.riseset.transit_details(observer, event.et)
         results.append((details.upper_limb_elevation_deg, event, details, declination))
     results.sort(reverse=True)
 

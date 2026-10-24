@@ -35,7 +35,7 @@ Usage
 -----
     ./.venv/bin/python tools/build_landform_db.py \\
         --features searchresults.csv --translation 月球地名.xls \\
-        --spelling .cache/moonlib_s/nomenclature/iau-2026.csv
+        --spelling .cache/moonlib/nomenclature/iau-2026.csv
 
 An ``.xls`` has to be converted first (WPS, Excel and LibreOffice all can):
 
@@ -63,10 +63,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # and passes whitespace="collapse".
 from _bootstrap import CATALOGUE_COLUMNS, ROOT, fold, normalise_lon  # noqa: E402
 
-TARGET = ROOT / "src" / "moonlib_s" / "data" / "lunar_nomenclature.csv"
+TARGET = ROOT / "src" / "moonlib" / "data" / "lunar_nomenclature.csv"
 PROVENANCE = TARGET.with_suffix(".provenance.json")
 
-#: The spreadsheet's sheet names, mapped to the kind the rest of moonlib_s speaks.
+#: The spreadsheet's sheet names, mapped to the kind the rest of moonlib speaks.
 #: The sheet a name sits on is the user's own classification, so it is what the
 #: database records; the page groups these into families for the label budget
 #: and decides outlines from them.
@@ -873,7 +873,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report["regenerate"] = (
         "python tools/build_landform_db.py --features searchresults.csv "
         "--translation 月面标记.xlsx --translation 月球地名.xlsx "
-        "--spelling .cache/moonlib_s/nomenclature/iau-2026.csv"
+        "--spelling .cache/moonlib/nomenclature/iau-2026.csv"
     )
     PROVENANCE.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",

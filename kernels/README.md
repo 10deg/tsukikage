@@ -3,9 +3,9 @@
 本目录存放 JPL SPICE 内核文件。**默认那一套（`mode='recent'`，共约 51 MB）随仓库发布**，
 所以克隆下来就能算位置、月相、升落、天平动与可见性，不必先下载任何东西。其余仍是下载：
 完整的 DE441 长历表约 3.2 GB、SVS 栅格 1 GB / 940 MB、USGS 全球高程 8.5 GB，
-都在 `.gitignore` 里。`moonlib_s` 会自动在此寻找内核；也可以通过
-`moonlib_s.init_kernels(kernel_dir=...)`、环境变量 `MOONLIB_KERNEL_DIR` 或
-`~/.config/moonlib_s/config.json` 指定其它位置。
+都在 `.gitignore` 里。`moonlib` 会自动在此寻找内核；也可以通过
+`moonlib.init_kernels(kernel_dir=...)`、环境变量 `MOONLIB_KERNEL_DIR` 或
+`~/.config/moonlib/config.json` 指定其它位置。
 
 **高程与色彩栅格不必都放在这里。** 目录可以只放内核，栅格用环境变量指过去：
 
@@ -46,6 +46,24 @@ export MOONLIB_TERRAIN_DIR=/data/moon-rasters
 档位才会亮起。近景是从源文件里现裁窗口的，选中即生效，**不会**为整月面重烘焙金字塔：
 10000 px 画幅只采样到 474 m 那一层，更细的高程在那里看不出差别。
 
+### SLDEM2015：同一 59.2 m 网格，但轨道缝是实测的
+
+```bash
+./.venv/bin/python tools/fetch_sldem_512.py   # 32 块 ±60° 瓦片 → SLDEM2015_512.tif
+```
+
+SLDEM2015 是 LOLA 网格与辉夜号（SELENE）Terrain Camera 立体像对联合解算的成果：
+±60° 以内，LOLA 轨道之间 1–4 km 的空隙由立体像对填成真实测量，而不是插值。PDS 的
+512 ppd 交付是 32 块 45° × 30° 的 float32「千米」瓦片（约 45 GB），**只覆盖 ±60°**；
+再往极区没有 512 ppd 产品。本仓库的栅格必须是全球 2:1，因此脚本把 ±60–90° 从
+`ldem_512.tif` 直接复制过来：极区仍是 59.2 m 的 LOLA，只是没有立体填缝。
+
+输出 `SLDEM2015_512.tif` 是 184320 × 92160 的 int16 **半米** BigTIFF（34 GB），
+与 LOLA 产品同一编码；`_KNOWN_DEM_SCALES` 里的 `SLDEM2015_512` 负责把 DN 换算成
+千米。下载按 512 行一块（45 MB）边下边写，不落整块瓦片，峰值就是 34 GB 输出；
+写完后半成品带 `.incomplete` 边车，`discover_dem_sources()` 在完成前会跳过它。
+中途断了重跑会从已写的块继续。
+
 ## 必需内核（`mode='recent'`，默认）
 
 **这 7 个文件随仓库发布**（合计约 51 MB），克隆后立即可用；下表的大小是它们在本目录里的实际体积。
@@ -70,7 +88,7 @@ export MOONLIB_TERRAIN_DIR=/data/moon-rasters
 加载 DE441 需要数秒并占用大量内存，因此**默认不加载**。做千年级搜索时再调用：
 
 ```python
-moonlib_s.init_kernels(mode="long")
+moonlib.init_kernels(mode="long")
 ```
 
 ## 目录中随仓库发布的另外两个文件
@@ -94,8 +112,8 @@ moonlib_s.init_kernels(mode="long")
 ## 校验
 
 ```bash
-python -m moonlib_s info            # 列出已加载内核与历表覆盖范围
-python -m moonlib_s info --json     # 同样的信息，JSON 格式
+python -m moonlib info            # 列出已加载内核与历表覆盖范围
+python -m moonlib info --json     # 同样的信息，JSON 格式
 ```
 
 ---
@@ -104,7 +122,7 @@ python -m moonlib_s info --json     # 同样的信息，JSON 格式
 
 `ldem_64.tif`、`lroc_color.exr`（线性）与 `lroc_color_16bit_srgb.tif`（sRGB）
 来自 NASA SVS 的 CGI Moon Kit，由 LRO 的 LOLA 与 LROC 数据制作，供三维渲染使用。
-`moonlib_s.terrain` 直接读取它们；下面的结论均已在本仓库中实测复核。
+`moonlib.terrain` 直接读取它们；下面的结论均已在本仓库中实测复核。
 
 | 文件 | 尺寸 | 内容 |
 |---|---|---|
@@ -143,7 +161,7 @@ EXR 是线性、未截断的原始版本，正是渲染需要的；sRGB TIFF 需
 均方偏差约 0.009–0.013（8 位尺度）；用两条完全独立的解码路径各自烘焙金字塔后，
 Mare Tranquillitatis / Tycho / Mare Imbrium / 背面高地的采样值在小数点后 3 位完全一致，
 全球均值 0.4821（TIFF）与 0.4811（EXR）相差 0.2 %。因此 EXR 缺席时会自动改用 TIFF，
-只是需要 Pillow（`pip install 'moonlib-s[tiff]'`；装了 matplotlib 就已经有）。
+只是需要 Pillow（`pip install -e '.[tiff]'`；装了 matplotlib 就已经有）。
 
 ### 来源
 
@@ -153,8 +171,8 @@ Mare Tranquillitatis / Tycho / Mare Imbrium / 背面高地的采样值在小数�
 - Sato, Robinson, Hapke, Denevi, Boyd (2014), *JGR Planets* 119, 1775–1805,
   <https://doi.org/10.1002/2013JE004580>
 
-首次使用时，`moonlib_s` 会把两张图预处理成金字塔缓存（`ldem_64` + EXR 约 350 MB；
-换成 256 像素/度的全球高程则会到 3 GB 量级，写入 `<仓库>/.cache/moonlib_s/terrain/`，
+首次使用时，`moonlib` 会把两张图预处理成金字塔缓存（`ldem_64` + EXR 约 350 MB；
+换成 256 像素/度的全球高程则会到 3 GB 量级，写入 `<仓库>/.cache/moonlib/terrain/`，
 可用 `MOONLIB_CACHE_DIR` 改位置）。
 
 **不带任何栅格也能跑。** 星历、事件、可见性、天平动这些计算只依赖 SPICE 内核；

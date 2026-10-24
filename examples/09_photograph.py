@@ -27,8 +27,8 @@ import re
 import unicodedata
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib_s, shown  # noqa: E402
-from moonlib_s.models import MoonRenderSettings  # noqa: E402
+from _cli import add_output_argument, moonlib, shown  # noqa: E402
+from moonlib.models import MoonRenderSettings  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,13 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
-    feature = moonlib_s.find_feature(args.feature)
+    feature = moonlib.find_feature(args.feature)
     lon = feature.lon_deg if args.target_lon is None else args.target_lon
     lat = feature.lat_deg if args.target_lat is None else args.target_lat
-    site = moonlib_s.Observer(lat=args.lat, lon=args.lon, name=args.site_name)
-    view = moonlib_s.view_geometry(site, args.at)
+    site = moonlib.Observer(lat=args.lat, lon=args.lon, name=args.site_name)
+    view = moonlib.view_geometry(site, args.at)
 
-    telescope = moonlib_s.Telescope(
+    telescope = moonlib.Telescope(
         aperture_mm=args.aperture_in * 25.4,
         focal_ratio=None if args.focal_length_mm else args.focal_ratio,
         focal_length_mm=args.focal_length_mm,
@@ -124,7 +124,7 @@ def main(argv=None) -> int:
     else:
         frame_kwargs["cover_km"] = feature.diameter_km
 
-    render = moonlib_s.render_region(
+    render = moonlib.render_region(
         view, lon, lat,
         settings=MoonRenderSettings(
             width=args.width, height=args.width, samples_per_pixel=2,
@@ -142,14 +142,14 @@ def main(argv=None) -> int:
     exposure = render.stats["exposure_scale"]
     linear = (render.sunlit + render.earthshine) * exposure
 
-    blurred = moonlib_s.instrument_blur(
+    blurred = moonlib.instrument_blur(
         linear, telescope,
         arcsec_per_pixel=render.stats["arcsec_per_pixel"],
         seeing_fwhm_arcsec=args.seeing,
         frame_selection_gain=args.frame_selection_gain,
         strength=args.blur_strength,
     )
-    sharpened = moonlib_s.instrument_sharpen(
+    sharpened = moonlib.instrument_sharpen(
         blurred, telescope,
         arcsec_per_pixel=render.stats["arcsec_per_pixel"],
         seeing_fwhm_arcsec=args.seeing,
@@ -158,10 +158,10 @@ def main(argv=None) -> int:
         radius_arcsec=args.sharpen_radius_arcsec,
         strength=args.sharpen_strength,
     )
-    display = moonlib_s.apply_tone_mapping(
+    display = moonlib.apply_tone_mapping(
         sharpened, tone="srgb", auto_exposure=False, exposure_ev=0.0
     )
-    finished = moonlib_s.finish_image(
+    finished = moonlib.finish_image(
         display, saturation=args.saturation, gain=args.gain
     )
 
@@ -171,9 +171,9 @@ def main(argv=None) -> int:
     slug = re.sub(r"[^a-z0-9]+", "_", slug.lower()).strip("_")
     out = Path(args.out) if args.out else Path("out") / f"{slug}_{args.at[:10]}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
-    moonlib_s.plotting.write_array_png(finished, out)
+    moonlib.plotting.write_array_png(finished, out)
 
-    report = moonlib_s.instrument_report(
+    report = moonlib.instrument_report(
         telescope, arcsec_per_pixel=render.stats["arcsec_per_pixel"],
         seeing_fwhm_arcsec=args.seeing,
         frame_selection_gain=args.frame_selection_gain,
@@ -191,7 +191,7 @@ def main(argv=None) -> int:
             w=finished.shape[1],
             h=finished.shape[0],
             scale=render.stats["arcsec_per_pixel"],
-            alt=moonlib_s.az_el("MOON", moonlib_s.to_et(args.at), site).elevation_deg,
+            alt=moonlib.az_el("MOON", moonlib.to_et(args.at), site).elevation_deg,
             sun=render.region.solar_elevation_deg,
             bsig=report["blur_sigma_px"],
             strength=args.blur_strength,

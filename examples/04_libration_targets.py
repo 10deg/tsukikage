@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib_s  # noqa: E402
+from _cli import add_output_argument, moonlib  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,8 +37,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    observer = moonlib_s.Observer(lat=args.lat, lon=args.lon)
-    targets = moonlib_s.libration.load_targets()
+    observer = moonlib.Observer(lat=args.lat, lon=args.lon)
+    targets = moonlib.libration.load_targets()
     print(f"loaded {len(targets)} limb targets from the packaged catalogue")
 
     if args.list:
@@ -52,8 +52,8 @@ def main() -> int:
 
     if args.at:
         moment = datetime.fromisoformat(args.at).replace(tzinfo=timezone.utc)
-        et = moonlib_s.to_et(moment)
-        state = moonlib_s.moon_state(observer, moment)
+        et = moonlib.to_et(moment)
+        state = moonlib.moon_state(observer, moment)
         print(
             f"\nAt {moment:%Y-%m-%d %H:%M:%S} UTC   "
             f"sub-Earth lon {state.libration.sub_earth_lon_deg:+.3f} "
@@ -63,7 +63,7 @@ def main() -> int:
         print(f"Moon elevation {state.elevation_deg:+.2f} deg, "
               f"illumination {state.illuminated_percent:.1f} %")
         visibilities = [
-            moonlib_s.libration.target_visibility(
+            moonlib.libration.target_visibility(
                 target,
                 et,
                 observer,
@@ -74,12 +74,12 @@ def main() -> int:
         ]
         observable = [item for item in visibilities if item.is_observable]
         print(f"\n{len(observable)} targets simultaneously visible, sunlit and above the horizon:")
-        print(moonlib_s.reporting.format_visible_targets(observable))
+        print(moonlib.reporting.format_visible_targets(observable))
         return 0
 
-    window = moonlib_s.as_time_range(args.start, args.end)
+    window = moonlib.as_time_range(args.start, args.end)
     started = time.perf_counter()
-    samples = moonlib_s.libration.sweep(
+    samples = moonlib.libration.sweep(
         targets, window, observer, step_minutes=args.step_minutes
     )
     elapsed = time.perf_counter() - started
@@ -88,13 +88,13 @@ def main() -> int:
         f"({window.duration_days:.1f} days at {args.step_minutes:g}-minute steps)"
     )
 
-    rows = moonlib_s.libration.summarize(samples, targets)[: args.top]
+    rows = moonlib.libration.summarize(samples, targets)[: args.top]
     print()
-    print(moonlib_s.reporting.format_target_summary(rows))
+    print(moonlib.reporting.format_target_summary(rows))
 
     # Best observing window for the two polar-limb targets with the largest margin.
     for name in ("Plaskett", "Rozhdestvenskiy"):
-        windows = moonlib_s.libration.best_windows(samples, name, top_n=3)
+        windows = moonlib.libration.best_windows(samples, name, top_n=3)
         if not windows:
             print(f"{name}: no qualifying window in this period")
             continue
@@ -113,7 +113,7 @@ def main() -> int:
     target = outdir / "limb_target_summary.json"
     target.write_text(
         json.dumps(
-            moonlib_s.service.limb_target_sweep(
+            moonlib.service.limb_target_sweep(
                 observer, window, step_minutes=args.step_minutes
             ),
             ensure_ascii=False,

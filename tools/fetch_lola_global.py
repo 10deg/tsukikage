@@ -206,7 +206,7 @@ def main() -> int:
     print(f"took {time.strftime('%M:%S', time.gmtime())}")
     code = verify(target, EXPECTED_BYTES)
     if code == 0:
-        print("\nNext: let moonlib_s build the pyramid cache from it.  The 256 px/deg")
+        print("\nNext: let moonlib build the pyramid cache from it.  The 256 px/deg")
         print("grid is used at full resolution for close-ups and decimated for")
         print("whole-disk renders, so this replaces ldem_64.tif for both.")
     return code

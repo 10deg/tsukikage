@@ -22,6 +22,7 @@ const html = readStatic('index.html');
 
 /* The names this harness drives, gathered out of app.js by the shared loader. */
 const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
+  'setExperimentSort',
   'saveDisk', 'selectFeature', 'refreshLabels', 'activeClasses', 'diskPixels',
   'processingPayload', 'drawPhaseStrip', 'phaseShape', 'orientation',
   'mirroredPlan', 'buildClassToggles', 'loadFeatureIndex', 'matchFeatures',
@@ -29,7 +30,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'lonLatToPixel', 'cameraFieldRadiusArcsec', 'LAND_CLASSES',
   'collectSettings', 'drawMagnifier', 'magnifierView', 'splitterStart',
   'splitterCeiling', 'SPLITTERS', 'setLeftHidden', 'leftIsHidden',
-  'syncKmPxPresets', 'DEFAULT_OFF_CLASSES', 'animationRequest',
+  'syncKmPxPresets', 'terrainLimitLabel', 'clearActivePatch', 'setActivePatch',
+  'syncTerrainSourceFromRegion', 'selectionInsidePatch',
+  'DEFAULT_OFF_CLASSES', 'animationRequest',
   'animationRenderSize', 'animationOutputPixels', 'animationSkyKm',
   'setLabelControls', 'syncResolutionPicker', 'previewPixels',
   'applySettings', 'centrePlacement', 'setAllClasses',
@@ -46,7 +49,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
   'eventColumnsFor', 'eventCellText', 'eventMetric', 'renderEventHeader',
-  'curveSeries', 'curveTargetView', 'curveOptions', 'curveClampEarthView',
+  'curveSeries', 'curveSeriesSpecs', 'curveTargetView', 'curveOptions',
+  'curveClampEarthView', 'curveStyleFor', 'curveApplyLimits',
+  'curveAddTextBox', 'curveResetView', 'curveResetFormat',
   'openCurve', 'closeCurve',
   'saveCurvePng', 'drawCurve',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
@@ -176,6 +181,9 @@ function matches(element, selector) {
   // The two tab strips are looked up as `#strip .tab`.
   if (selector === '#train-tabs .tab') return String(element.id).startsWith('train-tab-');
   if (selector === '#proc-tabs .tab') return String(element.id).startsWith('proc-tab-');
+  if (selector === '#proc-image-tabs .tab') {
+    return String(element.id).startsWith('proc-image-tab-');
+  }
   if (selector === '#result-tabs .tab') return String(element.id).startsWith('tab-');
   if (selector === '#result-tabs .tab') return element.dataset && element.dataset.tab !== undefined;
   if (selector === '#train-tabs .tab') return element.dataset && element.dataset.train !== undefined;
@@ -334,6 +342,12 @@ for (const m of html.matchAll(/data-proc="([^"]+)"/g)) {
   el.tagName = 'BUTTON';
   registry.set(el.id, el);
 }
+for (const m of html.matchAll(/data-image="([^"]+)"/g)) {
+  const el = makeElement(`proc-image-tab-${m[1]}`);
+  el.dataset.image = m[1];
+  el.tagName = 'BUTTON';
+  registry.set(el.id, el);
+}
 for (const m of html.matchAll(/data-train="([^"]+)"/g)) {
   const el = makeElement(`train-tab-${m[1]}`);
   el.dataset.train = m[1];
@@ -483,7 +497,7 @@ function planFor(body) {
 
 function respond(url, body) {
   if (url === '/api/health') {
-    return { ok: true, limits: { preview_px: 3000, output_px: 8192, disk_px: 10000,
+    return { ok: true, limits: { preview_px: 3000, output_px: 10000, disk_px: 10000,
                                  min_px: 64, terrain_km_per_px: 0.11845058759433393,
                                  label_outline_px: 9, cpu_count: 8 },
              data_sources: SOURCES };
@@ -622,7 +636,57 @@ function respond(url, body) {
                     equation_of_time_max_minutes: 16 },
       };
     }
+    if (body.kind === 'altitude' || body.kind === 'diameter'
+        || body.kind === 'libration' || body.kind === 'geometry') {
+      const samples = [];
+      const count = 48;
+      for (let index = 0; index < count; index += 1) {
+        const u = index / (count - 1);
+        samples.push({
+          when_utc: new Date(Date.UTC(2026, 0, 1 + index * 2, 0, 0, 0)).toISOString(),
+          local_time: `2026-01-${String(1 + Math.floor(index / 12)).padStart(2, '0')} `
+            + `${String((index * 2) % 24).padStart(2, '0')}:00:00 CST`,
+          elapsed_hours: index * 2,
+          day_of_year: 1 + Math.floor(index / 12), month: 1,
+          phase_angle_deg: 180 * (1 - u),
+          illumination_percent: 100 * u,
+          waxing: true,
+          azimuth_deg: 90 + 180 * u,
+          elevation_deg: 50 * Math.sin(2 * Math.PI * u),
+          angular_diameter_arcsec: 1950 + 80 * Math.cos(2 * Math.PI * u),
+          angular_diameter_deg: 0.54,
+          distance_km: 384400 - 20000 * Math.cos(2 * Math.PI * u),
+          libration_lon_deg: 7 * Math.sin(2 * Math.PI * u),
+          libration_lat_deg: 6 * Math.cos(2 * Math.PI * u),
+        });
+      }
+      return {
+        kind: body.kind, site: { lat: 30, lon: 120 }, tz_offset_hours: 8,
+        start_utc: '2026-01-01T00:00:00+00:00',
+        end_utc: '2026-01-05T00:00:00+00:00',
+        local_hour: 0, local_minute: 0, days: 4, step_minutes: 120,
+        drift_minutes: 0, samples,
+        extremes: {
+          elevation_min_deg: -50, elevation_max_deg: 50,
+          azimuth_min_deg: 90, azimuth_max_deg: 270,
+          angular_diameter_min_arcsec: 1870,
+          angular_diameter_max_arcsec: 2030,
+          libration_lon_min_deg: -7, libration_lon_max_deg: 7,
+          libration_lat_min_deg: -6, libration_lat_max_deg: 6,
+          phase_angle_min_deg: 0, phase_angle_max_deg: 180,
+        },
+      };
+    }
     if (body.kind === 'earthshine') {
+      const models = {
+        simulation: { label: '自定义（当前模拟设置）', albedo: 0.367, phase: 'lambert', g: -0.33 },
+        allen: { label: 'Allen 1976 · 0.367 · Lambert', albedo: 0.367, phase: 'lambert', g: -0.33 },
+        vband: { label: 'V 波段 · 0.434 · Lambert', albedo: 0.434, phase: 'lambert', g: -0.33 },
+        robinson: { label: 'Robinson 2026 · 0.242 · Lambert', albedo: 0.242, phase: 'lambert', g: -0.33 },
+        robinson_hg: { label: 'Robinson 2026 · 0.23 · HG 相位', albedo: 0.23, phase: 'hg', g: -0.33 },
+      };
+      const modelKey = models[body.earthshine_model] ? body.earthshine_model : 'simulation';
+      const model = models[modelKey];
       const samples = [];
       for (let index = 0; index <= 36; index += 1) {
         const phase = 180 - index * 5;
@@ -634,19 +698,28 @@ function respond(url, body) {
           earth_phase_angle_deg: 180 - phase,
           earthshine_ratio: 1e-4 * Math.max(0.001, 1 - phase / 200),
           moon_magnitude: -12.73,
+          moon_apparent_magnitude: -12.73 + 0.03 * phase,
           earthshine_apparent_magnitude: magnitude,
+          moon_to_earthshine_ratio: phase === 0
+            ? null : 2.9 * Math.pow(10, phase / 40),
         });
       }
       return {
         kind: 'earthshine', when_utc: '2026-05-25T07:30:00+00:00',
         site: { lat: 30, lon: 120 }, tz_offset_hours: 8,
-        earth_geometric_albedo: 0.367,
+        earth_model: modelKey,
+        earth_model_label: model.label,
+        earth_phase_model: model.phase,
+        earth_phase_g: model.g,
+        earth_geometric_albedo: model.albedo,
         distance_km: 384400, earth_distance_km: 384400,
         samples,
         current: {
           phase_angle_deg: 47.9, illumination_percent: 69.6,
           earth_phase_angle_deg: 132.1, earthshine_ratio: 4e-5,
-          moon_magnitude: -12.73, earthshine_apparent_magnitude: 1.2,
+          moon_magnitude: -12.73, moon_apparent_magnitude: -11.3,
+          earthshine_apparent_magnitude: 1.2,
+          moon_to_earthshine_ratio: 4.3e4,
         },
       };
     }
@@ -745,13 +818,39 @@ function respond(url, body) {
                      instrument: {} },
              image, image_raw: body.raw ? image : undefined };
   }
+  if (url === '/api/surface-sun') {
+    const start = Date.parse(body.start);
+    const end = Date.parse(body.end);
+    const step = (Number(body.step_minutes) || 10) * 60000;
+    const samples = [];
+    for (let stamp = start, index = 0; stamp <= end; stamp += step, index += 1) {
+      samples.push({
+        when_utc: new Date(stamp).toISOString(),
+        local_time: new Date(stamp).toISOString().slice(0, 19) + ' UTC',
+        lon_deg: body.moon_lon, lat_deg: body.moon_lat,
+        altitude_deg: 30 + 20 * Math.sin(index / 4),
+        azimuth_deg: (90 + index * 6) % 360,
+        incidence_deg: 60 - 20 * Math.sin(index / 4),
+        subsolar_lon_deg: 0, subsolar_lat_deg: 0,
+        distance_km: 149000000, light_time_s: 497,
+        illuminated: 30 + 20 * Math.sin(index / 4) > 0,
+      });
+    }
+    return { kind: 'surface_sun', site: { lat: 30, lon: 120 },
+             moon_lon: body.moon_lon, moon_lat: body.moon_lat,
+             start: body.start, end: body.end,
+             step_minutes: body.step_minutes, samples };
+  }
   if (url === '/api/settings/save') return { saved: { name: 'x', bytes: 10 }, files: [] };
   if (url === '/api/patch') {
     return { id: '1', product: body.product, name: 'patch',
+             label: 'SLDEM2015 512 ppd · 辉夜号立体填缝',
+             km_per_px: 0.0592,
              bounds: [345.0, 356.0, 48.0, 55.0], megabytes: 140.9 };
   }
   if (/^\/api\/patch\/\d+$/.test(url)) {
     return { id: '1', state: 'done', progress: 1, message: '4777×7375 px',
+             label: 'SLDEM2015 512 ppd · 辉夜号立体填缝', km_per_px: 0.0592,
              bytes: 140000000, bounds: [345, 356, 48, 55], error: null };
   }
   if (url === '/api/animation') {
@@ -990,7 +1089,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
      plus the animation's own km/px row, which is marked data-own so re-copying
      the ladder cannot duplicate it. */
   check('every menu offers a way in by hand',
-    (html.match(/<option value="custom"/g) || []).length === 5,
+    (html.match(/<option value="custom"/g) || []).length === 6,
     (html.match(/<option value="custom"/g) || []).length);
   check('the preview menu offers the sizes the page may ask for',
     previewMenu.length >= 7 && previewMenu.every((px) => px <= T.LIMITS.preview_px),
@@ -1230,10 +1329,19 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     drawn.texts.length = 0;
     T.drawViewLabels('disk');
     const texts = drawn.texts.map((entry) => entry.text);
-    check('the full disk carries its ruler with every label switched off',
-      texts.some((text) => /^\d+(\.\d+)? (km|m)$/.test(text)), texts.join(' | '));
-    check('and not a pixel of it without the switch',
-      without === 0, `${without} texts`);
+    check('the master label switch no longer hides the geometric overlays',
+      texts.length > 0 && without === 0 && T.state.labelsOn === false,
+      texts.join(' | '));
+    document.getElementById('annotate').setAttribute('aria-pressed', 'true');
+    T.state.labelsOn = true;
+    drawn.texts.length = 0;
+    T.drawViewLabels('disk');
+    const withSwitch = drawn.texts.map((entry) => entry.text);
+    check('and the ruler is still drawn with the switch on',
+      withSwitch.some((text) => /^\d+(\.\d+)? (km|m)$/.test(text)),
+      withSwitch.join(' | '));
+    T.state.labelsOn = false;
+    document.getElementById('annotate').setAttribute('aria-pressed', 'false');
     set('mark-ruler', false);
     T.state.labels.disk = savedPlan;
   }
@@ -1357,6 +1465,15 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   set('label-shadow', false);
   fire('label-shadow', 'change');
   await tick();
+  set('label-satellites', false);
+  fire('label-satellites', 'change');
+  await tick();
+  check('卫星坑 off is sent to the server as its own switch',
+    fetchCalls.filter((c) => c.url === '/api/annotations').pop()
+      .body.satellites === false);
+  set('label-satellites', true);
+  fire('label-satellites', 'change');
+  await tick();
   // 彩色 is the switch that used to be 统一配色 (one colour), with the sense
   // turned round: ticked = every class keeps its colour, unticked = one colour.
   check('彩色 on gives each class its own colour',
@@ -1473,6 +1590,25 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
 
   console.log('');
   console.log('generating a close-up refreshes its labels');
+  /* A capped render must keep the box's proportions.  Clamping both sides to
+     the cap independently turned a 2:1 frame into a square 4096×4096, so the
+     saved picture was squeezed and the rendered field no longer matched the
+     box. */
+  {
+    const savedSelection = T.state.selection;
+    const savedKmPx = document.getElementById('out-kmpx').value;
+    T.state.selection = {
+      lon: 0, lat: 0, radiusFraction: 0.5, rotationDeg: 0, aspect: 0.5,
+    };
+    document.getElementById('out-kmpx').value = '0.0592';
+    const capped = T.renderPixels();
+    check('a capped render keeps a wide box 2:1 instead of becoming square',
+      capped.width >= capped.height * 1.99 &&
+      Math.max(capped.width, capped.height) <= T.LIMITS.output_px,
+      JSON.stringify(capped));
+    T.state.selection = savedSelection;
+    document.getElementById('out-kmpx').value = savedKmPx;
+  }
   /* The first press has to render at the 物理分辨率 the reader chose.  It used
      to render an aiming preview of the box (a few hundred pixels) and only the
      second press, 更新模拟, honoured the setting -- which read as "the highest
@@ -1613,8 +1749,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('annotate').setAttribute('aria-pressed', 'false');
     set('mark-equator', true);
     fire('mark-equator', 'change');
-    check('and so does switching a geometric overlay on',
-      T.state.labelsOn === true,
+    check('but switching a geometric overlay on does not turn the names on',
+      T.state.labelsOn === false,
       String(T.state.labelsOn));
     set('mark-equator', false);
     fire('mark-equator', 'change');
@@ -1869,6 +2005,26 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('后期处理 is its own always-visible section now',
     !document.getElementById('proc-controls').hidden &&
     !document.getElementById('proc-panel').hidden);
+  fire('proc-image-tab-post', 'click');
+  check('the processing section has 成像模拟 and 后期处理 pages',
+    document.getElementById('proc-imaging').hidden === true &&
+    document.getElementById('proc-post').hidden === false &&
+    !document.getElementById('mirror-h').hidden &&
+    !document.getElementById('refresh-image-proc').hidden);
+  fire('proc-image-tab-imaging', 'click');
+  check('and the imaging page comes back',
+    document.getElementById('proc-imaging').hidden === false &&
+    document.getElementById('proc-post').hidden === true);
+  fire('diffraction-toggle', 'click');
+  check('衍射环 itself opens the PSF parameters',
+    document.getElementById('diffraction-toggle')
+      .getAttribute('aria-expanded') === 'true' &&
+    document.getElementById('diffraction-psf').hidden === false);
+  fire('diffraction-toggle', 'click');
+  check('and clicking it again folds them away',
+    document.getElementById('diffraction-toggle')
+      .getAttribute('aria-expanded') === 'false' &&
+    document.getElementById('diffraction-psf').hidden === true);
   check('and the column holds the forecast and the animation',
     document.getElementById('proc-animation').hidden === false &&
     document.getElementById('proc-events').hidden === true);
@@ -1881,11 +2037,16 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('disk-preset').options.length,
     `${document.getElementById('anim-preset').options.length} vs ` +
     `${document.getElementById('disk-preset').options.length}`);
-  check('时间步长 is a list of common steps that can still be typed into',
-    /id="anim-step"[^>]*list="anim-step-presets"/.test(html) &&
+  check('时间步长 always shows every common step, with a custom field',
+    /id="anim-step"[^>]*>/.test(html) &&
     ['1', '5', '10', '15', '30', '60']
-      .every((value) => new RegExp(`<option value="${value}"></option>`).test(html)),
-    'datalist');
+      .every((value) => new RegExp(`<option value="${value}"`).test(html)) &&
+    /<option value="custom">自定义…<\/option>/.test(html) &&
+    /id="anim-step-custom"/.test(html),
+    'select + custom');
+  check('the plan line gives the clip duration from frames and fps',
+    /共 \d+ 帧，[\d.]+ s/.test(document.getElementById('anim-span').textContent),
+    document.getElementById('anim-span').textContent);
   {
     /* 地貌 in the animation pane: the request has to carry the projection
        knobs, and HDR has to give way because a name is an sRGB mark. */
@@ -2344,7 +2505,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   const processed = fetchCalls.filter((c) => c.url === '/api/process').pop();
   check('the rotation reaches the server', processed && processed.body.processing.rotation_deg === 30,
     processed && JSON.stringify(processed.body.processing));
-  check('and the raw frame is asked for in the same round trip', processed.body.raw === true);
+  check('the raw frame is not re-sent when nothing about it changed',
+    processed.body.raw === false);
   fire('mirror-v', 'click');
   await new Promise((resolve) => setTimeout(resolve, 150));
   check('the mirror reaches the server',
@@ -2755,10 +2917,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.LIMITS.terrain_km_per_px = 0.11845058759433393;
     T.syncKmPxPresets();
     const select = document.getElementById('out-kmpx-preset');
-    const lola = [...select.options].find((option) => /LOLA/.test(option.textContent || ''));
-    check('the LOLA row carries the measured floor, not the published 0.118',
-      !!lola && lola.value === '0.1185', JSON.stringify(lola && lola.value));
-    set('out-kmpx-preset', lola.value);
+    const limitRow = [...select.options]
+      .find((option) => /上限/.test(option.textContent || ''));
+    check('the limit row carries the measured floor, not the published 0.118',
+      !!limitRow && limitRow.value === '0.1185', JSON.stringify(limitRow && limitRow.value));
+    check('and names the selected product',
+      !!limitRow && /LOLA/.test(limitRow.textContent),
+      limitRow && limitRow.textContent);
+    set('out-kmpx-preset', limitRow.value);
     fire('out-kmpx-preset', 'change');
     check('picking it leaves one field and keeps the menu on the row',
       document.getElementById('out-kmpx').hidden === true && select.value === '0.1185',
@@ -2766,6 +2932,22 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const fine = [...select.options].find((option) => option.value === '0.06');
     check('a row finer than the data is disabled rather than silently rewritten',
       !!fine && fine.disabled === true, JSON.stringify(fine && fine.disabled));
+    const savedSources = T.LIMITS.data_sources;
+    const savedPatch = T.LIMITS.active_patch;
+    T.LIMITS.active_patch = null;
+    T.LIMITS.data_sources = {
+      sources: [{ id: 'sldem', name: 'SLDEM2015_512.tif' }], selected: 'sldem',
+    };
+    check('the limit label follows an SLDEM selection',
+      T.terrainLimitLabel() === 'SLDEM 上限', T.terrainLimitLabel());
+    T.LIMITS.data_sources = {
+      sources: [{ id: 'lola', name: 'LDEM_118m.tif' }], selected: 'lola',
+    };
+    check('and says LOLA for a LOLA product',
+      T.terrainLimitLabel() === 'LOLA 上限', T.terrainLimitLabel());
+    T.LIMITS.data_sources = savedSources;
+    T.LIMITS.active_patch = savedPatch;
+
     set('out-kmpx-preset', 'disk');
     fire('out-kmpx-preset', 'change');
     T.LIMITS.terrain_km_per_px = saved;
@@ -2793,6 +2975,50 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('and the pane reports where the patch landed',
       /就绪|MB/.test(document.getElementById('patch-note').textContent),
       document.getElementById('patch-note').textContent);
+
+    /* The regression this round fixes: the renderer had already switched to
+       the patch, but 数据源 still named the old global product and 物理分辨率
+       still had the 60 m row greyed out.  Both menus now follow the source the
+       frame was actually drawn from. */
+    const source = document.getElementById('data-source');
+    const patchOption = source.options.find((option) => option.value === source.value);
+    check('数据源 names the patch that the close-up is now made of',
+      source.value === 'region:patch' &&
+      /SLDEM2015/.test((patchOption && patchOption.textContent) || ''),
+      `${source.value} / ${patchOption && patchOption.textContent}`);
+    const fine = [...document.getElementById('out-kmpx-preset').options]
+      .find((option) => option.value === '0.06');
+    check('物理分辨率 opens the 60 m row the patch can honour',
+      !!fine && fine.disabled === false, JSON.stringify(fine && fine.disabled));
+    check('and the published floor follows the patch, not the old source',
+      Math.abs(T.LIMITS.terrain_km_per_px - 0.0592) < 1e-9,
+      T.LIMITS.terrain_km_per_px);
+    check('the note says the frame is on a patch and names the fallback',
+      /区域补片/.test(document.getElementById('data-source-note').textContent) &&
+      /全局数据源/.test(document.getElementById('data-source-note').textContent),
+      document.getElementById('data-source-note').textContent);
+
+    /* The production path is a render, not the download job: /api/region says
+       which terrain it sampled, and that is what the menus must follow. */
+    T.syncTerrainSourceFromRegion({
+      terrain_km_per_pixel: 0.0592, terrain_regional: true,
+      terrain_source_name: 'sldem2015-512_e5p17_n18p68',
+      terrain_bounds: [0, 11, 13.5, 23.8],
+    });
+    check('a patch render is also named in 数据源',
+      source.value === 'region:sldem2015-512_e5p17_n18p68', source.value);
+    T.syncTerrainSourceFromRegion({
+      terrain_km_per_pixel: 0.11845058759433393, terrain_regional: false,
+      terrain_source_name: 'LDEM_118m.tif',
+    });
+    check('a global render clears the patch group again',
+      source.value === '/kernels/LDEM_118m.tif', source.value);
+
+    T.clearActivePatch();
+    check('leaving the patch restores the global source and its floor',
+      source.value === '/kernels/LDEM_118m.tif' &&
+      Math.abs(T.LIMITS.terrain_km_per_px - 0.11845058759433393) < 1e-9,
+      `${source.value} / ${T.LIMITS.terrain_km_per_px}`);
   }
 
   console.log('');
@@ -3563,11 +3789,19 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       ctx.drawn.texts.some((text) => text.text.includes('方位角')) &&
       ctx.drawn.texts.some((text) => text.text.includes('高度角')));
 
+    set('curve-show-twilight', true);
+    fire('curve-show-twilight', 'change');
+    check('天光 is available on a horizon chart',
+      T.curveOptions().twilight === true);
     set('curve-kind', 'earthshine');
     fire('curve-kind', 'change');
     fire('curve-kind', 'change');
     await tick();
     await tick();
+    check('地照亮度 has no 天光 even if the switch is still ticked',
+      T.curveOptions().twilight === false &&
+      document.getElementById('curve-show-twilight').checked === true);
+    set('curve-show-twilight', false);
     const earthCalls = fetchCalls.filter((call) => call.url === '/api/curve');
     check('switching the type asks for the earthshine curve',
       earthCalls.length >= 1 &&
@@ -3578,6 +3812,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       document.getElementById('curve-earth').hidden === false);
     check('the axes are locked by default',
       document.getElementById('curve-lock-axes').checked === true);
+    check('earthshine starts with brighter magnitudes at the top',
+      T.curveOptions().reverseY === true);
     check('the phase axis cannot leave 0–180°',
       (() => {
         const v = T.curveClampEarthView(
@@ -3596,7 +3832,35 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     ctx.drawn.texts.length = 0;
     T.drawCurve();
     check('the x-axis can be illumination instead of phase angle',
-      ctx.drawn.texts.some((text) => text.text === '照明率 (%)'));
+      ctx.drawn.texts.some((text) => text.text.includes('照明率 (%)')));
+
+    // Earth-albedo / phase-function presets for the earthshine curve.
+    const modelSelect = document.getElementById('curve-earth-model');
+    const modelValues = modelSelect.options.map((option) => option.value);
+    check('the earthshine chart offers several Earth models',
+      ['simulation', 'allen', 'vband', 'robinson', 'robinson_hg']
+        .every((key) => modelValues.includes(key)),
+      modelValues.join(','));
+    set('curve-earth-model', 'vband');
+    fire('curve-earth-model', 'change');
+    await tick(); await tick();
+    const vbandBody = fetchCalls.filter((call) => call.url === '/api/curve').pop().body;
+    check('choosing the V-band model sends it to the server',
+      vbandBody.earthshine_model === 'vband'
+      && T.state.curve.earth_model === 'vband'
+      && /V 波段/.test(document.getElementById('curve-summary').textContent),
+      JSON.stringify(vbandBody));
+    set('curve-earth-model', 'robinson_hg');
+    fire('curve-earth-model', 'change');
+    await tick(); await tick();
+    const hgBody = fetchCalls.filter((call) => call.url === '/api/curve').pop().body;
+    check('choosing the Robinson HG model switches the phase function',
+      hgBody.earthshine_model === 'robinson_hg'
+      && T.state.curve.earth_phase_model === 'hg'
+      && /HG/.test(document.getElementById('curve-summary').textContent));
+    set('curve-earth-model', 'simulation');
+    fire('curve-earth-model', 'change');
+    await tick(); await tick();
 
     // The Moon's year button is gone; the Sun keeps it.
     set('curve-kind', 'moon8');
@@ -3636,15 +3900,26 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
 
     // Double-clicking an axis title asks for a new one.
     T.drawCurve();
-    sandbox.window.prompt = () => '自定义 X 轴';
+    let promptDefault = '';
+    sandbox.window.prompt = (_label, current) => {
+      promptDefault = current;
+      return '自定义 X 轴';
+    };
     const xTitle = T.state.curveTitleBoxes.find((box) => box.key === 'x');
     document.getElementById('curve-canvas').fire('dblclick', {
       clientX: xTitle && xTitle.x + 2, clientY: xTitle && xTitle.y + 2,
     });
+    check('double-clicking the X axis title offers its default wording',
+      /方位角/.test(promptDefault), promptDefault);
     check('double-clicking the X axis title edits it',
       T.state.curveTitles.x === '自定义 X 轴', String(T.state.curveTitles.x));
-    sandbox.window.prompt = () => '自定义主标题';
+    sandbox.window.prompt = (_label, current) => {
+      promptDefault = current;
+      return '自定义主标题';
+    };
     fire('curve-heading', 'dblclick', { preventDefault() {} });
+    check('the main-title prompt starts from the default chart title',
+      /月亮8字/.test(promptDefault), promptDefault);
     check('double-clicking the main title edits it',
       document.getElementById('curve-heading').textContent === '自定义主标题',
       document.getElementById('curve-heading').textContent);
@@ -3663,25 +3938,408 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('curve-show-current', true);
     fire('curve-show-current', 'change');
 
-    // Sun colour switch.
+    // 彩色 merged into the point style's 自动上色, and the default point is white.
     set('curve-kind', 'sun8');
     fire('curve-kind', 'change');
     await tick(); await tick();
-    const sunCtx = document.getElementById('curve-canvas').getContext('2d');
-    sunCtx.drawn.texts.length = 0;
-    set('curve-colour', false);
-    fire('curve-colour', 'change');
-    T.drawCurve();
-    check('the Sun curve can be drawn in one colour',
-      sunCtx.drawn.texts.some((text) => text.text === '单色'));
-    set('curve-colour', true);
-    fire('curve-colour', 'change');
+    check('the default sun point colour is white',
+      T.curveStyleFor('sun8', 'track').pointColor === '#ffffff');
+    check('自动上色 is the only colour switch left',
+      !!document.getElementById('curve-series-point-auto'));
 
+    // Earthshine: the brightness-ratio overlay is an optional second line.
+    set('curve-kind', 'earthshine');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    set('curve-show-ratio', true);
+    fire('curve-show-ratio', 'change');
+    const ratioSpecs = T.curveSeriesSpecs(T.state.curve, T.curveOptions());
+    check('the earthshine chart can add the brightness-ratio line',
+      ratioSpecs.length === 2 && ratioSpecs[1].key === 'ratio' &&
+      ratioSpecs[1].points.some((point) => Number.isFinite(point.y)));
+    const ratioCtx = document.getElementById('curve-canvas').getContext('2d');
+    ratioCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the ratio overlay carries its own axis and title',
+      ratioCtx.drawn.texts.some((text) => text.text.includes('月面 / 地照亮度比')));
+    set('curve-series', 'ratio');
+    fire('curve-series', 'change');
+    set('curve-series-color', '#ff8800');
+    fire('curve-series-color', 'change');
+    const ratioStyle = T.curveStyleFor('earthshine', 'ratio');
+    check('the ratio line can be selected and styled without jumping back',
+      document.getElementById('curve-series').value === 'ratio'
+      && T.state.curveSeriesKey === 'ratio'
+      && ratioStyle.lineColor === '#ff8800');
+    check('the ratio label is an individual movable legend row',
+      T.state.curveTextBoxes.some((box) => box.key === 'legend:ratio'));
+    const ratioLabel = T.state.curveTextBoxes.find(
+      (box) => box.key === 'legend:ratio');
+    document.getElementById('curve-canvas').fire('pointerdown', {
+      clientX: ratioLabel.x + 2, clientY: ratioLabel.y + 2,
+      preventDefault() {}, stopPropagation() {},
+    });
+    document.dispatchEvent({ type: 'pointermove',
+      clientX: ratioLabel.x + 42, clientY: ratioLabel.y + 18 });
+    document.dispatchEvent({ type: 'pointerup' });
+    check('the ratio label can be moved on its own',
+      !!T.state.curveText['legend:ratio'],
+      JSON.stringify(T.state.curveText['legend:ratio']));
+    sandbox.window.prompt = () => '自定义亮度比';
+    const movedRatioLabel = T.state.curveTextBoxes.find(
+      (box) => box.key === 'legend:ratio');
+    document.getElementById('curve-canvas').fire('dblclick', {
+      clientX: movedRatioLabel.x + 2, clientY: movedRatioLabel.y + 2,
+    });
+    check('double-clicking the ratio label edits its wording',
+      T.state.curveLabels['legend:ratio'] === '自定义亮度比',
+      String(T.state.curveLabels['legend:ratio']));
+    const rightTitle = T.state.curveTitleBoxes.find((box) => box.key === 'right');
+    sandbox.window.prompt = () => '自定义右轴';
+    document.getElementById('curve-canvas').fire('dblclick', {
+      clientX: rightTitle.x + 2, clientY: rightTitle.y + 2,
+    });
+    check('double-clicking the right axis title edits it',
+      T.state.curveTitles.right === '自定义右轴',
+      String(T.state.curveTitles.right));
+    sandbox.window.prompt = undefined;
+
+    // The range panel chooses which line's axis is being pinned.
+    const rangeSelect = document.getElementById('curve-range-series');
+    const rangeValues = rangeSelect.options.map((option) => option.value);
+    check('the range panel offers every overlaid line',
+      rangeValues.includes('earthshine') && rangeValues.includes('ratio'),
+      rangeValues.join(','));
+    set('curve-range-series', 'ratio');
+    fire('curve-range-series', 'change');
+    check('selecting the ratio line updates the range target',
+      T.state.curveRangeSeriesKey === 'ratio');
+    set('curve-xmin', 0);
+    set('curve-xmax', 180);
+    set('curve-ymin', 1);
+    set('curve-ymax', 1e12);
+    T.curveApplyLimits();
+    check('the right ratio axis can be pinned independently',
+      T.state.curveRatioRange
+      && Math.abs(T.state.curveRatioRange.min) < 1e-9
+      && Math.abs(T.state.curveRatioRange.max - 12) < 1e-9,
+      JSON.stringify(T.state.curveRatioRange));
+    set('curve-range-series', 'earthshine');
+    fire('curve-range-series', 'change');
+    check('the range target can switch back to the left axis',
+      T.state.curveRangeSeriesKey === 'earthshine');
+    T.curveResetView();
+    check('复位视角 also releases the pinned ratio range',
+      T.state.curveRatioRange === null);
+    set('curve-show-ratio', false);
+    fire('curve-show-ratio', 'change');
+
+    // Per-line styling: hiding the line must leave the points alone.
+    set('curve-kind', 'moon8');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const trackStyle = T.curveStyleFor('moon8', 'track');
+    set('curve-series-line', false);
+    fire('curve-series-line', 'change');
+    check('a line can be hidden while its data points stay',
+      trackStyle.line === false && trackStyle.points === true);
+    set('curve-series-line', true);
+    set('curve-series-color', '#123456');
+    set('curve-series-width', 3.2);
+    set('curve-series-dash', 'dotted');
+    set('curve-series-point-size', 5);
+    set('curve-series-point-color', '#abcdef');
+    set('curve-series-point-auto', false);
+    set('curve-series-point-shape', 'diamond');
+    set('curve-series-point-hollow', true);
+    for (const id of ['curve-series-line', 'curve-series-color',
+                      'curve-series-width', 'curve-series-dash',
+                      'curve-series-point-size', 'curve-series-point-color',
+                      'curve-series-point-auto', 'curve-series-point-shape',
+                      'curve-series-point-hollow']) {
+      fire(id, 'change');
+    }
+    check('each line keeps its own colour, width, dash and point format',
+      trackStyle.lineColor === '#123456' && trackStyle.lineWidth === 3.2
+      && trackStyle.dash === 'dotted' && trackStyle.pointSize === 5
+      && trackStyle.pointColor === '#abcdef' && trackStyle.pointAuto === false
+      && trackStyle.pointShape === 'diamond' && trackStyle.pointHollow === true,
+      JSON.stringify(trackStyle));
+
+    // New layout: secondary controls live in two toggled panels.
+    check('the style and range panels start tucked away',
+      document.getElementById('curve-style').hidden === true
+      && document.getElementById('curve-limits').hidden === true);
+    fire('curve-style-toggle', 'click');
+    check('the style button opens its panel',
+      document.getElementById('curve-style').hidden === false
+      && document.getElementById('curve-style-toggle')
+        .getAttribute('aria-pressed') === 'true');
+    fire('curve-limits-toggle', 'click');
+    check('opening the range panel closes the style panel',
+      document.getElementById('curve-style').hidden === true
+      && document.getElementById('curve-limits').hidden === false);
+    fire('curve-limits-toggle', 'click');
+
+    // One geometry chart, with the reader choosing both axes.
+    set('curve-kind', 'geometry');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const geoBody = fetchCalls.filter((call) => call.url === '/api/curve').pop().body;
+    check('the geometry chart asks for lunar geometry samples',
+      geoBody.kind === 'geometry' && geoBody.step_minutes === 120 &&
+      T.state.curve.kind === 'geometry');
+    check('the geometry chart offers 选择本年',
+      document.getElementById('curve-this-year').hidden === false);
+    set('curve-xaxis', 'phase');
+    set('curve-yaxis', 'altitude');
+    fire('curve-xaxis', 'change');
+    fire('curve-yaxis', 'change');
+    const geoCtx = document.getElementById('curve-canvas').getContext('2d');
+    geoCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the geometry chart labels the chosen axes',
+      geoCtx.drawn.texts.some((text) => text.text.includes('高度角'))
+      && geoCtx.drawn.texts.some((text) => text.text.includes('相位角')));
+    const geoSettings = T.curveOptions();
+    const geoSpecs = T.curveSeriesSpecs(T.state.curve, geoSettings);
+    check('the geometry chart plots the chosen quantities',
+      geoSpecs.length === 1 && geoSpecs[0].key === 'geometry'
+      && geoSpecs[0].points.length > 0,
+      JSON.stringify(geoSettings));
+    set('curve-xaxis', 'time');
+    fire('curve-xaxis', 'change');
+    geoCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the geometry chart can plot against time',
+      geoCtx.drawn.texts.some((text) => text.text.includes('时间')));
+    set('curve-yaxis', 'diameter');
+    fire('curve-yaxis', 'change');
+    geoCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the apparent-diameter quantity can be the Y axis',
+      geoCtx.drawn.texts.some((text) => text.text.includes('视直径')));
+    set('curve-reverse-x', true);
+    fire('curve-reverse-x', 'change');
+    set('curve-reverse-y', true);
+    fire('curve-reverse-y', 'change');
+    check('both axes can be reversed',
+      T.curveOptions().reverseX === true && T.curveOptions().reverseY === true);
+    set('curve-reverse-x', false);
+    fire('curve-reverse-x', 'change');
+    set('curve-reverse-y', false);
+    fire('curve-reverse-y', 'change');
+
+    // Libration is now only the longitude-latitude phase plot.
+    set('curve-kind', 'libration');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    check('the libration chart is the phase plot only',
+      document.getElementById('curve-axis').hidden === true);
+    const librationSpecs = T.curveSeriesSpecs(T.state.curve, T.curveOptions());
+    check('the libration phase plot uses longitude and latitude as x and y',
+      librationSpecs.length === 1 && librationSpecs[0].key === 'phase'
+      && librationSpecs[0].points.every((point) => Number.isFinite(point.x)
+        && Number.isFinite(point.y)));
+    const librationCtx = document.getElementById('curve-canvas').getContext('2d');
+    librationCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('the libration phase plot labels both axes',
+      librationCtx.drawn.texts.some((text) => text.text.includes('天平动经度'))
+      && librationCtx.drawn.texts.some((text) => text.text.includes('天平动纬度')));
+
+    // Manual axis limits and a manually added text box.
+    set('curve-kind', 'geometry');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    set('curve-xaxis', 'phase');
+    set('curve-yaxis', 'altitude');
+    fire('curve-xaxis', 'change');
+    fire('curve-yaxis', 'change');
+    T.drawCurve();
+    set('curve-xmin', 20);
+    set('curve-xmax', 120);
+    set('curve-ymin', -5);
+    set('curve-ymax', 5);
+    T.curveApplyLimits();
+    check('manual X/Y limits are applied to the view',
+      T.state.curveView.xMin <= 20 && T.state.curveView.xMax >= 120
+      && T.state.curveView.yMin === -5 && T.state.curveView.yMax === 5,
+      JSON.stringify(T.state.curveView));
+    T.curveResetView();
+
+    sandbox.window.prompt = () => '测试文本框';
+    T.curveAddTextBox();
+    check('a text box can be added to the chart',
+      T.state.curveCustomTexts.length === 1
+      && T.state.curveCustomTexts[0].text === '测试文本框');
+    sandbox.window.prompt = undefined;
+
+    // Every drawn annotation has a close button at its top-right.
+    T.drawCurve();
+    const hideBadge = T.state.curveTextBoxes.find((box) => box.key === 'badge');
+    check('a movable annotation has a close button',
+      !!hideBadge && !!hideBadge.close);
+    document.getElementById('curve-canvas').fire('pointerdown', {
+      clientX: hideBadge.close.x + 2, clientY: hideBadge.close.y + 2,
+      preventDefault() {}, stopPropagation() {},
+    });
+    check('the close button hides the annotation',
+      T.state.curveHidden.badge === true);
+    const hiddenCtx = document.getElementById('curve-canvas').getContext('2d');
+    hiddenCtx.drawn.texts.length = 0;
+    T.drawCurve();
+    check('a hidden annotation is not drawn',
+      !T.state.curveTextBoxes.some((box) => box.key === 'badge'));
+    T.curveResetFormat();
+    check('复位格式 restores hidden annotations',
+      !T.state.curveHidden.badge);
+    T.drawCurve();
+    const badgeAgain = T.state.curveTextBoxes.find((box) => box.key === 'badge');
+    document.getElementById('curve-canvas').fire('pointerdown', {
+      clientX: badgeAgain.close.x + 2, clientY: badgeAgain.close.y + 2,
+      preventDefault() {}, stopPropagation() {},
+    });
+    T.curveStyleFor('geometry', 'geometry').lineWidth = 6;
+    T.state.curveText.header = { fx: 0.2, fy: 0.2 };
+    T.curveResetFormat();
+    check('复位格式 restores the default styles and every annotation',
+      T.state.curveHidden.badge !== true
+      && Object.keys(T.state.curveHidden).length === 0
+      && T.state.curveCustomTexts.length === 1
+      && T.state.curveCustomTexts[0].text === '测试文本框'
+      && T.state.curveText.header === undefined
+      && T.curveStyleFor('geometry', 'geometry').lineWidth === 1.4,
+      JSON.stringify({ hidden: T.state.curveHidden, text: T.state.curveText }));
+
+    // The main title is an in-chart label and can be dragged like any other.
+    T.drawCurve();
+    const headerBox = T.state.curveTextBoxes.find((box) => box.key === 'header');
+    check('the main title is a draggable chart label', !!headerBox);
+    document.getElementById('curve-canvas').fire('pointerdown', {
+      clientX: headerBox.x + 2, clientY: headerBox.y + 2,
+      preventDefault() {}, stopPropagation() {},
+    });
+    document.dispatchEvent({ type: 'pointermove',
+      clientX: headerBox.x + 50, clientY: headerBox.y + 24 });
+    document.dispatchEvent({ type: 'pointerup' });
+    check('dragging the main title stores its position',
+      !!T.state.curveText.header, JSON.stringify(T.state.curveText));
+
+    set('curve-kind', 'moon8');
+    fire('curve-kind', 'change');
+    await tick(); await tick();
+    const beforeSave = created.length;
     T.saveCurvePng();
+    const exportCanvas = created.slice(beforeSave).reverse()
+      .find((el) => String(el.tagName).toUpperCase() === 'CANVAS');
+    check('the saved PNG keeps the on-screen chart aspect',
+      !!exportCanvas && Math.abs(
+        exportCanvas.width / exportCanvas.height
+        - document.getElementById('curve-canvas').getBoundingClientRect().width
+        / document.getElementById('curve-canvas').getBoundingClientRect().height)
+      < 0.01,
+      exportCanvas ? `${exportCanvas.width}x${exportCanvas.height}` : 'no canvas');
+    const exportTexts = exportCanvas
+      ? exportCanvas.getContext('2d').drawn.texts.map((text) => text.text) : [];
+    check('the saved PNG carries the chart title and axes, not an export-only summary',
+      exportTexts.filter((text) => text.includes('月亮8字')).length === 2
+      && exportTexts.some((text) => text.includes('方位角'))
+      && !exportTexts.some((text) => text.includes('个样本')),
+      exportTexts.join(' | '));
     check('the curve window can be saved as a PNG',
       document.getElementById('curve-summary').textContent.includes('已保存'),
       document.getElementById('curve-summary').textContent);
+
+    /* 白色 flips the chart paper and changes its own label to 黑色; the
+       animation panel has icon controls and a speed ladder. */
+    fire('curve-white-toggle', 'click');
+    check('白色 flips the chart paper and offers 黑色 back',
+      T.state.curveWhite === true
+      && document.getElementById('curve-white-toggle').textContent === '黑色');
+    fire('curve-white-toggle', 'click');
+    check('clicking 黑色 goes back to white paper',
+      T.state.curveWhite === false
+      && document.getElementById('curve-white-toggle').textContent === '白色');
+    fire('curve-white-toggle', 'click');
+    fire('curve-animation-toggle', 'click');
+    fire('curve-reset-all', 'click');
+    check('全部复位 brings the paper, panels and view back together',
+      T.state.curveWhite === false &&
+      !T.state.curvePanels.animation &&
+      document.getElementById('curve-animation').hidden === true);
+    fire('curve-animation-toggle', 'click');
+    check('the animation panel opens',
+      document.getElementById('curve-animation').hidden === false);
+    fire('curve-anim-play', 'click');
+    check('显示动画 starts the reveal', T.state.curveAnimation.playing === true);
+    fire('curve-anim-pause' in document ? 'curve-anim-pause' : 'curve-anim-play', 'click');
+    check('播放/暂停 toggles it back', T.state.curveAnimation.playing === false);
+    fire('curve-anim-rewind', 'click');
+    check('退回开头 puts the cursor at zero',
+      T.state.curveAnimation.cursor === 0 && T.state.curveAnimation.started === true);
+    fire('curve-anim-slow', 'click');
+    check('慢速 steps the speed down', T.state.curveAnimation.speed === 0.5);
+    fire('curve-anim-fast', 'click');
+    check('快速 steps it back to 1×', T.state.curveAnimation.speed === 1);
+    check('时间步长 offers the requested ladder',
+      ['t:1', 't:10', 't:15', 't:30', 't:60', 't:600', 't:900',
+       't:1800', 't:3600', 't:86400']
+        .every((value) => [...document.getElementById('curve-anim-step').options]
+          .some((option) => option.value === value)));
+
     fire('curve-close', 'click');
+    /* 实验功能: the little button under the phase strip opens a window with a
+       chart and a table for one lunar surface point. */
+    fire('experiment-open', 'click');
+    await tick(); await tick();
+    check('the experiment window opens from the phase strip',
+      document.getElementById('experiment-backdrop').hidden === false);
+    const expCall = fetchCalls.filter((call) => call.url === '/api/surface-sun').pop();
+    check('it asks the core endpoint for the lunar point',
+      !!expCall && expCall.body.moon_lon !== undefined
+      && expCall.body.moon_lat !== undefined && !!expCall.body.start
+      && !!expCall.body.end,
+      expCall && JSON.stringify(expCall.body));
+    check('the table is filled from the reply',
+      document.getElementById('experiment-rows').children.length > 0,
+      String(document.getElementById('experiment-rows').children.length));
+    check('the chart has something to draw',
+      !!T.state.experiment && T.state.experiment.samples.length > 0);
+    check('its range opens with concrete start and end instants',
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(
+        document.getElementById('experiment-start').value) &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(
+        document.getElementById('experiment-end').value),
+      `${document.getElementById('experiment-start').value} / `
+      + document.getElementById('experiment-end').value);
+    fire('experiment-step-toggle', 'click');
+    check('时间步长 is a collapsible control',
+      document.getElementById('experiment-step-wrap').hidden === false &&
+      document.getElementById('experiment-step-toggle')
+        .getAttribute('aria-expanded') === 'true');
+    check('时间步长 opens a nudge ladder, not a step menu',
+      (html.match(/data-range="experiment"/g) || []).length === 8 &&
+      !/<select[^>]*id="experiment-step"/.test(html));
+    fire('experiment-range-toggle', 'click');
+    check('坐标 opens the axis-range fields',
+      document.getElementById('experiment-range').hidden === false &&
+      document.getElementById('experiment-xmin').value !== '' &&
+      !!document.getElementById('experiment-apply-range') &&
+      !!document.getElementById('experiment-reverse-x') &&
+      !!document.getElementById('experiment-reverse-y'));
+    T.setExperimentSort('altitude');
+    check('表格 headers sort the rows and remember the direction',
+      T.state.experimentSort.key === 'altitude' &&
+      T.state.experimentSort.dir === 1,
+      JSON.stringify(T.state.experimentSort));
+    T.setExperimentSort('altitude');
+    check('clicking the same header again reverses it',
+      T.state.experimentSort.dir === -1,
+      JSON.stringify(T.state.experimentSort));
+    fire('experiment-close', 'click');
+    check('and it closes', document.getElementById('experiment-backdrop').hidden === true);
+
     check('the curve close button hides the window',
       document.getElementById('curve-backdrop').hidden === true);
   }

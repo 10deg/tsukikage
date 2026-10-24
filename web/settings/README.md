@@ -17,7 +17,7 @@
 
 ```json
 {
-  "schema": "moonlib_s-web-settings/1",
+  "schema": "moonlib-web-settings/1",
   "saved_utc": "2026-10-11T05:20:11+00:00",
   "settings": {
     "when": "2026-09-26T20:00",
@@ -49,7 +49,7 @@
 载入时只应用文件里出现的字段，缺的保持当前值——所以一份"只改标注"的小文件也能用。
 
 地貌分类的开关是 `class-` 加分类键（`class-basin`、`class-mare`、`class-crater`、
-`class-rima` …），键的完整列表见 `moonlib_s.annotations.FEATURE_CLASSES`，也可以在命令行看：
+`class-rima` …），键的完整列表见 `moonlib.annotations.FEATURE_CLASSES`，也可以在命令行看：
 
 ```bash
 ./.venv/bin/python tools/preview_annotations.py --list-classes

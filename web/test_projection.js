@@ -116,7 +116,8 @@ const EXPORTS = ['state', 'pixelToLonLat', 'lonLatToPixel', 'projectSelenographi
   'setMirrorMode', 'mirrorMode', 'resizeByEdge', 'moonVector', 'lonLatFromVector',
   'cameraBasis', 'diskSmoothPx', 'smoothImage', 'rulerGeometry', 'rulerText', 'defaultRulerKm',
   'applyLabelEdits', 'labelKey', 'labelEdits', 'labelHidden', 'diskKmPerFramePixel',
-  'regionLonLatToPixel', 'regionPixelToLonLat', 'regionCamera'];
+  'regionLonLatToPixel', 'regionPixelToLonLat', 'regionCamera',
+  'curveProjection', 'curveEqualAspect', 'curveEqualize', 'curveTargetView'];
 
 const { check, near, finish } = createRunner();
 const T = loadApp(sandbox, EXPORTS);
@@ -767,10 +768,10 @@ console.log('');
 }
 
 {
-  /* The render is defined by a physical scale, so its pixel count is derived,
-     not typed; the save pane's pixels only rescale the file. */
+  /* The render is defined by 物理分辨率, so its pixel count is derived, not
+     typed; the save pane's pixels only rescale the file. */
   T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.2, rotationDeg: 0, aspect: 1 };
-  document.getElementById('out-scale').value = '1';
+  document.getElementById('out-kmpx').value = '1';
   const render = T.renderPixels();
   const save = document.getElementById('out-px');
   save.value = '4000';
@@ -985,8 +986,8 @@ console.log('');
   const boxSize = 2 * Math.max(box.halfW, box.halfH);
 
   const fit = T.magnifierView(200, 200);
-  check('the window frames the whole selection box',
-    fit.fit && near(Math.max(fit.halfW, fit.halfH) * 2 * 1.08 * fit.scale, 198, 1e-6),
+  check('the window frames exactly the selection box',
+    fit.fit && near(Math.max(fit.halfW, fit.halfH) * 2 * fit.scale, 198, 1e-6),
     `${fit.halfW}/${fit.halfH} at ${fit.scale}`);
   check('and is centred on the box, not on the pointer',
     near(fit.centreX, box.centre.x, 1e-9) && near(fit.centreY, box.centre.y, 1e-9),
@@ -1265,6 +1266,44 @@ console.log('');
       T.drawDiskMarks(off, 13, disk);
       return quiet.strokes === 0 && quiet.fills === 0 && quiet.texts.length === 0;
     })());
+}
+
+console.log('');
+console.log('curve axes');
+{
+  const plot = { x: 10, y: 20, w: 200, h: 100 };
+  const view = { xMin: 0, xMax: 20, yMin: -5, yMax: 5 };
+  const normal = T.curveProjection(plot, view, {});
+  check('the normal x axis grows to the right',
+    near(normal.x(0), 10) && near(normal.x(20), 210));
+  check('the normal y axis grows upwards',
+    near(normal.y(5), 20) && near(normal.y(-5), 120));
+  check('the inverse projection returns the same values',
+    near(normal.xv(normal.x(7)), 7) && near(normal.yv(normal.y(2)), 2));
+  const reversed = T.curveProjection(plot, view,
+    { reverseX: true, reverseY: true });
+  check('reversing X puts the lower value on the right',
+    near(reversed.x(0), 210) && near(reversed.x(20), 10));
+  check('reversing Y puts the lower value at the top',
+    near(reversed.y(-5), 20) && near(reversed.y(5), 120));
+  check('the inverse projection still works when reversed',
+    near(reversed.xv(reversed.x(7)), 7) && near(reversed.yv(reversed.y(-2)), -2));
+
+  /* Sky charts (and the libration phase plot) must use one degree per pixel;
+     fitting a wide plot grows the vertical range, not the curve. */
+  const sky = { xMin: 90, xMax: 110, yMin: 35, yMax: 37 };
+  T.curveEqualize(sky, 4.0);
+  check('a sky view is equalised to the plot aspect',
+    near((sky.xMax - sky.xMin) / (sky.yMax - sky.yMin), 4.0),
+    `${sky.xMax - sky.xMin} / ${sky.yMax - sky.yMin}`);
+  check('only the short axis grows',
+    near(sky.xMin, 90) && near(sky.xMax, 110) && sky.yMin < 35 && sky.yMax > 37);
+  check('the equal-aspect switch names the sky and libration-phase charts',
+    T.curveEqualAspect({ kind: 'moon8' })
+    && T.curveEqualAspect({ kind: 'sun8' })
+    && T.curveEqualAspect({ kind: 'libration' })
+    && !T.curveEqualAspect({ kind: 'geometry' })
+    && !T.curveEqualAspect({ kind: 'earthshine' }));
 }
 
 finish();

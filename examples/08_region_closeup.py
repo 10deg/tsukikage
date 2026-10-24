@@ -26,8 +26,8 @@ import argparse
 import time
 from pathlib import Path
 
-from _cli import add_output_argument, moonlib_s, shown  # noqa: E402
-from moonlib_s.models import MoonRenderSettings  # noqa: E402
+from _cli import add_output_argument, moonlib, shown  # noqa: E402
+from moonlib.models import MoonRenderSettings  # noqa: E402
 
 # 克拉维斯环形山：直径 231 km，是月面南半球最大的环形山之一，
 # 坑底那道由大到小排列的撞击坑链是它的标志。
@@ -55,14 +55,14 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    site = moonlib_s.Observer(lat=args.lat, lon=args.lon, name="示例观测点")
-    view = moonlib_s.view_geometry(site, args.at)
+    site = moonlib.Observer(lat=args.lat, lon=args.lon, name="示例观测点")
+    view = moonlib.view_geometry(site, args.at)
 
-    feature = moonlib_s.find_feature(args.feature)
+    feature = moonlib.find_feature(args.feature)
     target_lon = feature.lon_deg if args.target_lon is None else args.target_lon
     target_lat = feature.lat_deg if args.target_lat is None else args.target_lat
     if args.span_km is None:
-        span = moonlib_s.required_sky_span_km(
+        span = moonlib.required_sky_span_km(
             view, target_lon, target_lat, feature.diameter_km, margin=1.25
         )
         how = f"自动取景 / auto, fits {feature.diameter_km:.0f} km"
@@ -77,8 +77,8 @@ def main() -> int:
 
     # 两套高程：烘焙好的整月面金字塔（ldem_64，约 474 m/px）
     # 与本地完整 LOLA 全球高程按需裁出的窗口（256 像素/度，约 118 m/px）。
-    sources = moonlib_s.global_dem_sources()
-    coarse = moonlib_s.open_terrain()
+    sources = moonlib.global_dem_sources()
+    coarse = moonlib.open_terrain()
     fine = None
     print("  本地高程 / local DEMs:")
     for path, km in sources:
@@ -102,23 +102,23 @@ def main() -> int:
         try:
             # Cheap pre-flight: region_geometry is what rejects a far-side
             # target, so asking it first avoids paying for a doomed render.
-            moonlib_s.region_geometry(view, target_lon, target_lat, span, terrain=terrain)
-        except moonlib_s.MoonlibError as error:
+            moonlib.region_geometry(view, target_lon, target_lat, span, terrain=terrain)
+        except moonlib.MoonlibError as error:
             print(f"  {tag}: {error}")
             continue
 
         started = time.time()
-        render = moonlib_s.render_region(
+        render = moonlib.render_region(
             view, target_lon, target_lat, span_km=span,
             settings=settings, terrain=terrain,
         )
         elapsed = time.time() - started
 
         print(f"\n  === {tag} ===")
-        print(moonlib_s.reporting.format_region_summary(render))
+        print(moonlib.reporting.format_region_summary(render))
         print(f"  渲染 / render         : {elapsed:.1f} s")
 
-        path = moonlib_s.plotting.write_radiance_png(
+        path = moonlib.plotting.write_radiance_png(
             render, out_dir / f"{feature.name_en.lower()}_{tag}.png"
         )
         print(f"  wrote {shown(path)}")
