@@ -9315,11 +9315,10 @@ function drawExperiment() {
     ? value - view.azMin : view.azMax - value)
     / (view.azMax - view.azMin)) * plot.h;
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(plot.x, plot.y, plot.w, plot.h);
-  ctx.clip();
-
+  // No clip around this block: the tick labels sit just outside the plot
+  // rectangle (the clock under the x axis, altitudes to its left, azimuths to
+  // its right).  A clip here erased every one of them and left an unlabelled
+  // black rectangle.
   // grid: the x ticks are clock readings; altitude on the left, azimuth on the
   // right.  Both grids are thin, so two scales over one rectangle still read.
   ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
@@ -9329,6 +9328,9 @@ function drawExperiment() {
     const px = x(v);
     ctx.strokeStyle = 'rgba(120,134,156,.14)';
     ctx.beginPath(); ctx.moveTo(px, plot.y); ctx.lineTo(px, plot.y + plot.h); ctx.stroke();
+    ctx.strokeStyle = 'rgba(150,165,185,.55)';
+    ctx.beginPath(); ctx.moveTo(px, plot.y + plot.h);
+    ctx.lineTo(px, plot.y + plot.h + 4); ctx.stroke();
     const stamp = new Date(start + (v + offset) * 3600000);
     const label = view.xMax - view.xMin > 48
       ? `${stamp.getUTCMonth() + 1}/${stamp.getUTCDate()}`
@@ -9347,6 +9349,8 @@ function drawExperiment() {
     ctx.strokeStyle = Math.abs(value) < 1e-9
       ? 'rgba(150,165,185,.30)' : 'rgba(120,134,156,.12)';
     ctx.beginPath(); ctx.moveTo(plot.x, py); ctx.lineTo(plot.x + plot.w, py); ctx.stroke();
+    ctx.strokeStyle = 'rgba(224,175,104,.65)';
+    ctx.beginPath(); ctx.moveTo(plot.x - 4, py); ctx.lineTo(plot.x, py); ctx.stroke();
     ctx.fillStyle = '#e0af68';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
@@ -9359,12 +9363,14 @@ function drawExperiment() {
     const py = yAz(value);
     ctx.strokeStyle = 'rgba(122,162,247,.12)';
     ctx.beginPath(); ctx.moveTo(plot.x, py); ctx.lineTo(plot.x + plot.w, py); ctx.stroke();
+    ctx.strokeStyle = 'rgba(122,162,247,.65)';
+    ctx.beginPath(); ctx.moveTo(plot.x + plot.w, py);
+    ctx.lineTo(plot.x + plot.w + 4, py); ctx.stroke();
     ctx.fillStyle = '#7aa2f7';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(`${Number(value.toFixed(1))}°`, plot.x + plot.w + 7, py);
   }
-  ctx.restore();
   ctx.strokeStyle = 'rgba(150,165,185,.34)';
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 
@@ -9563,18 +9569,57 @@ function closeExperiment() {
   $('experiment-open').focus();
 }
 
+/** The pointer position in the experiment canvas' CSS pixels. */
+function experimentCanvasPos(event) {
+  const canvas = $('experiment-canvas');
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX || 0) - rect.left,
+    y: (event.clientY || 0) - rect.top,
+  };
+}
+
 /** The canvas point, and whether it is inside the plot rectangle. */
 function experimentPlotPoint(event) {
   const canvas = $('experiment-canvas');
   const plot = state.experimentLayout;
   if (!canvas || !plot) return null;
-  const rect = canvas.getBoundingClientRect();
-  const x = (event.clientX || 0) - rect.left;
-  const y = (event.clientY || 0) - rect.top;
-  if (x < plot.x || x > plot.x + plot.w || y < plot.y || y > plot.y + plot.h) {
+  const point = experimentCanvasPos(event);
+  if (!point) return null;
+  if (point.x < plot.x || point.x > plot.x + plot.w
+      || point.y < plot.y || point.y > plot.y + plot.h) {
     return null;
   }
-  return { x, y, plot };
+  return { ...point, plot };
+}
+
+/** Which plot border is under the pointer, if any.
+ *
+ *  The curve window lets the reader pull an edge to change the view; the
+ *  experiment chart gets the same gesture here.  A corner is resolved to the
+ *  nearer side, which is also what the cursor should say.
+ */
+function experimentEdgeAt(point) {
+  const plot = state.experimentLayout;
+  if (!plot || !point) return null;
+  const slack = 8;
+  const insideX = point.x >= plot.x - slack
+    && point.x <= plot.x + plot.w + slack;
+  const insideY = point.y >= plot.y - slack
+    && point.y <= plot.y + plot.h + slack;
+  if (!insideX || !insideY) return null;
+  const left = Math.abs(point.x - plot.x);
+  const right = Math.abs(point.x - (plot.x + plot.w));
+  const top = Math.abs(point.y - plot.y);
+  const bottom = Math.abs(point.y - (plot.y + plot.h));
+  const nearX = Math.min(left, right) <= slack;
+  const nearY = Math.min(top, bottom) <= slack;
+  if (nearX && (!nearY || Math.min(left, right) <= Math.min(top, bottom))) {
+    return left <= right ? 'left' : 'right';
+  }
+  if (nearY) return top <= bottom ? 'top' : 'bottom';
+  return null;
 }
 
 /** Zoom both axes about the pointer, then redraw. */
@@ -9610,9 +9655,23 @@ function experimentWheel(event) {
 }
 
 function experimentPointerDown(event) {
+  if (event.button !== 0) return;
+  const position = experimentCanvasPos(event);
+  const edge = experimentEdgeAt(position);
+  if (edge) {
+    state.experimentDrag = {
+      mode: 'edge', edge,
+      x: event.clientX, y: event.clientY,
+      view: { ...experimentView() },
+    };
+    $('experiment-canvas').setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
   const point = experimentPlotPoint(event);
-  if (!point || event.button !== 0) return;
+  if (!point) return;
   state.experimentDrag = {
+    mode: 'pan',
     x: event.clientX, y: event.clientY,
     view: { ...experimentView() },
   };
@@ -9620,11 +9679,62 @@ function experimentPointerDown(event) {
   event.preventDefault();
 }
 
-function experimentPointerMove(event) {
-  const drag = state.experimentDrag;
-  if (!drag) return;
+/** Pull one border: the opposite border stays fixed. */
+function experimentResizeByEdge(drag, point) {
   const plot = state.experimentLayout;
   if (!plot) return;
+  const view = { ...drag.view };
+  const fracX = Math.max(0, Math.min(1, (point.x - plot.x) / plot.w));
+  const fracY = Math.max(0, Math.min(1, (point.y - plot.y) / plot.h));
+  const reverseX = $('experiment-reverse-x') && $('experiment-reverse-x').checked;
+  const reverseY = $('experiment-reverse-y') && $('experiment-reverse-y').checked;
+  if (drag.edge === 'left' || drag.edge === 'right') {
+    const value = reverseX
+      ? view.xMax - fracX * (view.xMax - view.xMin)
+      : view.xMin + fracX * (view.xMax - view.xMin);
+    if (drag.edge === 'left') {
+      if (reverseX) view.xMax = value; else view.xMin = value;
+    } else if (reverseX) view.xMin = value; else view.xMax = value;
+  } else {
+    const alt = reverseY
+      ? view.altMin + fracY * (view.altMax - view.altMin)
+      : view.altMax - fracY * (view.altMax - view.altMin);
+    const az = reverseY
+      ? view.azMin + fracY * (view.azMax - view.azMin)
+      : view.azMax - fracY * (view.azMax - view.azMin);
+    if (drag.edge === 'top') {
+      if (reverseY) { view.altMin = alt; view.azMin = az; }
+      else { view.altMax = alt; view.azMax = az; }
+    } else if (reverseY) {
+      view.altMax = alt; view.azMax = az;
+    } else {
+      view.altMin = alt; view.azMin = az;
+    }
+  }
+  state.experimentView = experimentClampView(view);
+  drawExperiment();
+  syncExperimentRangeInputs();
+}
+
+function experimentPointerMove(event) {
+  const drag = state.experimentDrag;
+  if (!drag) {
+    const edge = experimentEdgeAt(experimentCanvasPos(event));
+    const canvas = $('experiment-canvas');
+    if (canvas) {
+      canvas.style.cursor = edge === 'left' || edge === 'right'
+        ? 'ew-resize' : edge ? 'ns-resize' : 'crosshair';
+    }
+    return;
+  }
+  const plot = state.experimentLayout;
+  if (!plot) return;
+  if (drag.mode === 'edge') {
+    const point = experimentCanvasPos(event);
+    if (point) experimentResizeByEdge(drag, point);
+    event.preventDefault();
+    return;
+  }
   const dx = (event.clientX || 0) - drag.x;
   const dy = (event.clientY || 0) - drag.y;
   const xSpan = drag.view.xMax - drag.view.xMin;
@@ -9651,6 +9761,12 @@ function experimentPointerMove(event) {
 
 function experimentPointerUp() {
   state.experimentDrag = null;
+}
+
+function experimentPointerLeave() {
+  if (state.experimentDrag) return;
+  const canvas = $('experiment-canvas');
+  if (canvas) canvas.style.cursor = 'default';
 }
 
 /* ── window resizing and dragging ──────────────────────────────────────── */
@@ -11848,9 +11964,41 @@ function fillMoonInfo(g) {
 function loadImage(dataUrl) {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = dataUrl;
+    let objectUrl = null;
+    const release = () => {
+      if (objectUrl) {
+        if (typeof URL !== 'undefined' && URL.revokeObjectURL) {
+          URL.revokeObjectURL(objectUrl);
+        }
+        objectUrl = null;
+      }
+    };
+    img.onload = () => { release(); resolve(img); };
+    // Safari refuses a very large PNG delivered as a data: URL (the
+    // 10 000 px high-resolution frame crosses its data-URL/image limit and
+    // fires onerror, which is what surfaced as "[object Event]").  A Blob URL
+    // carries the same bytes without that ceiling; WebKit loads 10 000 x 10 000
+    // through it.  Keep the data URL path for environments without Blob URLs.
+    img.onerror = () => {
+      release();
+      reject(new Error('图像解码失败：返回的图片过大或格式无效'));
+    };
+    try {
+      // Small pictures are cheaper through the direct data URL (and the test
+      // harness understands them); only the multi-megabyte frames need the
+      // Blob detour that lifts Safari's limit.
+      const large = String(dataUrl).length > 8_000_000;
+      if (large && String(dataUrl).startsWith('data:')
+          && typeof URL !== 'undefined' && URL.createObjectURL) {
+        objectUrl = URL.createObjectURL(dataUrlToBlob(dataUrl));
+        img.src = objectUrl;
+      } else {
+        img.src = dataUrl;
+      }
+    } catch (error) {
+      release();
+      reject(error);
+    }
   });
 }
 
@@ -15553,6 +15701,7 @@ function init() {
   $('experiment-canvas').addEventListener('pointermove', experimentPointerMove);
   $('experiment-canvas').addEventListener('pointerup', experimentPointerUp);
   $('experiment-canvas').addEventListener('pointercancel', experimentPointerUp);
+  $('experiment-canvas').addEventListener('pointerleave', experimentPointerLeave);
   $('experiment-canvas').addEventListener('dblclick', resetExperimentView);
   $('curve-refresh').addEventListener('click', refreshCurve);
   $('curve-reset').addEventListener('click', curveResetView);

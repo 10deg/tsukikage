@@ -4306,6 +4306,29 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       String(document.getElementById('experiment-rows').children.length));
     check('the chart has something to draw',
       !!T.state.experiment && T.state.experiment.samples.length > 0);
+    {
+      const expCtx = document.getElementById('experiment-canvas').getContext('2d');
+      const texts = expCtx.drawn.texts.map((entry) => entry.text);
+      check('the left chart shows its coordinate ticks and axis titles',
+        texts.some((text) => text.includes('太阳高度')) &&
+        texts.some((text) => /^\d{2}:\d{2}$/.test(text)) &&
+        texts.some((text) => /°$/.test(text)),
+        texts.slice(0, 8).join(' | '));
+      const layout = T.state.experimentLayout;
+      const beforeX = T.state.experimentView.xMin;
+      fire('experiment-canvas', 'pointerdown', {
+        button: 0, pointerId: 1, clientX: layout.x + 1,
+        clientY: layout.y + layout.h / 2, preventDefault() {},
+      });
+      fire('experiment-canvas', 'pointermove', {
+        clientX: layout.x + 40, clientY: layout.y + layout.h / 2,
+        preventDefault() {},
+      });
+      fire('experiment-canvas', 'pointerup', {});
+      check('dragging the left border changes the X range',
+        T.state.experimentView.xMin > beforeX,
+        `${beforeX} -> ${T.state.experimentView.xMin}`);
+    }
     check('its range opens with concrete start and end instants',
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(
         document.getElementById('experiment-start').value) &&
