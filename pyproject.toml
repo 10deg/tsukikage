@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # ``moonlib``; the old ``moonlib_s``/``moonlib-s`` split existed only to avoid
 # a publishing-time name clash that cannot happen here.
 name = "moonlib"
-version = "1.5.1"
+version = "1.5.2"
 description = "Offline lunar computation library: position, phases, rise/set, libration, crescents and limb-target prediction from local JPL SPICE kernels"
 readme = "README.md"
 requires-python = ">=3.9"

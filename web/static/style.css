@@ -2451,7 +2451,13 @@ h2 .mini.curve-open:hover {
   background: var(--viewport);
   overflow: hidden;
 }
-.experiment-plot > canvas { display: block; width: 100%; height: 100%; }
+.experiment-plot > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
 .experiment-table-wrap {
   min-width: 0;
   min-height: 0;
@@ -2460,6 +2466,13 @@ h2 .mini.curve-open:hover {
   border-radius: 4px;
 }
 .experiment-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.experiment-table tbody tr { cursor: pointer; }
+.experiment-table tbody tr:hover { background: rgba(120,134,156,.10); }
+.experiment-table tbody tr.selected {
+  background: rgba(224,175,104,.16);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.experiment-table tbody tr.selected td { color: var(--ink); }
 .experiment-table th, .experiment-table td {
   padding: 2px 6px;
   border-bottom: 1px solid rgba(120,134,156,.18);

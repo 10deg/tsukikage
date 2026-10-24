@@ -46,8 +46,8 @@ is why the umbra radius carries the conventional 2% allowance.
 ``jewelled_handle``
     The "Jewelled Handle" (also called the Golden Handle): the bright arc where
     the rising Sun first clears the Montes Jura, near Promontorium Laplace.
-    The provisional anchor is 36.54°W, 44.25°N and the provisional solar
-    altitude band is -0.5°–2.0°, best 0.5°.  First described by Patrick Moore.
+    The anchor is 36.60°W, 43.39°N and the solar altitude band is -2.5°–2.0°
+    with 0.5° as the best moment.  First described by Patrick Moore.
 """
 
 from __future__ import annotations
@@ -143,11 +143,11 @@ LXV_ANCHOR_LON_DEG = -0.5
 LXV_ANCHOR_LAT_DEG = -58.54
 
 #: The Jewelled Handle (the Golden Handle), near Promontorium Laplace on the
-#: Montes Jura.  The anchor and the band are the provisional ones requested for
-#: the first test; the best moment is the middle of the band.
-JEWELLED_HANDLE_ANCHOR_LON_DEG = -36.54
-JEWELLED_HANDLE_ANCHOR_LAT_DEG = 44.25
-JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG = -0.5
+#: Montes Jura.  The anchor and the band are the ones the observer supplied for
+#: this release; 0.5° remains the best moment, inside the wider band.
+JEWELLED_HANDLE_ANCHOR_LON_DEG = -36.60
+JEWELLED_HANDLE_ANCHOR_LAT_DEG = 43.39
+JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG = -2.5
 JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG = 2.0
 JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = 0.5
 
@@ -451,8 +451,15 @@ def _xvl_colongitude_deg(et: float) -> float:
 
 def _altitude_windows(altitude_fn, start: float, end: float,
                       minimum: float, maximum: float,
-                      best_target: float) -> List[Tuple[float, float, float]]:
-    """``(start, end, best)`` for every solar-altitude window in a band."""
+                      best_target: float,
+                      limit_hours: float = 12.0) -> List[Tuple[float, float, float]]:
+    """``(start, end, best)`` for every solar-altitude window in a band.
+
+    *limit_hours* bounds the search for the upper crossing after the lower one.
+    Twelve hours is enough for the half-degree X/V and L bands; a wider band at
+    a slow surface-sun rate -- the Jewelled Handle's -2.5°…2° -- needs more, or
+    its window would be cut off before the Sun reaches the upper edge.
+    """
     if end <= start + 60.0:
         return []
     windows: List[Tuple[float, float, float]] = []
@@ -467,7 +474,7 @@ def _altitude_windows(altitude_fn, start: float, end: float,
                 lambda et: altitude_fn(et) - minimum,
                 moment, following, tol=1e-3,
             )
-            limit = min(end, root + 12.0 * 3600.0)
+            limit = min(end, root + limit_hours * 3600.0)
             upper = altitude_fn(limit)
             if upper <= maximum:
                 # The requested range ends inside the window; report the part
@@ -601,6 +608,7 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
         JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG,
         JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG,
         JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG,
+        limit_hours=24.0,
     ):
         metrics = event_metrics(observer, best)
         metrics["colongitude_deg"] = _xvl_colongitude_deg(best)

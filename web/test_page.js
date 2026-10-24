@@ -44,6 +44,7 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
+  'imageToScreen',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
@@ -2407,6 +2408,62 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       T.state.manualMarks.length === before + 1 &&
       T.state.manualMarks[T.state.manualMarks.length - 1].text === '标记点1',
       JSON.stringify(T.state.manualMarks.slice(-1)));
+    const anchor = T.state.manualMarks[T.state.manualMarks.length - 1];
+    const bodyDisk = document.getElementById('body-disk');
+    const pinned = T.state.manualLayout.disk
+      .find((item) => item.mark.id === anchor.id);
+    check('the anchor has a caption to press', !!pinned,
+      JSON.stringify(T.state.manualLayout.disk));
+    // Re-selecting via the caption used to pull the dot onto the pointer.  A
+    // press and a one-pixel tremor must leave both the pin and the anchor
+    // where they were.
+    const map = T.imageToScreen('disk', 0, 0);
+    const toClient = (fx, fy) => ({
+      x: (map.x + fx * map.scaleX) / map.dpr,
+      y: (map.y + fy * map.scaleY) / map.dpr,
+    });
+    const press = toClient(pinned.label_x + pinned.label_w - 3,
+                           pinned.label_y + 5);
+    bodyDisk.fire('pointerdown', {
+      button: 0, pointerId: 7, clientX: press.x, clientY: press.y,
+      preventDefault() {},
+    });
+    bodyDisk.fire('pointermove', {
+      clientX: press.x + 1, clientY: press.y + 1, preventDefault() {},
+    });
+    bodyDisk.fire('pointerup', {});
+    const afterSelect = T.state.manualLayout.disk
+      .find((item) => item.mark.id === anchor.id);
+    check('re-selecting a manual anchor does not move it',
+      Math.abs(afterSelect.x - pinned.x) < 1
+      && Math.abs(afterSelect.y - pinned.y) < 1,
+      `${pinned.x},${pinned.y} -> ${afterSelect.x},${afterSelect.y}`);
+    check('and the press selected that anchor',
+      T.overlay.selected && T.overlay.selected.kind === 'manual'
+      && T.overlay.selected.id === anchor.id,
+      JSON.stringify(T.overlay.selected));
+    check('the redraw kept the selected ring on the anchor',
+      document.getElementById('labels-disk').getContext('2d').drawn.strokes
+        .includes('rgba(255, 214, 102, .95)'));
+    // A real drag moves the pin by the pointer's displacement, not to the
+    // pointer: the caption's own offset is still the grab offset.
+    bodyDisk.fire('pointerdown', {
+      button: 0, pointerId: 8, clientX: press.x, clientY: press.y,
+      preventDefault() {},
+    });
+    bodyDisk.fire('pointermove', {
+      clientX: press.x + 20, clientY: press.y + 10, preventDefault() {},
+    });
+    bodyDisk.fire('pointerup', {});
+    const afterDrag = T.state.manualLayout.disk
+      .find((item) => item.mark.id === anchor.id);
+    const wantedX = 20 * map.dpr / map.scaleX;
+    const wantedY = 10 * map.dpr / map.scaleY;
+    check('dragging it still moves it by the drag distance',
+      Math.abs(afterDrag.x - pinned.x - wantedX) < 2
+      && Math.abs(afterDrag.y - pinned.y - wantedY) < 2,
+      `${pinned.x},${pinned.y} -> ${afterDrag.x},${afterDrag.y}`
+      + ` (wanted +${wantedX},+${wantedY})`);
     document.getElementById('manual-clear').fire('click');
     check('清空手动标记 removes them all',
       T.state.manualMarks.length === 0 && T.state.manualSeq === 0,
@@ -4314,6 +4371,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         texts.some((text) => /^\d{2}:\d{2}$/.test(text)) &&
         texts.some((text) => /°$/.test(text)),
         texts.slice(0, 8).join(' | '));
+      check('the x ticks carry the date as well as the clock',
+        texts.some((text) => /^\d{2}-\d{2}$/.test(text)),
+        texts.filter((text) => /^\d{2}-\d{2}$/.test(text)).slice(0, 4).join(' | '));
+      check('the horizon is the green line',
+        expCtx.drawn.strokes.includes('#4ade80'),
+        expCtx.drawn.strokes.slice(-8).join(' | '));
       const layout = T.state.experimentLayout;
       const beforeX = T.state.experimentView.xMin;
       fire('experiment-canvas', 'pointerdown', {
@@ -4328,6 +4391,63 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       check('dragging the left border changes the X range',
         T.state.experimentView.xMin > beforeX,
         `${beforeX} -> ${T.state.experimentView.xMin}`);
+      fire('experiment-reset-view', 'click');
+      check('坐标复位 puts the automatic X range back',
+        Math.abs(T.state.experimentView.xMin) < 1e-9,
+        String(T.state.experimentView.xMin));
+      const beforePan = T.state.experimentView.xMin;
+      fire('experiment-canvas', 'pointerdown', {
+        button: 0, pointerId: 2, clientX: layout.x + layout.w / 2,
+        clientY: layout.y + layout.h / 2, preventDefault() {},
+      });
+      fire('experiment-canvas', 'pointermove', {
+        clientX: layout.x + layout.w / 2 + 40,
+        clientY: layout.y + layout.h / 2,
+        preventDefault() {},
+      });
+      fire('experiment-canvas', 'pointerup', {});
+      check('dragging the chart pans it',
+        T.state.experimentView.xMin < beforePan - 0.1,
+        `${beforePan} -> ${T.state.experimentView.xMin}`);
+    }
+    check('坐标复位 is in the window header, not the range panel',
+      (() => {
+        const head = html.indexOf('id="experiment-head"');
+        const end = html.indexOf('</header>', head);
+        const reset = html.indexOf('id="experiment-reset-view"');
+        return head >= 0 && end > head && reset > head && reset < end
+          && !/experiment-range-reset/.test(html);
+      })());
+    check('同步选中时间到主界面 sits right of 取主界面时刻',
+      html.indexOf('id="experiment-to-main"')
+        > html.indexOf('id="experiment-from-main"'));
+    {
+      const body = document.getElementById('experiment-rows');
+      const rowNode = body.children[0];
+      const chosen = T.state.experiment.samples
+        .find((row) => row.when_utc === rowNode.dataset.when);
+      rowNode.fire('click');
+      check('clicking a table row selects it',
+        !!chosen && T.state.experimentSelected
+        && T.state.experimentSelected.when_utc === chosen.when_utc
+        && rowNode.classList.contains('selected'),
+        JSON.stringify(T.state.experimentSelected));
+      check('the chart marks the selected row',
+        document.getElementById('experiment-canvas').getContext('2d')
+          .drawn.strokes.includes('#ffd666')
+        && document.getElementById('experiment-canvas').getContext('2d')
+          .drawn.strokes.includes('#8fb8ff'));
+      const offset = Number(document.getElementById('tz').value) || 0;
+      const wanted = new Date(Date.parse(chosen.when_utc) + offset * 3600000)
+        .toISOString().slice(0, 16);
+      const auto = document.getElementById('auto-refresh');
+      const wasAuto = auto.checked;
+      auto.checked = false;
+      fire('experiment-to-main', 'click');
+      auto.checked = wasAuto;
+      check('同步选中时间到主界面 writes that row\'s instant',
+        document.getElementById('when').value === wanted,
+        `${document.getElementById('when').value} / ${wanted}`);
     }
     check('its range opens with concrete start and end instants',
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(

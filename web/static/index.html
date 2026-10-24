@@ -1689,6 +1689,8 @@
         <span class="en">Surface sun</span></div>
       <div class="sky-head-tools">
         <span class="sky-badge" id="experiment-badge">月面点</span>
+        <button class="ghost" id="experiment-reset-view"
+                title="把两轴范围恢复到自动适配（也可双击左图）">坐标复位</button>
         <button class="ghost" id="experiment-refresh" title="按当前经纬度与时间范围重新计算">重新计算</button>
         <button class="ghost icon" id="experiment-close" title="关闭实验功能" aria-label="关闭">×</button>
       </div>
@@ -1712,6 +1714,8 @@
         <input type="datetime-local" id="experiment-end" step="60">
       </label>
       <button class="ghost mini" id="experiment-from-main" title="同步主界面的日期与时刻">取主界面时刻</button>
+      <button class="ghost mini" id="experiment-to-main"
+              title="把右侧表格里选中那一行的时间设为主界面时间">同步选中时间到主界面</button>
       <button class="ghost mini" id="experiment-step-toggle"
               aria-expanded="false" title="展开或收起时间步长">时间步长</button>
       <button class="ghost mini" id="experiment-range-toggle"
@@ -1740,7 +1744,9 @@
                 title="整个范围往后一个月">+1M</button>
       </span>
       <!-- 坐标 is the same idea as the curve window's limits panel: X and Y
-           limits, reverse axes, apply and reset. -->
+           limits, reverse axes and apply.  The reset itself sits in the
+           window's top-right, where it is reachable without opening this
+           panel. -->
       <span class="experiment-range" id="experiment-range" hidden>
         <label class="check inline" title="把横轴从右向左显示">
           <input type="checkbox" id="experiment-reverse-x">
@@ -1767,8 +1773,6 @@
         </label>
         <button class="ghost mini" id="experiment-apply-range"
                 title="应用输入的坐标范围">应用范围</button>
-        <button class="ghost mini" id="experiment-range-reset"
-                title="恢复自动适配的范围">复位</button>
       </span>
     </div>
     <div class="experiment-body">
@@ -1793,7 +1797,7 @@
     </div>
     <footer class="sky-foot">
       <span id="experiment-summary">—</span>
-      <span class="sky-hint">拖动边框调范围 · 滚轮缩放 · 拖动平移 · 双击复位 · 高度为月面当地地平线以上的角度 · 方位角自当地北向东</span>
+      <span class="sky-hint">点击表格一行在左图标记 · 拖动平移 · 滚轮缩放 · 拖动边框调范围 · 双击复位 · 绿线为地平线 · 高度为月面当地地平线以上的角度 · 方位角自当地北向东</span>
     </footer>
   </div>
 </div>

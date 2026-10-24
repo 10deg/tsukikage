@@ -113,6 +113,7 @@ const state = {
   experimentLayout: null, // plot rectangle of the last paint, in canvas pixels
   experimentDrag: null,  // in-progress pan of the experiment chart
   experimentSort: { key: 'time', dir: 1 }, // table sort: column and direction
+  experimentSelected: null, // row clicked in the table, marked on the chart
   experimentStepOpen: false,
   experimentRangeOpen: false,
   procImageTab: 'imaging', // 成像模拟 / 后期处理 inside the processing group
@@ -3777,9 +3778,16 @@ function overlayDown(viewName, event) {
   const manual = manualHitTest(viewName, point);
   if (manual) {
     selectOverlay({ kind: 'manual', id: manual.mark.id, view: viewName });
+    // Pressing a pin selects it; it must not move it.  The drag remembers where
+    // the pointer *and* the pin were, and moves the pin by the pointer's own
+    // displacement.  Re-seating the dot under the pointer would teleport it
+    // when the press landed on the caption -- the jump a re-selection used to
+    // show.
     overlay.drag = {
       kind: 'manual', view: viewName, id: manual.mark.id, start: point,
-      origin: { lon: manual.mark.lon, lat: manual.mark.lat },
+      startFrame: pointerFramePoint(viewName, event),
+      originFrame: manualFramePoint(viewName, manual.mark),
+      moved: false,
     };
     drawAllLabels();
     paintCoordReadout(viewName);
@@ -3868,7 +3876,22 @@ function overlayMove(event) {
     drag.kind === 'ruler' ? 'disk' : drag.view,
     map, point.x - drag.start.x, point.y - drag.start.y);
   if (drag.kind === 'manual') {
-    const at = pointerLonLat(drag.view, event);
+    // A click is not a drag: until the pointer has really moved, the pin keeps
+    // the position it was found at.  A one-pixel hand tremor must not be a
+    // rearrangement, and a press on the caption must not pull the dot onto it.
+    const moved = Math.hypot(point.x - drag.start.x, point.y - drag.start.y)
+      >= 2 * point.dpr;
+    if (!drag.moved && !moved) return true;
+    drag.moved = true;
+    const frameAt = pointerFramePoint(drag.view, event);
+    if (!frameAt || !drag.startFrame || !drag.originFrame) return true;
+    const size = frameSize(drag.view);
+    const x = Math.max(0, Math.min(size.width - 1,
+      drag.originFrame.x + frameAt.x - drag.startFrame.x));
+    const y = Math.max(0, Math.min(size.height - 1,
+      drag.originFrame.y + frameAt.y - drag.startFrame.y));
+    const at = drag.view === 'disk'
+      ? pixelToLonLat(x, y) : regionPixelToLonLat(x, y);
     if (at) {
       const mark = state.manualMarks.find((item) => item.id === drag.id);
       if (mark) {
@@ -9177,8 +9200,12 @@ function experimentView() {
   return state.experimentView;
 }
 
-/** Keep a typed or zoomed view inside the data's own x span and the physical
- *  ranges of both vertical axes. */
+/** Keep a typed or zoomed view to a sane span.
+ *
+ *  The x axis may be dragged past the sampled span: a reader is allowed to
+ *  leave blank time on the paper, and a selected table row is allowed to sit
+ *  outside the current view instead of forcing the chart to jump to it.  Both
+ *  vertical axes stay inside their physical ranges. */
 function experimentClampView(view) {
   const auto = experimentViewFromData(state.experiment);
   let xMin = Number(view.xMin);
@@ -9187,7 +9214,6 @@ function experimentClampView(view) {
     xMin = auto.xMin; xMax = auto.xMax;
   }
   const xSpan = Math.max(0.01, Math.min(auto.xMax - auto.xMin, xMax - xMin));
-  xMin = Math.max(auto.xMin, Math.min(auto.xMax - xSpan, xMin));
   xMax = xMin + xSpan;
 
   let altMin = Number(view.altMin);
@@ -9248,6 +9274,48 @@ function resetExperimentView() {
   syncExperimentRangeInputs();
 }
 
+/** One sampled row's instant, in the chart's own local clock. */
+function experimentLocalText(row) {
+  const stamp = Date.parse(row && row.when_utc);
+  if (!Number.isFinite(stamp)) return '—';
+  const offset = Number(state.experiment && state.experiment.tz_offset_hours) || 0;
+  return new Date(stamp + offset * 3600000).toISOString()
+    .slice(0, 16).replace('T', ' ');
+}
+
+/** Mark one table row on the chart, without moving the view to it. */
+function selectExperimentRow(row) {
+  if (!row) return;
+  state.experimentSelected = row;
+  const body = $('experiment-rows');
+  if (body) {
+    for (const tr of body.children) {
+      tr.classList.toggle('selected', tr.dataset.when === String(row.when_utc));
+    }
+  }
+  drawExperiment();
+  setStatus(`已选中 ${experimentLocalText(row)} 的数据点（左图已标出）`);
+}
+
+/** Copy the selected table row's instant into the main page. */
+function syncExperimentTimeToMain() {
+  const row = state.experimentSelected;
+  if (!row) {
+    setStatus('先在右侧表格里选中一行，再同步时间', 'error');
+    return;
+  }
+  const stamp = Date.parse(row.when_utc);
+  if (!Number.isFinite(stamp)) {
+    setStatus('这一行没有可用的时间', 'error');
+    return;
+  }
+  const offset = Number($('tz').value) || 0;
+  $('when').value = new Date(stamp + offset * 3600000)
+    .toISOString().slice(0, 16);
+  autoRefresh();
+  setStatus(`主界面时间已同步为 ${experimentLocalText(row)}（选中行）`);
+}
+
 /** An unwrapped azimuth series: crossing 0°/360° is a continuous step, not a
  *  line across the whole chart. */
 function experimentAzimuthSeries(rows) {
@@ -9278,7 +9346,7 @@ function drawExperiment() {
   canvas.height = Math.round(height * dpr);
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const margin = { left: 52, right: 56, top: 28, bottom: 42 };
+  const margin = { left: 52, right: 56, top: 28, bottom: 50 };
   const plot = {
     x: margin.left, y: margin.top,
     w: Math.max(20, width - margin.left - margin.right),
@@ -9316,11 +9384,12 @@ function drawExperiment() {
     / (view.azMax - view.azMin)) * plot.h;
 
   // No clip around this block: the tick labels sit just outside the plot
-  // rectangle (the clock under the x axis, altitudes to its left, azimuths to
-  // its right).  A clip here erased every one of them and left an unlabelled
-  // black rectangle.
-  // grid: the x ticks are clock readings; altitude on the left, azimuth on the
-  // right.  Both grids are thin, so two scales over one rectangle still read.
+  // rectangle (the date and clock under the x axis, altitudes to its left,
+  // azimuths to its right).  A clip here erased every one of them and left an
+  // unlabelled black rectangle.
+  // grid: the x ticks carry the local date *and* clock; altitude on the left,
+  // azimuth on the right.  Both grids are thin, so two scales over one
+  // rectangle still read.
   ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
   const xStep = niceSkyStep(view.xMax - view.xMin, Math.max(3, plot.w / 90));
   for (let v = Math.ceil(view.xMin / xStep) * xStep;
@@ -9332,22 +9401,26 @@ function drawExperiment() {
     ctx.beginPath(); ctx.moveTo(px, plot.y + plot.h);
     ctx.lineTo(px, plot.y + plot.h + 4); ctx.stroke();
     const stamp = new Date(start + (v + offset) * 3600000);
-    const label = view.xMax - view.xMin > 48
-      ? `${stamp.getUTCMonth() + 1}/${stamp.getUTCDate()}`
-      : `${String(stamp.getUTCHours()).padStart(2, '0')}:`
-        + String(stamp.getUTCMinutes()).padStart(2, '0');
-    ctx.fillStyle = '#8b93a3';
+    // The x axis is elapsed hours internally, but a reader reads dates.  Two
+    // lines keep both legible even when a tick is only a few hours from its
+    // neighbour.
+    const day = `${String(stamp.getUTCMonth() + 1).padStart(2, '0')}-`
+      + String(stamp.getUTCDate()).padStart(2, '0');
+    const clock = `${String(stamp.getUTCHours()).padStart(2, '0')}:`
+      + String(stamp.getUTCMinutes()).padStart(2, '0');
+    ctx.fillStyle = '#98a0b0';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(label, px, plot.y + plot.h + 5);
+    ctx.fillText(day, px, plot.y + plot.h + 5);
+    ctx.fillStyle = '#8b93a3';
+    ctx.fillText(clock, px, plot.y + plot.h + 17);
   }
   const altStep = niceSkyStep(view.altMax - view.altMin,
     Math.max(3, plot.h / 55));
   for (let value = Math.ceil(view.altMin / altStep) * altStep;
        value <= view.altMax + 1e-9; value += altStep) {
     const py = yAlt(value);
-    ctx.strokeStyle = Math.abs(value) < 1e-9
-      ? 'rgba(150,165,185,.30)' : 'rgba(120,134,156,.12)';
+    ctx.strokeStyle = 'rgba(120,134,156,.12)';
     ctx.beginPath(); ctx.moveTo(plot.x, py); ctx.lineTo(plot.x + plot.w, py); ctx.stroke();
     ctx.strokeStyle = 'rgba(224,175,104,.65)';
     ctx.beginPath(); ctx.moveTo(plot.x - 4, py); ctx.lineTo(plot.x, py); ctx.stroke();
@@ -9374,6 +9447,29 @@ function drawExperiment() {
   ctx.strokeStyle = 'rgba(150,165,185,.34)';
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 
+  // The horizon is the one altitude on this chart with a physical meaning, so
+  // it gets its own green line instead of being one more grey gridline.  The
+  // reader's eye should find 0° before it finds any other value.
+  const horizonY = yAlt(0);
+  if (horizonY >= plot.y && horizonY <= plot.y + plot.h) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, plot.y, plot.w, plot.h);
+    ctx.clip();
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(plot.x, horizonY);
+    ctx.lineTo(plot.x + plot.w, horizonY);
+    ctx.stroke();
+    ctx.fillStyle = '#4ade80';
+    ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('地平线 0°', plot.x + 6, horizonY - 3);
+    ctx.restore();
+  }
+
   const drawLine = (values, yfn, colour) => {
     ctx.save();
     ctx.beginPath();
@@ -9395,6 +9491,46 @@ function drawExperiment() {
   };
   drawLine(rows.map((row) => Number(row.altitude_deg)), yAlt, '#e0af68');
   drawLine(experimentAzimuthSeries(rows), yAz, '#7aa2f7');
+
+  // The table's selected row: a vertical guide at its instant and a dot on
+  // each series.  The view is deliberately not moved -- the point is allowed
+  // to be outside it, and the reader can pan to it without losing the chart.
+  const chosen = state.experimentSelected;
+  const chosenIndex = chosen
+    ? rows.findIndex((row) => row.when_utc === chosen.when_utc) : -1;
+  if (chosenIndex >= 0 && Number.isFinite(elapsed[chosenIndex])) {
+    const px = x(elapsed[chosenIndex]);
+    if (px >= plot.x && px <= plot.x + plot.w) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(plot.x, plot.y, plot.w, plot.h);
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(230,232,238,.22)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, plot.y);
+      ctx.lineTo(px, plot.y + plot.h);
+      ctx.stroke();
+      const dot = (py, colour) => {
+        if (!Number.isFinite(py) || py < plot.y || py > plot.y + plot.h) return;
+        ctx.beginPath();
+        ctx.arc(px, py, 4.4, 0, Math.PI * 2);
+        ctx.fillStyle = colour;
+        ctx.fill();
+        ctx.strokeStyle = '#07090d';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(px, py, 7.2, 0, Math.PI * 2);
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      };
+      dot(yAlt(Number(rows[chosenIndex].altitude_deg)), '#ffd666');
+      dot(yAz(Number(rows[chosenIndex].azimuth_deg)), '#8fb8ff');
+      ctx.restore();
+    }
+  }
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
@@ -9446,6 +9582,13 @@ function renderExperimentTable(data) {
   });
   for (const row of rows) {
     const tr = document.createElement('tr');
+    tr.dataset.when = String(row.when_utc || '');
+    tr.title = '点击在左图标出这一行；再用「同步选中时间到主界面」把时间送回去';
+    if (state.experimentSelected
+        && state.experimentSelected.when_utc === row.when_utc) {
+      tr.classList.add('selected');
+    }
+    tr.addEventListener('click', () => selectExperimentRow(row));
     const cells = [
       { text: String(row.local_time || '—').slice(0, 16) },
       { text: `${Number(row.altitude_deg).toFixed(2)}°` },
@@ -9510,6 +9653,8 @@ async function refreshExperiment() {
   // chart to about six hundred points at any span.
   const stepMinutes = Math.max(1, Math.min(720,
     Math.ceil(range.hours * 60 / 600)));
+  const selectedWhen = state.experimentSelected
+    ? state.experimentSelected.when_utc : null;
   try {
     const payload = await post('/api/surface-sun', {
       when: whenPayload(),
@@ -9523,6 +9668,12 @@ async function refreshExperiment() {
     if (seq !== state.experimentSeq) return;
     state.experiment = payload;
     state.experimentView = null;
+    // Keep a selection that is still in the new range; a stale one is dropped
+    // rather than pointed at a different sample.
+    state.experimentSelected = selectedWhen
+      ? (payload.samples || []).find(
+        (row) => row.when_utc === selectedWhen) || null
+      : null;
     $('experiment-empty').hidden = true;
     $('experiment-badge').textContent =
       `${Number(payload.moon_lon).toFixed(2)}°, ${Number(payload.moon_lat).toFixed(2)}°`;
@@ -9533,6 +9684,7 @@ async function refreshExperiment() {
     if (seq !== state.experimentSeq) return;
     state.experiment = null;
     state.experimentView = null;
+    state.experimentSelected = null;
     $('experiment-empty').hidden = false;
     $('experiment-empty').textContent = '计算失败：'
       + String((error && error.message) || error);
@@ -9656,6 +9808,7 @@ function experimentWheel(event) {
 
 function experimentPointerDown(event) {
   if (event.button !== 0) return;
+  const canvas = $('experiment-canvas');
   const position = experimentCanvasPos(event);
   const edge = experimentEdgeAt(position);
   if (edge) {
@@ -9664,7 +9817,7 @@ function experimentPointerDown(event) {
       x: event.clientX, y: event.clientY,
       view: { ...experimentView() },
     };
-    $('experiment-canvas').setPointerCapture(event.pointerId);
+    canvas.setPointerCapture(event.pointerId);
     event.preventDefault();
     return;
   }
@@ -9675,7 +9828,8 @@ function experimentPointerDown(event) {
     x: event.clientX, y: event.clientY,
     view: { ...experimentView() },
   };
-  $('experiment-canvas').setPointerCapture(event.pointerId);
+  canvas.style.cursor = 'grabbing';
+  canvas.setPointerCapture(event.pointerId);
   event.preventDefault();
 }
 
@@ -9719,11 +9873,13 @@ function experimentResizeByEdge(drag, point) {
 function experimentPointerMove(event) {
   const drag = state.experimentDrag;
   if (!drag) {
-    const edge = experimentEdgeAt(experimentCanvasPos(event));
+    const position = experimentCanvasPos(event);
+    const edge = experimentEdgeAt(position);
     const canvas = $('experiment-canvas');
     if (canvas) {
       canvas.style.cursor = edge === 'left' || edge === 'right'
-        ? 'ew-resize' : edge ? 'ns-resize' : 'crosshair';
+        ? 'ew-resize' : edge ? 'ns-resize'
+          : experimentPlotPoint(event) ? 'grab' : 'default';
     }
     return;
   }
@@ -9761,6 +9917,8 @@ function experimentPointerMove(event) {
 
 function experimentPointerUp() {
   state.experimentDrag = null;
+  const canvas = $('experiment-canvas');
+  if (canvas) canvas.style.cursor = 'grab';
 }
 
 function experimentPointerLeave() {
@@ -15691,7 +15849,8 @@ function init() {
     $(id).addEventListener('change', drawExperiment);
   }
   $('experiment-apply-range').addEventListener('click', applyExperimentRange);
-  $('experiment-range-reset').addEventListener('click', resetExperimentView);
+  $('experiment-reset-view').addEventListener('click', resetExperimentView);
+  $('experiment-to-main').addEventListener('click', syncExperimentTimeToMain);
   for (const th of document.querySelectorAll('th[data-experiment-sort]')) {
     th.addEventListener('click', () => setExperimentSort(th.dataset.experimentSort));
   }
