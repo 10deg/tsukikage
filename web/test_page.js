@@ -43,6 +43,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'fitPlanToFrame', 'lockedDiskPlan', 'relatedNameFor',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
+  'selectionCorrected', 'effectiveSelectionArcsec', 'effectiveSelectionAspect',
+  'correctedBoundaryPixels',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'imageToScreen',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
@@ -396,6 +398,10 @@ function applyHtmlAttributes(element, id) {
   }
   const klass = /\bclass="([^"]*)"/.exec(tag);
   if (klass && !element.className) element.className = klass[1];
+  // Latch buttons carry their state in aria-pressed, not in a value; the
+  // page reads it back on the very first check, before any test has fired.
+  const pressed = /\baria-pressed="([^"]*)"/.exec(tag);
+  if (pressed) element.setAttribute('aria-pressed', pressed[1]);
 }
 
 const document = {
@@ -545,6 +551,7 @@ function respond(url, body) {
                label_zh: '四月初九', label_latin: 'M04D09',
                civil_date: '2026-05-25' },
       angular_diameter_deg: 0.5135, disk_radius_fraction: 0.47,
+      viewpoint: (body.when && body.when.viewpoint) || 'earth',
       // The real payload carries the distance the scale is derived from; the
       // stub used to omit it, which made every 同步全月面 resolution read null.
       distance_km: 384400,
@@ -788,6 +795,18 @@ function respond(url, body) {
     };
   }
   if (url === '/api/annotations') return planFor(body);
+  if (url === '/api/mesh') {
+    return {
+      info: {
+        lat_deg: Number((body.selection || {}).lat ?? 0),
+        lon_deg: Number((body.selection || {}).lon ?? 0),
+        width_km: 100.0, height_km: 80.0, relief_km: 2.0,
+        long_side_mm: 100.0, short_side_mm: 80.0,
+        n_faces: 1000, stl_bytes: 50084, terrain_limited: false,
+      },
+      stl: 'data:model/stl;base64,AAAA',
+    };
+  }
   if (url === '/api/region') {
     const image = componentImage(body);
     return { render_id: '7', image, image_raw: image,
@@ -893,6 +912,74 @@ const fetchCalls = [];
 async function fetchStub(url, options) {
   const body = options && options.body ? JSON.parse(options.body) : {};
   fetchCalls.push({ url, body });
+  // The STL path deliberately falls back to the JSON endpoint in this harness
+  // (a 404 from the binary endpoint), which is the old-server compatibility
+  // path.  A GLB request gets a binary response with its info header.
+  if (url === '/api/moon/glb') {
+    const info = {
+      format: 'glb', units: 'm', scope: 'moon',
+      diameter_mm: 200.0, diameter_km: 3474.8,
+      n_vertices: 462241, n_faces: 921600,
+      has_texture: true, texture_size: [2048, 1024],
+    };
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: { get: (name) => (name === 'X-Moonlib-Mesh-Info'
+        ? encodeURIComponent(JSON.stringify(info)) : null) },
+      blob: async () => ({ size: 29322016, type: 'model/gltf-binary' }),
+    };
+  }
+  if (url === '/api/moon/blender') {
+    const light = (body.moon && body.moon.blend_light) || 'phase';
+    const info = {
+      format: 'blend', units: 'm', scope: 'moon',
+      diameter_mm: 200.0, diameter_km: 3474.8,
+      has_texture: true, blend_light: light,
+      default_scene: light === 'low' ? 'Low angle' : 'Current phase',
+      scenes: ['Current phase', 'Low angle'],
+    };
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: { get: (name) => (name === 'X-Moonlib-Mesh-Info'
+        ? encodeURIComponent(JSON.stringify(info)) : null) },
+      blob: async () => ({ size: 36257834, type: 'application/x-blender' }),
+    };
+  }
+  if (url === '/api/mesh/blender') {
+    const selection = body.selection || {};
+    const info = {
+      lat_deg: Number(selection.lat ?? 0), lon_deg: Number(selection.lon ?? 0),
+      width_km: 100.0, height_km: 80.0, relief_km: 2.0,
+      long_side_mm: 100.0, short_side_mm: 80.0, n_faces: 1000,
+      format: 'blend', units: 'm', has_texture: true,
+      solar_altitude_deg: 42.92, solar_azimuth_deg: 65.39,
+      solar_illuminated: true,
+      scenes: ['Studio', 'Lunar Sun', 'Lunar Terminator'],
+    };
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: { get: (name) => (name === 'X-Moonlib-Mesh-Info'
+        ? encodeURIComponent(JSON.stringify(info)) : null) },
+      blob: async () => ({ size: 456789, type: 'application/x-blender' }),
+    };
+  }
+  if (url === '/api/mesh/file' && body.mesh && body.mesh.format === 'glb') {
+    const selection = body.selection || {};
+    const info = {
+      lat_deg: Number(selection.lat ?? 0), lon_deg: Number(selection.lon ?? 0),
+      width_km: 100.0, height_km: 80.0, relief_km: 2.0,
+      long_side_mm: 100.0, short_side_mm: 80.0, n_faces: 1000,
+      format: 'glb', units: 'm', sample_km: 0.1,
+      terrain_source: 'SLDEM2015_512.tif',
+      terrain_native_km_per_pixel: 0.0592,
+    };
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: { get: (name) => (name === 'X-Moonlib-Mesh-Info'
+        ? encodeURIComponent(JSON.stringify(info)) : null) },
+      blob: async () => ({ size: 123456, type: 'model/gltf-binary' }),
+    };
+  }
   const payload = respond(url, body);
   return {
     ok: !payload.error,
@@ -1208,6 +1295,33 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('a back-focus ratio above 1 shrinks the field in proportion',
     Math.abs(plain / stretched - 1.1) < 1e-9, `${plain} -> ${stretched}`);
   set('back-focus', 1);
+
+  console.log('');
+  console.log('the far-side viewpoint');
+  /* 视角 chooses the camera, not the observer: the site still travels for the
+     real Moon report, but the disk request must say which side it is about.
+     It is a small latch on the full-disk title bar, not a left-column field. */
+  const viewpointButton = document.getElementById('viewpoint');
+  check('the camera starts on the near side',
+    viewpointButton.getAttribute('aria-pressed') === 'false');
+  fire('viewpoint', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const farBody = fetchCalls.filter((call) => call.url === '/api/disk').pop().body;
+  check('the far-side request carries the viewpoint',
+    farBody.when.viewpoint === 'far_side', JSON.stringify(farBody.when));
+  check('and still carries the observing site for the Moon report',
+    farBody.when.observer.lat === 30 && farBody.when.observer.lon === 120);
+  check('the title-bar button is latched',
+    viewpointButton.getAttribute('aria-pressed') === 'true');
+  check('and the disk readout names the far side',
+    /月背/.test(document.getElementById('disk-info-size').textContent));
+  fire('viewpoint', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  check('the near-side latch goes away again',
+    viewpointButton.getAttribute('aria-pressed') === 'false');
+  check('and the request goes back to earth',
+    fetchCalls.filter((call) => call.url === '/api/disk').pop().body.when.viewpoint
+      === 'earth');
 
   console.log('');
   console.log('earthshine travels with the render');
@@ -1588,6 +1702,194 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('status').textContent);
   check('a search matches the English name too',
     T.matchFeatures('clavius').length === 1);
+
+  console.log('');
+  console.log('the 3D model export');
+  fire('proc-image-tab-model', 'click');
+  check('the 3D pane opens in the imaging/post-processing strip',
+    document.getElementById('proc-model').hidden === false &&
+    document.getElementById('proc-imaging').hidden === true &&
+    document.getElementById('proc-post').hidden === true);
+  check('a selected box enables the export',
+    document.getElementById('mesh-export').disabled === false);
+  set('mesh-size-mm', 1000);
+  fire('mesh-size-mm', 'change');
+  check('the plan says how large the model must be to match the source at 768',
+    /模型 1000 ×/.test(document.getElementById('mesh-plan').textContent) &&
+    /采样 768/.test(document.getElementById('mesh-plan').textContent) &&
+    /长边尺寸 \d+ mm 时匹配当前最高分辨率/.test(document.getElementById('mesh-plan').textContent),
+    document.getElementById('mesh-plan').textContent);
+  set('mesh-size-mm', 100);
+  fire('mesh-size-mm', 'change');
+  fire('mesh-export', 'click');
+  await tick();
+  await tick();
+  const meshCall = fetchCalls.filter((call) => call.url === '/api/mesh').pop();
+  check('the export sends the selection and its aspect',
+    !!meshCall && meshCall.body.selection.lon === T.state.selection.lon &&
+    typeof meshCall.body.selection.aspect === 'number',
+    meshCall ? JSON.stringify(meshCall.body.selection) : 'no call');
+  check('and the printing parameters',
+    !!meshCall && meshCall.body.mesh.long_side_mm === 100 &&
+    meshCall.body.mesh.base_depth_km === 2 &&
+    meshCall.body.mesh.vertical_exaggeration === 1 &&
+    meshCall.body.mesh.resolution_mode === 'auto' &&
+    meshCall.body.mesh.resolution >= 2 &&
+    meshCall.body.mesh.resolution <= 768 &&
+    meshCall.body.mesh.projection === true,
+    meshCall ? JSON.stringify(meshCall.body.mesh) : 'no call');
+  check('the pane reports what was exported',
+    /已导出/.test(document.getElementById('mesh-status').textContent) &&
+    /100\.0×80\.0 km/.test(document.getElementById('mesh-status').textContent),
+    document.getElementById('mesh-status').textContent);
+  set('mesh-corrected', true);
+  fire('mesh-corrected', 'change');
+  check('the corrected box locks the projection switch on',
+    document.getElementById('mesh-corrected').checked === true &&
+    document.getElementById('mesh-projection').checked === true &&
+    document.getElementById('mesh-projection').disabled === true);
+  check('the page knows the box is the corrected one',
+    T.selectionCorrected() === true);
+  const correctedOutline = T.correctedBoundaryPixels();
+  check('its irregular boundary has points',
+    Array.isArray(correctedOutline) && correctedOutline.length > 8);
+  let correctedJump = 0;
+  if (correctedOutline) {
+    for (let index = 1; index < correctedOutline.length; index += 1) {
+      correctedJump = Math.max(correctedJump, Math.hypot(
+        correctedOutline[index].x - correctedOutline[index - 1].x,
+        correctedOutline[index].y - correctedOutline[index - 1].y));
+    }
+  }
+  check('the corrected boundary is one clean loop, not a zig-zag',
+    correctedJump < 2, correctedJump);
+  {
+    const baseSelection = { ...T.state.selection };
+    let rotatedClosed = true;
+    let resizedClosed = true;
+    for (const deg of [0, 30, 90, 150]) {
+      T.state.selection = { ...baseSelection, rotationDeg: deg };
+      if (!T.correctedBoundaryPixels()) rotatedClosed = false;
+    }
+    for (const factor of [0.4, 1.5]) {
+      T.state.selection = {
+        ...baseSelection,
+        radiusFraction: baseSelection.radiusFraction * factor,
+      };
+      if (!T.correctedBoundaryPixels()) resizedClosed = false;
+    }
+    T.state.selection = baseSelection;
+    check('rotating the box keeps the corrected shape', rotatedClosed);
+    check('resizing the box keeps the corrected shape', resizedClosed);
+  }
+  check('and it has a usable effective frame',
+    T.effectiveSelectionArcsec() > 0 && T.effectiveSelectionAspect() > 0);
+  fire('mesh-export', 'click');
+  await tick();
+  await tick();
+  const correctedCall = fetchCalls.filter((call) => call.url === '/api/mesh').pop();
+  check('the corrected export says so in the request',
+    !!correctedCall && correctedCall.body.selection.corrected === true,
+    correctedCall ? JSON.stringify(correctedCall.body.selection) : 'no call');
+  set('mesh-corrected', false);
+  fire('mesh-corrected', 'change');
+  check('switching it off unlocks the projection switch again',
+    document.getElementById('mesh-projection').disabled === false);
+  set('mesh-projection', false);
+  fire('mesh-projection', 'change');
+  fire('mesh-export', 'click');
+  await tick();
+  await tick();
+  const plainCall = fetchCalls.filter((call) => call.url === '/api/mesh').pop();
+  check('turning projection off is sent to the server',
+    !!plainCall && plainCall.body.mesh.projection === false,
+    plainCall ? JSON.stringify(plainCall.body.mesh) : 'no call');
+  set('mesh-projection', true);
+  fire('mesh-projection', 'change');
+  fire('mesh-export-glb', 'click');
+  await tick();
+  await tick();
+  const glbCall = fetchCalls.filter((call) => call.url === '/api/mesh/file').pop();
+  check('the GLB export uses the binary endpoint',
+    !!glbCall && glbCall.body.mesh.format === 'glb',
+    glbCall ? JSON.stringify(glbCall.body.mesh) : 'no call');
+  check('the GLB export reports its file and leaves a download link',
+    /已导出/.test(document.getElementById('mesh-status').textContent) &&
+    /\.glb/.test(document.getElementById('mesh-status').textContent) &&
+    document.getElementById('mesh-download').hidden === false &&
+    /\.glb$/.test(document.getElementById('mesh-download').download),
+    document.getElementById('mesh-status').textContent + ' / ' +
+    document.getElementById('mesh-download').download);
+  fire('mesh-export-blend', 'click');
+  await tick();
+  await tick();
+  const blendCall = fetchCalls.filter((call) => call.url === '/api/mesh/blender').pop();
+  check('the Blender preview uses the current mesh selection',
+    !!blendCall && blendCall.body.mesh.format === 'glb' &&
+    blendCall.body.mesh.blend_light === 'phase' &&
+    Number.isFinite(Number(blendCall.body.selection.lat)),
+    blendCall ? JSON.stringify(blendCall.body.mesh) : 'no call');
+  check('the Blender preview reports its file and leaves a .blend link',
+    /已生成/.test(document.getElementById('mesh-status').textContent) &&
+    /\.blend/.test(document.getElementById('mesh-status').textContent) &&
+    document.getElementById('mesh-download').hidden === false &&
+    /\.blend$/.test(document.getElementById('mesh-download').download),
+    document.getElementById('mesh-status').textContent + ' / ' +
+    document.getElementById('mesh-download').download);
+  set('mesh-scope', 'moon');
+  fire('mesh-scope', 'change');
+  check('the whole-Moon scope hides the selection-only controls and STL',
+    document.getElementById('mesh-selection-controls').hidden === true &&
+    document.getElementById('mesh-export').hidden === true &&
+    /全月面/.test(document.getElementById('mesh-plan').textContent),
+    document.getElementById('mesh-plan').textContent);
+  fire('mesh-export-glb', 'click');
+  await tick();
+  await tick();
+  const moonGlbCall = fetchCalls.filter((call) => call.url === '/api/moon/glb').pop();
+  check('the whole-Moon GLB export uses its own endpoint',
+    !!moonGlbCall && moonGlbCall.body.moon.blend_light === 'phase',
+    moonGlbCall ? JSON.stringify(moonGlbCall.body) : 'no call');
+  check('the whole-Moon GLB reports its texture and leaves a .glb link',
+    /全月面/.test(document.getElementById('mesh-status').textContent) &&
+    /\.glb/.test(document.getElementById('mesh-status').textContent) &&
+    document.getElementById('mesh-download').hidden === false &&
+    /\.glb$/.test(document.getElementById('mesh-download').download),
+    document.getElementById('mesh-status').textContent + ' / ' +
+    document.getElementById('mesh-download').download);
+  fire('mesh-export-blend', 'click');
+  await tick();
+  await tick();
+  const moonBlendCall = fetchCalls.filter((call) => call.url === '/api/moon/blender').pop();
+  check('the whole-Moon Blender scene defaults to current phase',
+    !!moonBlendCall && moonBlendCall.body.moon.blend_light === 'phase',
+    moonBlendCall ? JSON.stringify(moonBlendCall.body) : 'no call');
+  check('the whole-Moon Blender scene leaves a .blend link',
+    /已生成/.test(document.getElementById('mesh-status').textContent) &&
+    /当前月相/.test(document.getElementById('mesh-status').textContent) &&
+    /\.blend$/.test(document.getElementById('mesh-download').download),
+    document.getElementById('mesh-status').textContent + ' / ' +
+    document.getElementById('mesh-download').download);
+  set('mesh-blend-light', 'low');
+  fire('mesh-export-blend', 'click');
+  await tick();
+  await tick();
+  const lowBlendCall = fetchCalls.filter((call) => call.url === '/api/moon/blender').pop();
+  check('the whole-Moon Blender scene can switch to low-angle light',
+    !!lowBlendCall && lowBlendCall.body.moon.blend_light === 'low' &&
+    /低角度光照/.test(document.getElementById('mesh-status').textContent),
+    lowBlendCall ? JSON.stringify(lowBlendCall.body) : 'no call');
+  set('mesh-scope', 'selection');
+  fire('mesh-scope', 'change');
+  check('returning to the selection restores its controls and STL',
+    document.getElementById('mesh-selection-controls').hidden === false &&
+    document.getElementById('mesh-export').hidden === false &&
+    /模型/.test(document.getElementById('mesh-plan').textContent),
+    document.getElementById('mesh-plan').textContent);
+  fire('proc-image-tab-imaging', 'click');
+  check('the 3D page closes again',
+    document.getElementById('proc-model').hidden === true &&
+    document.getElementById('proc-imaging').hidden === false);
 
   console.log('');
   console.log('generating a close-up refreshes its labels');

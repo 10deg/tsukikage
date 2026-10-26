@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -65,12 +65,19 @@ from .models import (
     MoonView,
     PhotometricModel,
     ToneMapping,
+    Viewpoint,
     as_photometric_model,
     as_tone_mapping,
+    as_viewpoint,
 )
 from .observer import Observer
 from typing import List
-from .terrain import MOON_REFERENCE_RADIUS_KM, MoonTerrain, open_terrain
+from .terrain import (
+    MOON_REFERENCE_RADIUS_KM,
+    MoonTerrain,
+    TerrainTile,
+    open_terrain,
+)
 from .timeutil import to_et, to_utc, utc_now
 
 __all__ = [
@@ -93,10 +100,22 @@ __all__ = [
     "earthshine_relation",
     "view_summary",
     "selection_footprint",
+    "selection_tile",
+    "selection_correction",
+    "SelectionCorrection",
 ]
 
 #: Mean apparent angular radius of the Sun, degrees.  Used for the penumbra.
 SOLAR_ANGULAR_RADIUS_DEG = 0.2666
+
+#: Hard ceiling on a 3D tile's samples along its longer side.
+#:
+#: The top and bottom are both triangulated, so the STL grows as the square of
+#: this number: 384 is about 300k triangles and 15 MB, 768 is about 1.2M and
+#: 59 MB.  The cap is where a browser download is still a reasonable thing to
+#: ask for; the data itself rarely justifies more than a few hundred samples
+#: over a close-up.
+MAX_TILE_RESOLUTION = 768
 
 #: Apparent V magnitude of the Sun at 1 AU; the anchor for every other
 #: magnitude this module reports.
@@ -508,6 +527,8 @@ def view_geometry(
     observer: Any = None,
     when: Any = None,
     earth_albedo: Optional[float] = None,
+    *,
+    viewpoint: Any = Viewpoint.EARTH,
 ) -> MoonView:
     """Resolve the full illumination geometry of one instant.
 
@@ -515,6 +536,8 @@ def view_geometry(
     ----------
     observer
         Observing site; anything :meth:`moonlib.Observer.from_value` accepts.
+        For ``viewpoint="far_side"`` it is carried for context and time zone
+        but does not move the camera: that view is geocentric.
     when
         Anything :func:`moonlib.to_et` accepts; defaults to now.
     earth_albedo
@@ -522,7 +545,14 @@ def view_geometry(
         ``None`` or a non-positive value falls back to
         :data:`DEFAULT_EARTH_GEOMETRIC_ALBEDO`, and the reported ratio is always
         strictly proportional to whatever is used here.
+    viewpoint
+        :class:`moonlib.models.Viewpoint` or its string value.  ``"earth"`` is
+        the normal topocentric near-side view.  ``"far_side"`` puts the camera
+        at the antipode of the geocentric Earth: the far side is in view, the
+        Sun is unchanged, and the Earth used for earthshine is the mirror image
+        of the real one.  See :class:`moonlib.models.Viewpoint`.
     """
+    kind = as_viewpoint(viewpoint)
     site = Observer.from_value(observer)
     if when is None:
         when = utc_now()
@@ -530,9 +560,53 @@ def view_geometry(
     constants = kernel_session().constants
 
     sun_direction = direction_in_moon_frame("SUN", et)
-    earth_direction = direction_in_moon_frame("EARTH", et)
-    observer_direction = observer_direction_moon_frame(et, site)
-    distance_km = moon_observer_range_km(et, site)
+
+    if kind is Viewpoint.FAR_SIDE:
+        # The camera is the antipode of the real geocentric Earth.  The Moon's
+        # orientation and the Sun are untouched: only the viewpoint moves, so
+        # the far-side terrain is lit by the real Sun at this instant.
+        earth_position = body_position_moon_frame("EARTH", et)
+        earth_distance = float(np.linalg.norm(earth_position))
+        real_earth_direction = earth_position / max(earth_distance, _TINY)
+        observer_direction = -real_earth_direction
+        distance_km = earth_distance
+        # The mirrored Earth sits at -earth_position.  Its phase angle is the
+        # angle it subtends between the Sun and the Moon; that is the complement
+        # of the real Earth's phase, which is why the far side sees a full
+        # virtual Earth exactly when the near side sees a new one.  Earthshine
+        # here is this hypothetical Earth's light, not sunlight leaking through
+        # the Moon.
+        earth_direction = observer_direction
+        sun_position = body_position_moon_frame("SUN", et)
+        virtual_earth_position = -earth_position
+        earth_phase_angle = math.degrees(
+            angular_separation(
+                sun_position - virtual_earth_position,
+                -virtual_earth_position,
+            )
+        )
+        moon_elevation = None
+    else:
+        earth_direction = direction_in_moon_frame("EARTH", et)
+        observer_direction = observer_direction_moon_frame(et, site)
+        distance_km = moon_observer_range_km(et, site)
+        earth_position = body_position_moon_frame("EARTH", et)
+        earth_distance = float(np.linalg.norm(earth_position))
+        # The Earth's phase angle is the Sun-Earth-Moon angle, which is *not*
+        # the Moon's phase angle: it is the same triangle read from the other
+        # vertex.
+        earth_phase_angle = math.degrees(
+            angular_separation(
+                position_from_earth("SUN", et), position_from_earth("MOON", et)
+            )
+        )
+        moon_elevation: Optional[float]
+        try:
+            from .frames import az_el
+
+            moon_elevation = az_el("MOON", et, site).elevation_deg
+        except MoonlibError:  # pragma: no cover - defensive
+            moon_elevation = None
 
     reference_radius = MOON_REFERENCE_RADIUS_KM
     angular_diameter = 2.0 * math.degrees(math.asin(reference_radius / distance_km))
@@ -543,17 +617,8 @@ def view_geometry(
     phase_angle = math.degrees(angular_separation(sun_direction, observer_direction))
     illuminated = 0.5 * (1.0 + math.cos(math.radians(phase_angle)))
 
-    earth_position = body_position_moon_frame("EARTH", et)
-    earth_distance = float(np.linalg.norm(earth_position))
     earth_diameter = 2.0 * math.degrees(
         math.asin(constants.earth_radius_km / earth_distance)
-    )
-    # The Earth's phase angle is the Sun-Earth-Moon angle, which is *not* the
-    # Moon's phase angle: it is the same triangle read from the other vertex.
-    earth_phase_angle = math.degrees(
-        angular_separation(
-            position_from_earth("SUN", et), position_from_earth("MOON", et)
-        )
     )
     earth_illuminated = 0.5 * (1.0 + math.cos(math.radians(earth_phase_angle)))
 
@@ -594,14 +659,6 @@ def view_geometry(
             - 2.5 * math.log10(night)
         )
 
-    moon_elevation: Optional[float]
-    try:
-        from .frames import az_el
-
-        moon_elevation = az_el("MOON", et, site).elevation_deg
-    except MoonlibError:  # pragma: no cover - defensive
-        moon_elevation = None
-
     return MoonView(
         when_utc=to_utc(et),
         observer=site,
@@ -629,6 +686,7 @@ def view_geometry(
             sun_direction, observer_direction
         ),
         moon_elevation_deg=moon_elevation,
+        viewpoint=kind,
     )
 
 
@@ -2210,6 +2268,7 @@ def render_moon(
     settings: Optional[MoonRenderSettings] = None,
     terrain: Optional[MoonTerrain] = None,
     view: Optional[MoonView] = None,
+    viewpoint: Any = Viewpoint.EARTH,
     progress: Optional[Any] = None,
     cancel: Optional[Any] = None,
     exposure_hint: Optional[float] = None,
@@ -2229,6 +2288,9 @@ def render_moon(
         first use.
     view
         Reuse an already computed :class:`moonlib.models.MoonView`.
+    viewpoint
+        ``"earth"`` (default) or ``"far_side"``; ignored when *view* is given.
+        See :func:`view_geometry` and :class:`moonlib.models.Viewpoint`.
     progress
         Optional ``callable(fraction, message)`` forwarded to the cache bake.
     cancel
@@ -2262,7 +2324,12 @@ def render_moon(
     options = settings or MoonRenderSettings()
     _validate_settings(options)
     if view is None:
-        view = view_geometry(observer, when, earth_albedo=options.earth_geometric_albedo)
+        view = view_geometry(
+            observer,
+            when,
+            earth_albedo=options.earth_geometric_albedo,
+            viewpoint=viewpoint,
+        )
     if terrain is None:
         terrain = open_terrain(progress=progress)
 
@@ -2841,6 +2908,871 @@ def selection_footprint(
     return _region_coverage(
         camera["origin"], camera["forward"], right, up, pixel_scale,
         int(width), int(height), None,
+    )
+
+
+def _tangent_basis(lon_deg: float, lat_deg: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Local ``(up, east)`` unit vectors in MOON_ME at a surface point."""
+    lon = math.radians(float(lon_deg))
+    lat = math.radians(float(lat_deg))
+    cos_lat = math.cos(lat)
+    up = np.array([
+        cos_lat * math.cos(lon),
+        cos_lat * math.sin(lon),
+        math.sin(lat),
+    ])
+    east = np.array([-math.sin(lon), math.cos(lon), 0.0])
+    return up, east
+
+
+def _sky_half_angles(fov_radius_arcsec: float, aspect: float) -> Tuple[float, float]:
+    """The two sky half-angles of a selection, in radians.
+
+    *fov_radius_arcsec* is the shorter half-side by the page's convention and
+    *aspect* is height / width, exactly as :func:`selection_tile` reads them.
+    """
+    ratio = float(aspect)
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        ratio = 1.0
+    if ratio >= 1.0:
+        return (
+            math.radians(float(fov_radius_arcsec) / 3600.0),
+            math.radians(float(fov_radius_arcsec) * ratio / 3600.0),
+        )
+    return (
+        math.radians(float(fov_radius_arcsec) / ratio / 3600.0),
+        math.radians(float(fov_radius_arcsec) / 3600.0),
+    )
+
+
+def _selection_ground_frame(
+    camera: Dict[str, Any],
+    lon_deg: float,
+    lat_deg: float,
+    rotation_deg: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Camera axes and the local ground axes a tile is measured in.
+
+    Returns ``(right, up, up0, u, v)``: the rolled camera axes, the surface
+    normal at the target, and the two tangent-plane axes the ground kilometres
+    are expressed in.  One definition shared by the mesh and by the
+    corrected-selection geometry.
+    """
+    right, up = _rolled_basis(
+        camera["right"], camera["up"], float(rotation_deg)
+    )
+    up0, east0 = _tangent_basis(lon_deg, lat_deg)
+    u = right - float(np.dot(right, up0)) * up0
+    norm_u = float(np.linalg.norm(u))
+    if norm_u < 1e-9:  # pragma: no cover - only if the box is roll-degenerate
+        u = east0
+        norm_u = 1.0
+    u = u / norm_u
+    v = up - float(np.dot(up, up0)) * up0
+    v = v - float(np.dot(v, u)) * u
+    norm_v = float(np.linalg.norm(v))
+    if norm_v < 1e-9:  # pragma: no cover - only if the box is degenerate
+        v = np.cross(up0, u)
+        norm_v = float(np.linalg.norm(v))
+    v = v / norm_v
+    if float(np.dot(np.cross(u, v), up0)) < 0.0:
+        v = -v
+    return right, up, up0, u, v
+
+
+def _sky_ground_coordinates(
+    camera: Dict[str, Any],
+    right: np.ndarray,
+    up: np.ndarray,
+    up0: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    tan_u: np.ndarray,
+    tan_v: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Map a grid in the camera's tan plane to local ground kilometres.
+
+    Returns ``(x, y, lon, lat, cos_theta)``.  A ray that misses the reference
+    sphere is reported with a negative ``cos_theta`` so the caller can refuse
+    the selection instead of building a tile at the limb.
+    """
+    reference = MOON_REFERENCE_RADIUS_KM
+    directions = (
+        camera["forward"][None, None, :]
+        + tan_u[..., None] * right[None, None, :]
+        + tan_v[..., None] * up[None, None, :]
+    )
+    directions /= np.linalg.norm(directions, axis=-1, keepdims=True)
+    flat = directions.reshape(-1, 3)
+    origin = np.asarray(camera["origin"], dtype=np.float64)
+    b = np.einsum("ij,j->i", flat, origin)
+    disc = b * b - (float(np.dot(origin, origin)) - reference * reference)
+    root = np.sqrt(np.maximum(disc, 0.0))
+    distance = np.maximum(-b - root, 0.0)
+    sphere = (origin[None, :] + distance[:, None] * flat).reshape(
+        tan_u.shape + (3,)
+    )
+    relative = sphere - reference * up0[None, None, :]
+    x = np.einsum("...i,i->...", relative, u)
+    y = np.einsum("...i,i->...", relative, v)
+    cos_theta = np.einsum("...i,i->...", sphere / reference, up0)
+    lon = np.degrees(np.arctan2(sphere[..., 1], sphere[..., 0]))
+    lat = np.degrees(np.arcsin(np.clip(sphere[..., 2] / reference, -1.0, 1.0)))
+    miss = (disc <= 0.0).reshape(tan_u.shape) | (cos_theta <= 1e-9)
+    if np.any(miss):
+        lon = np.where(miss, np.nan, lon)
+        lat = np.where(miss, np.nan, lat)
+        cos_theta = np.where(miss, np.nan, cos_theta)
+    return x, y, lon, lat, cos_theta
+
+
+def _ground_to_surface(
+    x: np.ndarray,
+    y: np.ndarray,
+    up0: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> np.ndarray:
+    """Inverse of the tangent-plane projection: ground km -> surface point.
+
+    The forward map projects a point on the reference sphere onto the plane
+    spanned by ``u``/``v`` at the target.  The inverse is not simply
+    ``R*up0 + x*u + y*v`` (that point is *above* the sphere): the component
+    along ``up0`` that keeps the point on the sphere is
+    ``sqrt(R**2 - x**2 - y**2)``.
+    """
+    reference = MOON_REFERENCE_RADIUS_KM
+    inside = reference * reference - np.asarray(x) ** 2 - np.asarray(y) ** 2
+    if np.any(inside <= 0.0):
+        raise MoonlibError(
+            "the selection extends past the lunar limb; shrink it or move it inward."
+        )
+    height = np.sqrt(inside)
+    return (
+        height[..., None] * up0[None, ...]
+        + np.asarray(x)[..., None] * u[None, ...]
+        + np.asarray(y)[..., None] * v[None, ...]
+    )
+
+
+@dataclass(frozen=True)
+class SelectionCorrection:
+    """The irregular sky selection whose projection-corrected tile is a rectangle.
+
+    A rectangular box drawn on the sky does **not** enclose a rectangle on the
+    ground: the sky-to-ground map curves, so a tile cut from that box has four
+    curved sides.  This object records the opposite construction.  The ground
+    footprint of the original box is measured, its bounding rectangle becomes
+    the *wanted* ground rectangle, and this object carries the preimage of that
+    rectangle: an irregular shape in the sky (drawn on the full-disk page) and
+    a mask for the close-up frames.
+
+    ``fov_radius_arcsec`` and ``aspect`` describe the smallest camera rectangle
+    that contains the irregular preimage, so a close-up can render that
+    rectangle and black out everything outside :meth:`boundary_lonlat`.
+    """
+
+    lon_deg: float
+    lat_deg: float
+    rotation_deg: float
+    fov_radius_arcsec: float
+    aspect: float
+    ground_box: Tuple[float, float, float, float]
+    ground_width_km: float
+    ground_height_km: float
+    reference_radius_km: float
+    up0: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+
+    def boundary_lonlat(self, samples: int = 181) -> np.ndarray:
+        """The irregular selection boundary, as ``(n, 2)`` lon/lat degrees."""
+        count = max(8, int(samples))
+        x0, x1, y0, y1 = self.ground_box
+        t = np.linspace(0.0, 1.0, count)
+        edges = (
+            np.stack([x0 + (x1 - x0) * t, np.full_like(t, y0)], axis=1),
+            np.stack([np.full_like(t, x1), y0 + (y1 - y0) * t], axis=1),
+            np.stack([x1 - (x1 - x0) * t, np.full_like(t, y1)], axis=1),
+            np.stack([np.full_like(t, x0), y1 - (y1 - y0) * t], axis=1),
+        )
+        ground = np.concatenate(edges, axis=0)
+        surface = _ground_to_surface(
+            ground[:, 0], ground[:, 1], self.up0, self.u, self.v
+        )
+        radius = np.linalg.norm(surface, axis=-1)
+        lon = np.degrees(np.arctan2(surface[..., 1], surface[..., 0]))
+        lat = np.degrees(
+            np.arcsin(np.clip(surface[..., 2] / radius, -1.0, 1.0))
+        )
+        return np.stack([lon, lat], axis=1)
+
+    def as_dict(self) -> Dict[str, Any]:
+        x0, x1, y0, y1 = self.ground_box
+        return {
+            "lon_deg": float(self.lon_deg),
+            "lat_deg": float(self.lat_deg),
+            "rotation_deg": float(self.rotation_deg),
+            "fov_radius_arcsec": float(self.fov_radius_arcsec),
+            "aspect": float(self.aspect),
+            "ground_box_km": [float(x0), float(x1), float(y0), float(y1)],
+            "ground_width_km": float(self.ground_width_km),
+            "ground_height_km": float(self.ground_height_km),
+        }
+
+
+def selection_correction(
+    view: MoonView,
+    lon_deg: float,
+    lat_deg: float,
+    *,
+    fov_radius_arcsec: float,
+    aspect: float = 1.0,
+    rotation_deg: float = 0.0,
+    terrain: Optional[MoonTerrain] = None,
+) -> SelectionCorrection:
+    """Build the inverse-projected selection for a projection-corrected tile.
+
+    The *wanted* ground rectangle is the bounding rectangle (in the local
+    tangent frame) of the ground footprint of the ordinary sky box.  Its
+    preimage under the sky-to-ground map is the irregular shape the page draws;
+    exporting the ground rectangle itself is the projection-corrected model
+    with four straight sides.
+    """
+    fov = float(fov_radius_arcsec)
+    if not math.isfinite(fov) or not (0.5 <= fov <= 3600.0):
+        raise MoonlibError("fov_radius_arcsec must lie in 0.5-3600 arcseconds.")
+    camera = _region_camera(view, float(lon_deg), float(lat_deg), terrain)
+    target = np.asarray(camera["target"], dtype=np.float64)
+    normal = target / max(float(np.linalg.norm(target)), _TINY)
+    if float(np.dot(normal, camera["origin"] - target)) <= 0.0:
+        raise MoonlibError(
+            "the selection is on the far side as seen from this observer."
+        )
+    right, up, up0, u, v = _selection_ground_frame(
+        camera, float(lon_deg), float(lat_deg), float(rotation_deg)
+    )
+    half_w, half_h = _sky_half_angles(fov, float(aspect))
+
+    # Measure the ordinary box's ground footprint.  The extrema of a smooth map
+    # over a rectangle lie on its boundary, but a small interior grid costs
+    # little and keeps a strongly tilted frame honest.
+    edge = np.linspace(-1.0, 1.0, 161)
+    one = np.ones_like(edge)
+    boundary = np.concatenate([
+        np.stack([edge * math.tan(half_w), -one * math.tan(half_h)], axis=1),
+        np.stack([one * math.tan(half_w), edge * math.tan(half_h)], axis=1),
+        np.stack([-edge * math.tan(half_w), one * math.tan(half_h)], axis=1),
+        np.stack([-one * math.tan(half_w), -edge * math.tan(half_h)], axis=1),
+    ], axis=0)
+    grid = np.linspace(-1.0, 1.0, 9)
+    gu, gv = np.meshgrid(grid * math.tan(half_w), grid * math.tan(half_h))
+    tan_u = np.concatenate([boundary[:, 0], gu.ravel()])
+    tan_v = np.concatenate([boundary[:, 1], gv.ravel()])
+    x, y, _lon, _lat, cos_theta = _sky_ground_coordinates(
+        camera, right, up, up0, u, v, tan_u, tan_v
+    )
+    if np.any(~np.isfinite(x)) or np.any(~np.isfinite(y)) or np.any(~np.isfinite(cos_theta)):
+        raise MoonlibError(
+            "the selection extends past the lunar limb; shrink it or move it inward."
+        )
+    x0, x1 = float(np.min(x)), float(np.max(x))
+    y0, y1 = float(np.min(y)), float(np.max(y))
+    if not (x1 > x0 and y1 > y0):
+        raise MoonlibError("the selection has no measurable ground extent.")
+
+    # The ground rectangle's preimage, and the smallest axis-aligned sky box
+    # that contains it.  A ground point is lifted back onto the sphere first,
+    # then expressed in the camera's rolled tan plane.
+    count = 181
+    t = np.linspace(0.0, 1.0, count)
+    ground_edges = (
+        np.stack([x0 + (x1 - x0) * t, np.full_like(t, y0)], axis=1),
+        np.stack([np.full_like(t, x1), y0 + (y1 - y0) * t], axis=1),
+        np.stack([x1 - (x1 - x0) * t, np.full_like(t, y1)], axis=1),
+        np.stack([np.full_like(t, x0), y1 - (y1 - y0) * t], axis=1),
+    )
+    ground = np.concatenate(ground_edges, axis=0)
+    surface = _ground_to_surface(ground[:, 0], ground[:, 1], up0, u, v)
+    directions = surface - camera["origin"][None, :]
+    depth = np.einsum("ij,j->i", directions, camera["forward"])
+    if np.any(depth <= 0.0):
+        raise MoonlibError(
+            "the selection is on the far side as seen from this observer."
+        )
+    across = np.einsum("ij,j->i", directions, right) / depth
+    along = np.einsum("ij,j->i", directions, up) / depth
+    half_u = float(np.max(np.abs(across)))
+    half_v = float(np.max(np.abs(along)))
+    if not (half_u > 0.0 and half_v > 0.0):
+        raise MoonlibError("the selection has no measurable sky extent.")
+    effective_fov = math.degrees(math.atan(min(half_u, half_v))) * 3600.0
+    effective_aspect = half_v / half_u
+    return SelectionCorrection(
+        lon_deg=float(lon_deg),
+        lat_deg=float(lat_deg),
+        rotation_deg=float(rotation_deg),
+        fov_radius_arcsec=float(effective_fov),
+        aspect=float(effective_aspect),
+        ground_box=(x0, x1, y0, y1),
+        ground_width_km=float(x1 - x0),
+        ground_height_km=float(y1 - y0),
+        reference_radius_km=MOON_REFERENCE_RADIUS_KM,
+        up0=np.asarray(up0, dtype=np.float64),
+        u=np.asarray(u, dtype=np.float64),
+        v=np.asarray(v, dtype=np.float64),
+    )
+
+
+def _tile_auto_samples(long_km: float, dem: Any) -> Tuple[int, bool]:
+    """Samples along the longer side that match the DEM's own pixel size.
+
+    "The highest resolution the data can support" is a measured number, not a
+    menu entry: a 59 m raster deserves more samples than a 474 m one over the
+    same ground.  Returns ``(samples, capped)``; a cap keeps a whole-Moon tile
+    from writing a gigabyte of STL.
+    """
+    native = float("nan")
+    try:
+        native = float(dem.km_per_pixel(0))
+    except Exception:  # pragma: no cover - a minimal test DEM
+        native = float("nan")
+    if not math.isfinite(native) or native <= 0.0:
+        return 384, False
+    wanted = int(math.ceil(long_km / native)) + 1
+    return max(2, min(MAX_TILE_RESOLUTION, wanted)), wanted > MAX_TILE_RESOLUTION
+
+
+def _tile_window(
+    terrain: MoonTerrain,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+) -> MoonTerrain:
+    """A finer regional window for the tile, when one is available."""
+    if lon_max - lon_min > 180.0:
+        return terrain
+    try:
+        window = _terrain_for_footprint(
+            {
+                "lon_min": lon_min,
+                "lon_max": lon_max,
+                "lat_min": lat_min,
+                "lat_max": lat_max,
+            },
+            base=terrain,
+            margin_deg=0.25,
+        )
+    except Exception:  # pragma: no cover - optional cache/window failure
+        return terrain
+    return window if window is not None else terrain
+
+
+def _terrain_source_name(terrain: Any) -> str:
+    """The raster a tile was actually cut from, not the base pyramid.
+
+    A window returned by ``open_region_box`` carries the *base* terrain's
+    ``sources`` (the file the whole-disk pyramid was baked from), so reporting
+    ``sources.dem_path`` named ``ldem_64.tif`` even when the samples came from
+    SLDEM2015 at 59 m/px.  The window records its source in ``windowed_from``;
+    a downloaded patch has no such marker and carries its own name in the DEM.
+    """
+    manifest = getattr(terrain, "manifest", {}) or {}
+    windowed_from = manifest.get("windowed_from")
+    if windowed_from:
+        return os.path.basename(str(windowed_from))
+    if bool(getattr(getattr(terrain, "dem", None), "is_regional", False)):
+        return str(getattr(terrain.dem, "name", "DEM"))
+    sources = getattr(terrain, "sources", None)
+    if sources is not None and getattr(sources, "dem_path", None) is not None:
+        return os.path.basename(str(sources.dem_path))
+    return str(getattr(getattr(terrain, "dem", None), "name", "DEM"))
+
+
+def selection_tile(
+    view: MoonView,
+    lon_deg: float,
+    lat_deg: float,
+    *,
+    fov_radius_arcsec: float,
+    aspect: float = 1.0,
+    rotation_deg: float = 0.0,
+    long_side_mm: float = 100.0,
+    base_depth_km: float = 2.0,
+    vertical_exaggeration: float = 1.0,
+    resolution: int = 384,
+    terrain: Optional[MoonTerrain] = None,
+    projection: bool = True,
+    corrected: bool = False,
+) -> TerrainTile:
+    """Cut one selection out of the DEM as a closed, flat-bottomed 3D tile.
+
+    The selection is the same sky rectangle the close-up uses: *fov_radius_arcsec*
+    is its shorter half-side and *aspect* is height/width.  With
+    ``projection=True`` (the default) the model's horizontal coordinates are
+    **ground** kilometres: every point of the camera's ``tan(angle)`` grid is
+    intersected with the sphere and expressed in a local tangent frame.  That is
+    the correction which keeps a polar crater round instead of squashing it by
+    ``cos(latitude)``, and it is also why the border of an ordinary sky box is
+    curved.  ``projection=False`` instead keeps the sky plane itself, so the
+    tile has four straight sides but distances are the apparent ones.
+
+    ``corrected=True`` makes the four sides straight *and* keeps ground
+    distances: the ordinary box's ground footprint is measured, its bounding
+    rectangle becomes the tile, and the DEM is sampled on that rectangle.  The
+    matching irregular sky selection is :func:`selection_correction`.
+
+    The top is the DEM surface (with the reference sphere's local curvature
+    removed, so the tile is a relief model rather than a curved shell).  The
+    four sides drop vertically to a flat bottom at ``min(DEM) - base_depth_km``.
+    Vertices are in millimetres, x/y on the ground, z up.
+
+    Parameters
+    ----------
+    view
+        Geometry of the frame; the selection must be on its visible side.
+    lon_deg, lat_deg
+        Centre of the selection.
+    fov_radius_arcsec
+        Shorter half-side of the selection in the sky, in arcseconds.
+    aspect
+        Selection height / width.  The longer half-side follows from
+        *fov_radius_arcsec* and this ratio.
+    rotation_deg
+        Rotation of the selection in the sky, counter-clockwise.
+    long_side_mm
+        Length of the longer ground side of the printed model, millimetres.
+    base_depth_km
+        Distance from the lowest DEM point down to the flat bottom, kilometres.
+    vertical_exaggeration
+        Multiplier on z only; 1 is physically correct.  The base thickness is
+        scaled with it so the model stays closed.
+    resolution
+        Samples along the longer side, or ``0`` for the highest the DEM on disk
+        can support (its own pixel size, capped at :data:`MAX_TILE_RESOLUTION`).
+    terrain
+        An opened terrain.  ``None`` opens the global products.  A finer local
+        window is cut when the DEM on disk allows it, exactly as for a close-up.
+    projection
+        Ground-corrected x/y (default) or the raw sky plane.
+    corrected
+        Selection is the preimage of a ground rectangle; implies *projection*.
+
+    Returns
+    -------
+    TerrainTile
+        The mesh and its JSON-safe description; call :meth:`TerrainTile.stl_bytes`
+        or :meth:`TerrainTile.export_stl` for the file.
+
+    Raises
+    ------
+    MoonlibError
+        For a selection on the hidden side, past the limb, with a non-positive
+        size, or with no usable DEM samples.
+    """
+    fov = float(fov_radius_arcsec)
+    if not math.isfinite(fov) or not (0.5 <= fov <= 3600.0):
+        raise MoonlibError("fov_radius_arcsec must lie in 0.5-3600 arcseconds.")
+    ratio = float(aspect)
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        ratio = 1.0
+    scale_mm = float(long_side_mm)
+    if not math.isfinite(scale_mm) or not (5.0 <= scale_mm <= 2000.0):
+        raise MoonlibError("long_side_mm must lie in 5-2000 mm.")
+    base_depth = float(base_depth_km)
+    if not math.isfinite(base_depth) or not (0.0 <= base_depth <= 100.0):
+        raise MoonlibError("base_depth_km must lie in 0-100 km.")
+    exaggeration = float(vertical_exaggeration)
+    if not math.isfinite(exaggeration) or not (0.1 <= exaggeration <= 20.0):
+        raise MoonlibError("vertical_exaggeration must lie in 0.1-20.")
+    requested = int(resolution)
+    auto = requested <= 0
+    if not auto and (requested < 2 or requested > MAX_TILE_RESOLUTION):
+        raise MoonlibError(
+            f"resolution must lie in 0-{MAX_TILE_RESOLUTION} samples "
+            "(0 means the DEM's own resolution)."
+        )
+    corrected = bool(corrected)
+    if corrected:
+        projection = True
+    projection = bool(projection)
+
+    if terrain is None:
+        terrain = open_terrain()
+    camera = _region_camera(view, float(lon_deg), float(lat_deg), terrain)
+    # The camera must actually see the target.  Without this check a selection
+    # on the hidden hemisphere would still produce a tile -- of the *near* side
+    # hit by the same line of sight, which is a different piece of ground.
+    target = np.asarray(camera["target"], dtype=np.float64)
+    normal = target / max(float(np.linalg.norm(target)), _TINY)
+    if float(np.dot(normal, camera["origin"] - target)) <= 0.0:
+        raise MoonlibError(
+            "the selection is on the far side as seen from this observer."
+        )
+    box_right, box_up, up0, u, v = _selection_ground_frame(
+        camera, float(lon_deg), float(lat_deg), float(rotation_deg)
+    )
+    half_w, half_h = _sky_half_angles(fov, ratio)
+    reference = MOON_REFERENCE_RADIUS_KM
+    distance = float(camera["distance"])
+    correction: Optional[SelectionCorrection] = None
+    resolution_capped = False
+
+    if corrected:
+        correction = selection_correction(
+            view, float(lon_deg), float(lat_deg),
+            fov_radius_arcsec=fov, aspect=ratio,
+            rotation_deg=float(rotation_deg), terrain=terrain,
+        )
+        x0, x1, y0, y1 = correction.ground_box
+        width_km = correction.ground_width_km
+        height_km = correction.ground_height_km
+        model_ratio = height_km / width_km
+        boundary = correction.boundary_lonlat(81)
+        terrain = _tile_window(
+            terrain,
+            float(np.min(boundary[:, 0])), float(np.max(boundary[:, 0])),
+            float(np.min(boundary[:, 1])), float(np.max(boundary[:, 1])),
+        )
+        if auto:
+            samples, resolution_capped = _tile_auto_samples(
+                max(width_km, height_km), terrain.dem
+            )
+        else:
+            samples = requested
+        if model_ratio >= 1.0:
+            ny = samples
+            nx = max(2, int(round(samples / model_ratio)))
+        else:
+            nx = samples
+            ny = max(2, int(round(samples * model_ratio)))
+        xs = np.linspace(x0, x1, nx)
+        ys = np.linspace(y0, y1, ny)
+        raw_x, raw_y = np.meshgrid(xs, ys)
+        surface = _ground_to_surface(raw_x, raw_y, up0, u, v)
+        lon = np.degrees(np.arctan2(surface[..., 1], surface[..., 0]))
+        lat = np.degrees(
+            np.arcsin(np.clip(surface[..., 2] / reference, -1.0, 1.0))
+        )
+        cos_theta = np.sqrt(
+            np.maximum(reference * reference - raw_x ** 2 - raw_y ** 2, 0.0)
+        ) / reference
+        grid_x = raw_x - 0.5 * (x0 + x1)
+        grid_y = raw_y - 0.5 * (y0 + y1)
+        lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
+        lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
+    elif projection:
+        # Probe the footprint first: the auto sample count and the terrain
+        # window both need its ground extent, and neither depends on the final
+        # grid density.
+        probe = 65
+        if ratio >= 1.0:
+            probe_y = probe
+            probe_x = max(2, int(round(probe / ratio)))
+        else:
+            probe_x = probe
+            probe_y = max(2, int(round(probe * ratio)))
+        probe_u, probe_v = np.meshgrid(
+            np.tan(np.linspace(-half_w, half_w, probe_x)),
+            np.tan(np.linspace(-half_h, half_h, probe_y)),
+        )
+        px, py, plon, plat, pcos = _sky_ground_coordinates(
+            camera, box_right, box_up, up0, u, v, probe_u, probe_v
+        )
+        if (np.any(~np.isfinite(px)) or np.any(~np.isfinite(py))
+                or np.any(~np.isfinite(pcos))):
+            raise MoonlibError(
+                "the selection extends past the lunar limb; shrink it or move it inward."
+            )
+        probe_width = float(np.max(px) - np.min(px))
+        probe_height = float(np.max(py) - np.min(py))
+        if not (probe_width > 0.0 and probe_height > 0.0):
+            raise MoonlibError("the selection has no measurable ground extent.")
+        terrain = _tile_window(
+            terrain,
+            float(np.min(plon)), float(np.max(plon)),
+            float(np.min(plat)), float(np.max(plat)),
+        )
+        if auto:
+            samples, resolution_capped = _tile_auto_samples(
+                max(probe_width, probe_height), terrain.dem
+            )
+        else:
+            samples = requested
+        if ratio >= 1.0:
+            ny = samples
+            nx = max(2, int(round(samples / ratio)))
+        else:
+            nx = samples
+            ny = max(2, int(round(samples * ratio)))
+        grid_u, grid_v = np.meshgrid(
+            np.tan(np.linspace(-half_w, half_w, nx)),
+            np.tan(np.linspace(-half_h, half_h, ny)),
+        )
+        grid_x, grid_y, lon, lat, cos_theta = _sky_ground_coordinates(
+            camera, box_right, box_up, up0, u, v, grid_u, grid_v
+        )
+        if np.any(~np.isfinite(grid_x)) or np.any(~np.isfinite(cos_theta)):
+            raise MoonlibError(
+                "the selection extends past the lunar limb; shrink it or move it inward."
+            )
+        x_min, x_max = float(np.min(grid_x)), float(np.max(grid_x))
+        y_min, y_max = float(np.min(grid_y)), float(np.max(grid_y))
+        width_km = x_max - x_min
+        height_km = y_max - y_min
+        if not (width_km > 0.0 and height_km > 0.0):
+            raise MoonlibError("the selection has no measurable ground extent.")
+        # Centre the model on its own footprint; the target need not be the
+        # photogrammetric centre of a strongly tilted frame.
+        grid_x = grid_x - 0.5 * (x_min + x_max)
+        grid_y = grid_y - 0.5 * (y_min + y_max)
+        lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
+        lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
+    else:
+        # No projection correction: x/y are distances in the camera's tan
+        # plane.  The grid is rectangular by construction, so the four sides are
+        # straight; the cell size is the apparent one, not the ground one.
+        width_km = 2.0 * distance * math.tan(half_w)
+        height_km = 2.0 * distance * math.tan(half_h)
+        # Probe first so a regional window can make the auto sample count use
+        # the data that will actually be read, not the coarser pyramid under it.
+        probe = 65
+        if ratio >= 1.0:
+            probe_y = probe
+            probe_x = max(2, int(round(probe / ratio)))
+        else:
+            probe_x = probe
+            probe_y = max(2, int(round(probe * ratio)))
+        probe_u, probe_v = np.meshgrid(
+            np.tan(np.linspace(-half_w, half_w, probe_x)),
+            np.tan(np.linspace(-half_h, half_h, probe_y)),
+        )
+        _gx, _gy, plon, plat, _pcos = _sky_ground_coordinates(
+            camera, box_right, box_up, up0, u, v, probe_u, probe_v
+        )
+        if np.any(~np.isfinite(plon)) or np.any(~np.isfinite(plat)):
+            raise MoonlibError(
+                "the selection extends past the lunar limb; shrink it or move it inward."
+            )
+        terrain = _tile_window(
+            terrain,
+            float(np.min(plon)), float(np.max(plon)),
+            float(np.min(plat)), float(np.max(plat)),
+        )
+        if auto:
+            samples, resolution_capped = _tile_auto_samples(
+                max(width_km, height_km), terrain.dem
+            )
+        else:
+            samples = requested
+        if ratio >= 1.0:
+            ny = samples
+            nx = max(2, int(round(samples / ratio)))
+        else:
+            nx = samples
+            ny = max(2, int(round(samples * ratio)))
+        grid_u, grid_v = np.meshgrid(
+            np.tan(np.linspace(-half_w, half_w, nx)),
+            np.tan(np.linspace(-half_h, half_h, ny)),
+        )
+        _gx, _gy, lon, lat, _pcos = _sky_ground_coordinates(
+            camera, box_right, box_up, up0, u, v, grid_u, grid_v
+        )
+        if np.any(~np.isfinite(lon)):
+            raise MoonlibError(
+                "the selection extends past the lunar limb; shrink it or move it inward."
+            )
+        grid_x = grid_u * distance
+        grid_y = grid_v * distance
+        cos_theta = np.ones_like(grid_x)
+        lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
+        lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
+
+    sample_km = max(
+        (float(np.max(grid_x)) - float(np.min(grid_x))) / max(1, nx - 1),
+        (float(np.max(grid_y)) - float(np.min(grid_y))) / max(1, ny - 1),
+    )
+    try:
+        level = int(terrain.dem.level_for_ground_scale(sample_km))
+    except Exception:  # pragma: no cover - a minimal test DEM
+        level = 0
+    level = max(0, min(level, int(getattr(terrain.dem, "n_levels", level + 1)) - 1))
+    heights = np.asarray(
+        terrain.dem.sample(lon, lat, level), dtype=np.float64
+    )
+    if heights.shape != grid_x.shape:  # pragma: no cover - defensive
+        heights = np.broadcast_to(heights, grid_x.shape).astype(np.float64)
+    valid = np.isfinite(heights)
+    if not valid.any():
+        raise MoonlibError("the selection has no usable DEM samples.")
+    filled = int(np.count_nonzero(~valid))
+    if filled:
+        heights = np.where(valid, heights, np.nanmin(heights))
+
+    relief_km = float(np.nanmax(heights) - np.nanmin(heights))
+    min_h = float(np.nanmin(heights))
+    max_h = float(np.nanmax(heights))
+    # A Blender-facing GLB wants the colour mosaic on the top surface.  It is
+    # sampled on the same grid as the geometry, so the texture and the relief
+    # cannot disagree; a tile without a colour mosaic still exports, with a
+    # neutral material instead of a texture.
+    texture: Optional[np.ndarray] = None
+    albedo = getattr(terrain, "albedo", None)
+    if albedo is not None:
+        try:
+            albedo_level = int(albedo.level_for_ground_scale(sample_km))
+            albedo_level = max(
+                0, min(albedo_level, int(getattr(albedo, "n_levels", albedo_level + 1)) - 1)
+            )
+            sampled = terrain.albedo_rgb(lon, lat, albedo_level)
+            if sampled is not None:
+                array = np.asarray(sampled, dtype=np.float32)
+                if array.ndim == 3 and array.shape[:2] == (ny, nx):
+                    texture = array[..., :3]
+        except Exception:  # pragma: no cover - a minimal test terrain
+            texture = None
+    base_z = min_h - base_depth
+    if projection:
+        z_top_km = heights * cos_theta - base_z
+    else:
+        z_top_km = heights - base_z
+    width_km = float(np.max(grid_x) - np.min(grid_x))
+    height_km = float(np.max(grid_y) - np.min(grid_y))
+    scale = scale_mm / max(width_km, height_km)
+    z_scale = scale * exaggeration
+    x_mm = grid_x * scale
+    y_mm = grid_y * scale
+    z_mm = z_top_km * z_scale
+
+    top = np.stack(
+        [x_mm.ravel(), y_mm.ravel(), z_mm.ravel()], axis=1
+    ).astype(np.float32)
+    n_top = top.shape[0]
+    faces: List[np.ndarray] = []
+
+    # Top: two triangles per cell.  With x east and y north, [a, b, c] winds
+    # counter-clockwise seen from above, i.e. its normal points up.
+    row = np.arange(ny - 1)[:, None]
+    col = np.arange(nx - 1)[None, :]
+    a = row * nx + col
+    b = a + 1
+    c = a + nx + 1
+    d = a + nx
+    top_faces = np.concatenate([
+        np.stack([a.ravel(), b.ravel(), c.ravel()], axis=1),
+        np.stack([a.ravel(), c.ravel(), d.ravel()], axis=1),
+    ], axis=0)
+    faces.append(top_faces.astype(np.int64))
+
+    # Perimeter in counter-clockwise order: bottom edge +x, right edge +y,
+    # top edge -x, left edge -y.  One bottom vertex directly under each top
+    # perimeter vertex keeps the side walls and the bottom fan watertight.
+    perimeter = (
+        [j * nx + i for i in range(nx) for j in (0,)]
+        + [j * nx + (nx - 1) for j in range(1, ny)]
+        + [(ny - 1) * nx + i for i in range(nx - 2, -1, -1)]
+        + [j * nx for j in range(ny - 2, 0, -1)]
+    )
+    bottom = np.array(
+        [[top[index, 0], top[index, 1], 0.0] for index in perimeter],
+        dtype=np.float32,
+    )
+    center_index = n_top
+    vertices = np.concatenate(
+        [top, np.array([[0.0, 0.0, 0.0]], dtype=np.float32), bottom],
+        axis=0,
+    )
+    p = len(perimeter)
+    sides = []
+    for index in range(p):
+        t0 = perimeter[index]
+        t1 = perimeter[(index + 1) % p]
+        b0 = center_index + 1 + index
+        b1 = center_index + 1 + (index + 1) % p
+        sides.append([t0, b1, t1])
+        sides.append([t0, b0, b1])
+    faces.append(np.asarray(sides, dtype=np.int64))
+    bottom_faces = []
+    for index in range(p):
+        b0 = center_index + 1 + index
+        b1 = center_index + 1 + (index + 1) % p
+        bottom_faces.append([center_index, b1, b0])
+    faces.append(np.asarray(bottom_faces, dtype=np.int64))
+    all_faces = np.concatenate(faces, axis=0).astype(np.int32)
+
+    try:
+        terrain_km = float(terrain.dem.km_per_pixel(level))
+        terrain_native_km = float(terrain.dem.km_per_pixel(0))
+    except Exception:  # pragma: no cover - minimal test DEM
+        terrain_km = float("nan")
+        terrain_native_km = float("nan")
+    source = _terrain_source_name(terrain)
+
+    lon_span = float(lon_max - lon_min)
+    if lon_span > 180.0:
+        lon_span = 360.0 - lon_span
+    lat_span = float(lat_max - lat_min)
+    short_mm = min(width_km, height_km) * scale
+    model_height_mm = float(np.max(z_top_km) * z_scale)
+    info: Dict[str, Any] = {
+        "kind": "terrain_tile",
+        "lon_deg": float(lon_deg),
+        "lat_deg": float(lat_deg),
+        "fov_radius_arcsec": float(fov),
+        "aspect": float(ratio),
+        "rotation_deg": float(rotation_deg),
+        "projection": bool(projection),
+        "corrected": bool(corrected),
+        "width_km": float(width_km),
+        "height_km": float(height_km),
+        "lon_span_deg": lon_span,
+        "lat_span_deg": lat_span,
+        "long_side_mm": float(scale_mm),
+        "short_side_mm": float(short_mm),
+        "base_depth_km": float(base_depth),
+        "vertical_exaggeration": float(exaggeration),
+        "scale_mm_per_km": float(scale),
+        "relief_km": float(relief_km),
+        "min_height_km": float(min_h),
+        "max_height_km": float(max_h),
+        "base_z_km": float(base_z),
+        "model_height_mm": float(model_height_mm),
+        "bottom_thickness_mm": float(base_depth * z_scale),
+        "resolution": [int(nx), int(ny)],
+        "resolution_mode": "auto" if auto else "manual",
+        "requested_resolution": int(requested),
+        "resolution_capped": bool(resolution_capped),
+        "sample_km": float(sample_km),
+        "terrain_km_per_pixel": float(terrain_km),
+        "terrain_native_km_per_pixel": float(terrain_native_km),
+        "terrain_limited": bool(
+            math.isfinite(terrain_km) and sample_km < terrain_km * 0.999
+        ),
+        "terrain_source": source,
+        "filled_pixels": filled,
+        "pyramid_level": int(level),
+        "frame": (
+            "local tangent plane, mm, x/y ground, z up"
+            if projection
+            else "camera tan plane, mm, x/y sky, z from DEM"
+        ),
+        "n_vertices": int(vertices.shape[0]),
+        "n_faces": int(all_faces.shape[0]),
+        "has_texture": texture is not None,
+    }
+    if correction is not None:
+        info["corrected_fov_radius_arcsec"] = float(correction.fov_radius_arcsec)
+        info["corrected_aspect"] = float(correction.aspect)
+        info["ground_box_km"] = list(correction.ground_box)
+    return TerrainTile(
+        vertices=vertices,
+        faces=all_faces,
+        info=info,
+        texture=texture,
+        top_resolution=(int(nx), int(ny)),
+        top_count=int(nx * ny),
+        n_top_faces=int(top_faces.shape[0]),
     )
 
 
@@ -3520,6 +4452,7 @@ def view_summary(view: MoonView) -> Dict[str, Any]:
     return {
         "when_utc": view.when_utc.isoformat(),
         "observer": view.observer.as_dict(),
+        "viewpoint": view.viewpoint.value,
         "distance_km": view.distance_km,
         "angular_diameter_deg": view.angular_diameter_deg,
         "libration_lon_deg": view.libration_lon_deg,

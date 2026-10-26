@@ -1,6 +1,6 @@
 # Tsukikage
 
-**当前版本 / Version：1.5.2**
+**当前版本 / Version：1.6.0**
 
 一套可**完全离线**运行的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
 **位置、月相、升落、天平动等信息**，并能用 NASA SVS 的 LOLA 高程与
@@ -66,6 +66,15 @@ print(moonlib.reporting.format_moon_report(report))
 ```bash
 ./.venv/bin/python web/server.py --port 8765     # 打开 http://127.0.0.1:8765/
 ```
+
+第二个本地服务：月面地图（独立进程，可与模拟器同时开）：
+
+```bash
+./.venv/bin/python web/map_server.py --port 8766  # 打开 http://127.0.0.1:8766/
+```
+
+地图是 2:1 等距圆柱投影的离线瓦片金字塔：按缩放级别从同一份 DEM/色彩数据渲染，
+带地貌多图层标注、搜索、坐标与高程读数。页面与接口都是模板，新增图层不需要改渲染器。
 
 每个子命令都支持 `--json`，输出与 HTTP API 完全相同的载荷。
 
@@ -182,6 +191,13 @@ matplotlib 就有），两条路径结果一致。
 | 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib.sun`、`moonlib.analemma`、`moonlib.plotting` |
 | **月面点太阳高度/方位角** | `moonlib.lunar_surface_solar`、`moonlib.lunar_surface_solar_series`、`moon sunpoint` |
 | **观测模拟** | `moonlib.moonview` |
+| **月背视角模拟**（假想对称地球的地心） | `moonlib.view_geometry(..., viewpoint="far_side")`、全月面标题栏「月背」按钮 |
+| **3D 地形切片（STL，可直接打印）** | `moonlib.selection_tile`、网页「3D模型」 |
+| **带纹理 GLB（Blender 直接查看）** | `TerrainTile.glb_bytes()`、网页「导出 GLB」 |
+| **Blender 预览场景（.blend，含三个光照场景）** | 网页「生成 Blender 预览场景」、`POST /api/mesh/blender` |
+| **全月面 GLB / Blender 场景（当前月相 / 低角度）** | 网页「全月面」范围、`POST /api/moon/glb`、`POST /api/moon/blender` |
+| **可打印的投影修正选框** | `moonlib.selection_correction`、网页「使用带投影修正的选框」 |
+| **交互式月面地图（第二个本地服务）** | `web/map_server.py`、`web/map/` |
 | **月面特写与自动取景** | `moonlib.moonview.render_region`、`moonlib.render_feature` |
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
 | **月面 X / V / L预报** | `moonlib.events` |
@@ -241,6 +257,12 @@ node web/test_dom.js && node web/test_page.js && node web/test_projection.js
 - `tone="srgb"`/`"linear"` 是辐射度忠实的「拍摄」结果；由于暗面比亮面暗约 12 个星等，
   单次曝光必然看不到地照。`tone="visual"` 是**目视近似**（自适应 asinh 压缩），属感知
   重建而非辐射度测量。`sunlit` 与 `earthshine` 两个分量始终单独返回，便于自行合成。
+- **月背视角**（`viewpoint="far_side"`）的相机是真实地球地心的月心对称点，取地心距；
+  月背的日照是真实的，**地照来自同一颗假想地球**（相位与真实地球互补），不是真实地球
+  的光穿透月球。满月时月背是夜面，只有假想地照；新月时月背全亮。
+- **3D 地形切片**（`selection_tile` / 网页「3D模型」）在局部切平面里按**地面公里**建网格，
+  不按经纬度：极区不会因经度线收敛而东西向压扁。顶面是地形，四周竖直、底面削平；
+  STL 是毫米、z 向上的二进制文件。选框越过月缘会被拒绝；模型上限 768 采样。
 
 **分辨率上限**：默认缓存让月面直径约 2300 px 以内有真实细节；要再往上必须重建更细的
 缓存（`--detail 0 --albedo-detail 0`，约 3.5 GB）。数据本身的极限是月面直径约 7300 px

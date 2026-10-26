@@ -437,6 +437,7 @@ def moon_view(
     observer: Any = None,
     when: Any = None,
     *,
+    viewpoint: str = "earth",
     width: int = 1024,
     height: int = 1024,
     samples: int = 2,
@@ -495,10 +496,11 @@ def moon_view(
         asinh_softening=asinh_softening,
         keep_components=False,
     )
-    render = render_moon(site, when, settings=settings)
+    render = render_moon(site, when, settings=settings, viewpoint=viewpoint)
     request = {
         "observer": site.as_dict(),
         "when": to_utc_iso(render.view.et),
+        "viewpoint": viewpoint,
         "width": width,
         "height": height,
         "samples": samples,
@@ -512,6 +514,7 @@ def moon_view_png(
     observer: Any = None,
     when: Any = None,
     *,
+    viewpoint: str = "earth",
     width: int = 1024,
     height: int = 1024,
     samples: int = 2,
@@ -570,7 +573,7 @@ def moon_view_png(
         asinh_softening=asinh_softening,
         keep_components=False,
     )
-    render = render_moon(site, when, settings=settings)
+    render = render_moon(site, when, settings=settings, viewpoint=viewpoint)
     if not limb_grid:
         return encode_png(render.image)
 
@@ -606,6 +609,7 @@ def moon_feature(
     when: Any = None,
     *,
     feature: str,
+    viewpoint: str = "earth",
     margin: float = 1.25,
     width: int = 1024,
     height: Optional[int] = None,
@@ -650,13 +654,16 @@ def moon_feature(
         height if height is not None else width,
         samples,
     )
-    view = view_geometry(site, when, earth_albedo=earth_geometric_albedo)
+    view = view_geometry(
+        site, when, earth_albedo=earth_geometric_albedo, viewpoint=viewpoint
+    )
     render = render_feature(
         view, resolved, margin=margin, settings=settings, terrain=terrain
     )
     request = {
         "observer": site.as_dict(),
         "when": to_utc_iso(render.view.et),
+        "viewpoint": viewpoint,
         "feature": resolved.name_en,
         "margin": float(margin),
     }
@@ -690,6 +697,7 @@ def moon_region(
     observer: Any = None,
     when: Any = None,
     *,
+    viewpoint: str = "earth",
     lon: float = 0.0,
     lat: float = 0.0,
     span_km: float = 200.0,
@@ -737,7 +745,9 @@ def moon_region(
         height if height is not None else width,
         samples,
     )
-    view = view_geometry(site, when, earth_albedo=earth_geometric_albedo)
+    view = view_geometry(
+        site, when, earth_albedo=earth_geometric_albedo, viewpoint=viewpoint
+    )
     render = render_region(
         view,
         float(lon),
@@ -749,6 +759,7 @@ def moon_region(
     request = {
         "observer": site.as_dict(),
         "when": to_utc_iso(render.view.et),
+        "viewpoint": viewpoint,
         "lon": float(lon),
         "lat": float(lat),
         "span_km": float(span_km),
@@ -761,6 +772,7 @@ def moon_region_png(
     observer: Any = None,
     when: Any = None,
     *,
+    viewpoint: str = "earth",
     lon: float = 0.0,
     lat: float = 0.0,
     span_km: float = 200.0,
@@ -799,7 +811,9 @@ def moon_region_png(
         height if height is not None else width,
         samples,
     )
-    view = view_geometry(site, when, earth_albedo=earth_geometric_albedo)
+    view = view_geometry(
+        site, when, earth_albedo=earth_geometric_albedo, viewpoint=viewpoint
+    )
     render = render_region(
         view,
         float(lon),

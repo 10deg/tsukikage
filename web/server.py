@@ -31,7 +31,9 @@ import math
 import os
 import re
 import select
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -44,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -536,6 +539,69 @@ def _earthshine_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
     return {key: stats[key] for key in _EARTHSHINE_STAT_KEYS if key in stats}
 
 
+def _apply_region_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Zero everything outside a corrected selection.
+
+    The arrays are float radiance (one channel or RGB); the mask is a 2-D
+    coverage map.  Keeping this in one place means the cached linear frame and
+    the finished picture can never disagree about where the selection was.
+    """
+    array = np.asarray(image, dtype=np.float32)
+    coverage = np.asarray(mask, dtype=np.float32)
+    if array.ndim == 2:
+        return array * coverage
+    return array * coverage[..., None]
+
+
+def _corrected_region_mask(
+    view: Any,
+    correction: Any,
+    lon_deg: float,
+    lat_deg: float,
+    rotation_deg: float,
+    width: int,
+    height: int,
+    target_elevation_km: float,
+    terrain: Any,
+) -> np.ndarray:
+    """Rasterise the irregular selection into the rendered frame.
+
+    The close-up camera covers the smallest sky box around the irregular
+    selection.  Every boundary sample is projected through that same camera
+    (``region_frame`` is the renderer's own frame), and the polygon between
+    them is filled.  The mask is built at a capped resolution and resized, so a
+    10 000 px frame does not allocate a second 10 000 px polygon buffer.
+    """
+    from PIL import Image, ImageDraw
+
+    width = max(8, int(width))
+    height = max(8, int(height))
+    distance = float(view.distance_km)
+    span_km = 2.0 * distance * math.tan(
+        math.radians(float(correction.fov_radius_arcsec) / 3600.0)
+    )
+    frame = region_frame(
+        view, float(lon_deg), float(lat_deg), span_km, width, height,
+        rotation_deg=float(rotation_deg), terrain=terrain,
+        target_elevation_km=float(target_elevation_km),
+    )
+    lonlat = correction.boundary_lonlat(361)
+    projected = frame.project(lonlat[:, 1], lonlat[:, 0], 0.0)
+    scale = min(1.0, 2048.0 / max(width, height))
+    mask_w = max(8, int(round(width * scale)))
+    mask_h = max(8, int(round(height * scale)))
+    points = [
+        (float(x) * scale, float(y) * scale)
+        for x, y in zip(projected["x"], projected["y"])
+    ]
+    canvas = Image.new("L", (mask_w, mask_h), 0)
+    if len(points) >= 3:
+        ImageDraw.Draw(canvas).polygon(points, fill=255)
+    if (mask_w, mask_h) != (width, height):
+        canvas = canvas.resize((width, height), Image.BILINEAR)
+    return np.asarray(canvas, dtype=np.float32) / 255.0
+
+
 #: Tone curves for the single-component exports, mirroring
 #: :func:`moonlib.plotting.write_radiance_png`: the CLI writes the earthshine
 #: with a linear tone auto-exposed to its own range, and the page has to produce
@@ -642,6 +708,23 @@ def parse_observer(when: Dict[str, Any]) -> moonlib.Observer:
     )
 
 
+def parse_viewpoint(request: Dict[str, Any]) -> str:
+    """The requested viewpoint, with a safe fallback to the normal Earth view.
+
+    A hand-edited ``.conf`` or an old bookmark must not make a render fail: an
+    unknown value means "near side", not a 400.  The page only sends the two
+    known values, so this is a guard rather than a user-facing choice.
+    """
+    when = request.get("when") or {}
+    value = when.get("viewpoint")
+    if value is None:
+        value = request.get("viewpoint")
+    try:
+        return moonlib.as_viewpoint(value).value
+    except Exception:
+        return "earth"
+
+
 # ---------------------------------------------------------------------------
 # the two things the page can ask for
 # ---------------------------------------------------------------------------
@@ -737,6 +820,471 @@ def _pyramid_dem_source() -> Optional[Path]:
     return sources[0][0]
 
 
+_BLENDER_PREVIEW_TEMPLATE = r'''# -*- coding: utf-8 -*-
+import bpy, math
+from mathutils import Vector
+
+GLB = __GLB__
+OUT = __OUT__
+SOLAR_ALT = __SOLAR_ALT__
+SOLAR_AZ = __SOLAR_AZ__
+HAS_SOLAR = __HAS_SOLAR__
+DEFAULT_SCENE = __DEFAULT_SCENE__
+NOTE = __NOTE__
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.gltf(filepath=GLB)
+model = next((o for o in bpy.data.objects if o.type == 'MESH'), None)
+if model is None:
+    raise RuntimeError("GLB 中没有可用的网格")
+
+corners = [model.matrix_world @ Vector(c) for c in model.bound_box]
+min_x = min(v.x for v in corners); max_x = max(v.x for v in corners)
+min_y = min(v.y for v in corners); max_y = max(v.y for v in corners)
+min_z = min(v.z for v in corners); max_z = max(v.z for v in corners)
+center = Vector(((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, (min_z + max_z) / 2.0))
+dims = Vector((max_x - min_x, max_y - min_y, max_z - min_z))
+size = max(dims.x, dims.y, dims.z, 1e-6)
+scale = size / 0.2
+
+
+def set_render(scene):
+    engines = [item.identifier for item in
+               bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
+    scene.render.engine = 'BLENDER_EEVEE_NEXT' if 'BLENDER_EEVEE_NEXT' in engines else 'BLENDER_EEVEE'
+    scene.eevee.taa_render_samples = 64
+    scene.render.resolution_x = 1600
+    scene.render.resolution_y = 1200
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.film_transparent = False
+    try:
+        scene.view_settings.view_transform = 'AgX'
+    except Exception:
+        pass
+    try:
+        scene.view_settings.look = 'AgX - Medium High Contrast'
+    except Exception:
+        pass
+
+
+def make_world(name, color, strength):
+    world = bpy.data.worlds.new(name)
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    bg = nodes.get("Background")
+    if bg is None:
+        bg = nodes.new("ShaderNodeBackground")
+        out = nodes.get("World Output") or nodes.new("ShaderNodeOutputWorld")
+        world.node_tree.links.new(bg.outputs[0], out.inputs[0])
+    bg.inputs["Color"].default_value = color
+    bg.inputs["Strength"].default_value = strength
+    return world
+
+
+def sun_euler(alt_deg, az_deg):
+    alt = math.radians(alt_deg)
+    az = math.radians(az_deg)
+    to_sun = Vector((
+        math.sin(az) * math.cos(alt),
+        math.cos(az) * math.cos(alt),
+        math.sin(alt),
+    ))
+    return (-to_sun).to_track_quat('-Z', 'Y').to_euler()
+
+
+def make_sun(name, alt_deg, az_deg, energy, scene):
+    data = bpy.data.lights.new(name, type='SUN')
+    data.energy = energy
+    data.angle = math.radians(0.53)
+    data.use_shadow = True
+    try:
+        data.use_temperature = True
+        data.temperature = 5778.0
+    except Exception:
+        data.color = (1.0, 0.96, 0.90)
+    obj = bpy.data.objects.new(name, data)
+    scene.collection.objects.link(obj)
+    obj.rotation_euler = sun_euler(alt_deg, az_deg)
+    return obj
+
+
+studio = bpy.context.scene
+studio.name = "Studio"
+bpy.ops.mesh.primitive_plane_add(
+    size=size * 8.0,
+    location=(center.x, center.y, min_z - size * 0.002),
+)
+floor = bpy.context.object
+floor.name = "Studio floor"
+fm = bpy.data.materials.new("Studio floor")
+fm.use_nodes = True
+b = fm.node_tree.nodes.get("Principled BSDF")
+b.inputs["Base Color"].default_value = (0.035, 0.040, 0.050, 1.0)
+b.inputs["Roughness"].default_value = 0.92
+floor.data.materials.append(fm)
+studio.world = make_world("Studio world", (0.010, 0.015, 0.030, 1.0), 0.35)
+
+target = bpy.data.objects.new("Camera target", None)
+studio.collection.objects.link(target)
+target.location = center
+
+cam_data = bpy.data.cameras.new("Camera_ThreeQuarter")
+cam = bpy.data.objects.new("Camera_ThreeQuarter", cam_data)
+studio.collection.objects.link(cam)
+cam.location = center + Vector((0.58, -0.72, 0.38)).normalized() * (size * 2.2)
+cam_data.lens = 55.0
+cam_data.sensor_width = 36.0
+cam_data.clip_start = size * 0.002
+cam_data.clip_end = size * 100.0
+tr = cam.constraints.new(type='TRACK_TO')
+tr.target = target
+tr.track_axis = 'TRACK_NEGATIVE_Z'
+tr.up_axis = 'UP_Y'
+studio.camera = cam
+
+top_data = bpy.data.cameras.new("Camera_Top")
+top = bpy.data.objects.new("Camera_Top", top_data)
+studio.collection.objects.link(top)
+top.location = (center.x, center.y, max_z + size * 2.0)
+top.rotation_euler = (0.0, 0.0, 0.0)
+top_data.type = 'ORTHO'
+top_data.ortho_scale = max(dims.x, dims.y) * 1.15
+top_data.clip_start = size * 0.002
+top_data.clip_end = size * 100.0
+
+make_sun("Low side sun", 13.0, 250.0, 7.0, studio)
+fill_data = bpy.data.lights.new("Cool fill", type='AREA')
+fill_data.energy = 0.65 * scale * scale
+fill_data.shape = 'DISK'
+fill_data.size = 0.7 * scale
+fill_data.color = (0.55, 0.70, 1.0)
+fill = bpy.data.objects.new("Cool fill", fill_data)
+studio.collection.objects.link(fill)
+fill.location = center + Vector((-0.28, 0.22, 0.40)) * scale
+fill.rotation_euler = (center - fill.location).to_track_quat('-Z', 'Y').to_euler()
+
+rim_data = bpy.data.lights.new("Right rim", type='AREA')
+rim_data.energy = 1.4 * scale * scale
+rim_data.shape = 'DISK'
+rim_data.size = 0.45 * scale
+rim_data.color = (0.65, 0.80, 1.0)
+rim = bpy.data.objects.new("Right rim", rim_data)
+studio.collection.objects.link(rim)
+rim.location = center + Vector((0.42, -0.06, 0.13)) * scale
+rim.rotation_euler = (center - rim.location).to_track_quat('-Z', 'Y').to_euler()
+
+set_render(studio)
+studio.view_settings.exposure = 0.35
+studio.render.filepath = "//blender_preview.png"
+
+
+def link_scene(name):
+    scene = bpy.data.scenes.new(name)
+    for obj in (model, target, cam, top):
+        if obj.name not in scene.collection.objects:
+            scene.collection.objects.link(obj)
+    scene.camera = cam
+    set_render(scene)
+    return scene
+
+
+lunar = link_scene("Lunar Sun")
+lunar.world = make_world("Lunar sky", (0.0, 0.0, 0.0, 1.0), 0.0)
+if HAS_SOLAR:
+    make_sun("Lunar Sun (infinite)", SOLAR_ALT, SOLAR_AZ, 6.0, lunar)
+else:
+    make_sun("Lunar Sun (infinite)", 25.0, 250.0, 6.0, lunar)
+lunar.view_settings.exposure = 0.35
+lunar.render.filepath = "//blender_lunar_sun.png"
+
+term = link_scene("Lunar Terminator")
+term.world = make_world("Lunar terminator sky", (0.0, 0.0, 0.0, 1.0), 0.0)
+make_sun("Terminator Sun (infinite)", 10.0, 250.0, 9.0, term)
+term.view_settings.exposure = 0.0
+term.render.filepath = "//blender_lunar_terminator.png"
+
+text = bpy.data.texts.new("场景说明")
+text.write(NOTE)
+
+target_scene = bpy.data.scenes.get(DEFAULT_SCENE) or studio
+bpy.context.window.scene = target_scene
+bpy.ops.wm.save_as_mainfile(filepath=OUT, compress=True)
+print("SAVED", OUT, [s.name for s in bpy.data.scenes], "DEFAULT", target_scene.name)
+'''
+
+
+def _blender_preview_script(
+    glb_path: Path,
+    blend_path: Path,
+    note: str,
+    solar_alt: float,
+    solar_az: float,
+    has_solar: bool,
+    default_scene: str = "Studio",
+) -> str:
+    """The Python script Blender runs to turn the exported GLB into a scene.
+
+    Blender is optional at run time but is the only thing that can write a
+    ``.blend``: the web server generates the same GLB the page exports, imports
+    it here, adds the studio/lunar light rig and cameras, and saves a compressed
+    file with the texture already packed.
+    """
+    return (
+        _BLENDER_PREVIEW_TEMPLATE
+        .replace("__GLB__", repr(str(glb_path)))
+        .replace("__OUT__", repr(str(blend_path)))
+        .replace("__SOLAR_ALT__", repr(float(solar_alt)))
+        .replace("__SOLAR_AZ__", repr(float(solar_az)))
+        .replace("__HAS_SOLAR__", repr(bool(has_solar)))
+        .replace("__DEFAULT_SCENE__", repr(str(default_scene)))
+        .replace("__NOTE__", repr(str(note)))
+    )
+
+
+def _find_blender() -> Optional[Path]:
+    """Locate a Blender executable, without requiring it for the rest of the app."""
+    override = os.environ.get("MOONLIB_BLENDER")
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file():
+            return path
+    found = shutil.which("blender")
+    if found:
+        return Path(found)
+    for path in sorted(
+        Path("/Applications").glob("Blender*.app/Contents/MacOS/Blender"),
+        reverse=True,
+    ):
+        if path.is_file():
+            return path
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        for path in sorted(
+            Path(base).glob("Blender Foundation/Blender*/blender.exe"),
+            reverse=True,
+        ):
+            if path.is_file():
+                return path
+    return None
+
+
+def _run_blender(
+    blender: Path,
+    script_path: Path,
+    blend_path: Path,
+    timeout: float = 180.0,
+) -> None:
+    command = [
+        str(blender),
+        "-b",
+        "--factory-startup",
+        "--python-exit-code", "1",
+        "--python", str(script_path),
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError as exc:
+        raise moonlib.MoonlibError(
+            f"Blender 可执行文件不存在：{blender}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise moonlib.MoonlibError(
+            "Blender 生成预览场景超时。"
+        ) from exc
+    if result.returncode != 0 or not blend_path.is_file() or blend_path.stat().st_size == 0:
+        lines = (result.stderr or result.stdout or "").strip().splitlines()[-6:]
+        detail = " / ".join(lines) if lines else f"退出码 {result.returncode}"
+        raise moonlib.MoonlibError(f"Blender 生成预览场景失败：{detail}")
+
+
+_BLENDER_GLOBE_TEMPLATE = r'''# -*- coding: utf-8 -*-
+import bpy, math
+from mathutils import Vector, Matrix
+
+GLB = __GLB__
+OUT = __OUT__
+SUB_OBSERVER_LON = __SUB_OBSERVER_LON__
+SUB_OBSERVER_LAT = __SUB_OBSERVER_LAT__
+SUBSOLAR_LON = __SUBSOLAR_LON__
+SUBSOLAR_LAT = __SUBSOLAR_LAT__
+DEFAULT_SCENE = __DEFAULT_SCENE__
+NOTE = __NOTE__
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.gltf(filepath=GLB)
+model = next((o for o in bpy.data.objects if o.type == 'MESH'), None)
+if model is None:
+    raise RuntimeError("GLB 中没有可用的网格")
+
+corners = [model.matrix_world @ Vector(c) for c in model.bound_box]
+min_x = min(v.x for v in corners); max_x = max(v.x for v in corners)
+min_y = min(v.y for v in corners); max_y = max(v.y for v in corners)
+min_z = min(v.z for v in corners); max_z = max(v.z for v in corners)
+center = Vector(((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, (min_z + max_z) / 2.0))
+dims = Vector((max_x - min_x, max_y - min_y, max_z - min_z))
+radius = max(dims.x, dims.y, dims.z) / 2.0
+if radius <= 0.0:
+    radius = 0.1
+
+
+def set_render(scene):
+    engines = [item.identifier for item in
+               bpy.types.RenderSettings.bl_rna.properties['engine'].enum_items]
+    scene.render.engine = 'BLENDER_EEVEE_NEXT' if 'BLENDER_EEVEE_NEXT' in engines else 'BLENDER_EEVEE'
+    scene.eevee.taa_render_samples = 64
+    scene.render.resolution_x = 1600
+    scene.render.resolution_y = 1600
+    scene.render.resolution_percentage = 100
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.film_transparent = False
+    try:
+        scene.view_settings.view_transform = 'AgX'
+    except Exception:
+        pass
+    try:
+        scene.view_settings.look = 'AgX - Medium High Contrast'
+    except Exception:
+        pass
+
+
+def make_world(name, color, strength):
+    world = bpy.data.worlds.new(name)
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    bg = nodes.get("Background")
+    if bg is None:
+        bg = nodes.new("ShaderNodeBackground")
+        out = nodes.get("World Output") or nodes.new("ShaderNodeOutputWorld")
+        world.node_tree.links.new(bg.outputs[0], out.inputs[0])
+    bg.inputs["Color"].default_value = color
+    bg.inputs["Strength"].default_value = strength
+    return world
+
+
+def direction(lon_deg, lat_deg):
+    lon = math.radians(lon_deg)
+    lat = math.radians(lat_deg)
+    return Vector((
+        math.cos(lat) * math.cos(lon),
+        math.cos(lat) * math.sin(lon),
+        math.sin(lat),
+    ))
+
+
+def make_sun(name, to_sun, energy, scene):
+    data = bpy.data.lights.new(name, type='SUN')
+    data.energy = energy
+    data.angle = math.radians(0.53)
+    data.use_shadow = True
+    try:
+        data.use_temperature = True
+        data.temperature = 5778.0
+    except Exception:
+        data.color = (1.0, 0.96, 0.90)
+    obj = bpy.data.objects.new(name, data)
+    scene.collection.objects.link(obj)
+    obj.rotation_euler = (-to_sun).to_track_quat('-Z', 'Y').to_euler()
+    return obj
+
+
+# The phase camera sits at the current sub-observer point, with lunar north up.
+obs = direction(SUB_OBSERVER_LON, SUB_OBSERVER_LAT)
+lon = math.radians(SUB_OBSERVER_LON)
+lat = math.radians(SUB_OBSERVER_LAT)
+east = Vector((-math.sin(lon), math.cos(lon), 0.0))
+north = Vector((-math.sin(lat) * math.cos(lon),
+                -math.sin(lat) * math.sin(lon),
+                math.cos(lat)))
+if north.length < 1e-9:
+    north = Vector((1.0, 0.0, 0.0))
+right = north.cross(obs)
+if right.length < 1e-9:
+    right = east
+right.normalize()
+north = obs.cross(right)
+north.normalize()
+cam_data = bpy.data.cameras.new("Camera_Phase")
+cam = bpy.data.objects.new("Camera_Phase", cam_data)
+bpy.context.scene.collection.objects.link(cam)
+cam.location = center + obs * (radius * 3.2)
+rot = Matrix((right, north, obs)).transposed()
+cam.matrix_world = Matrix.Translation(cam.location) @ rot.to_4x4()
+cam_data.lens = 50.0
+cam_data.sensor_width = 36.0
+cam_data.clip_start = radius * 0.005
+cam_data.clip_end = radius * 100.0
+
+top_data = bpy.data.cameras.new("Camera_Top")
+top = bpy.data.objects.new("Camera_Top", top_data)
+bpy.context.scene.collection.objects.link(top)
+top.location = center + Vector((0.0, 0.0, radius * 3.2))
+top.rotation_euler = (0.0, 0.0, 0.0)
+top_data.type = 'ORTHO'
+top_data.ortho_scale = radius * 2.15
+top_data.clip_start = radius * 0.005
+top_data.clip_end = radius * 100.0
+
+# Current phase: the Sun is exactly at the current subsolar point.
+phase = bpy.context.scene
+phase.name = "Current phase"
+phase.camera = cam
+phase.world = make_world("Deep space", (0.006, 0.008, 0.014, 1.0), 0.18)
+make_sun("Phase Sun (infinite)", direction(SUBSOLAR_LON, SUBSOLAR_LAT), 6.0, phase)
+set_render(phase)
+phase.view_settings.exposure = 0.25
+phase.render.filepath = "//moon_globe_phase.png"
+
+# Low-angle lighting: the same globe and camera, a fixed low Sun.
+low = bpy.data.scenes.new("Low angle")
+for obj in (model, cam, top):
+    if obj.name not in low.collection.objects:
+        low.collection.objects.link(obj)
+low.camera = cam
+low.world = make_world("Deep space low", (0.006, 0.008, 0.014, 1.0), 0.18)
+low_sun = direction(250.0, 10.0)
+make_sun("Low Sun (infinite)", low_sun, 9.0, low)
+set_render(low)
+low.view_settings.exposure = 0.0
+low.render.filepath = "//moon_globe_low.png"
+
+text = bpy.data.texts.new("场景说明")
+text.write(NOTE)
+
+target_scene = bpy.data.scenes.get(DEFAULT_SCENE) or phase
+bpy.context.window.scene = target_scene
+bpy.ops.wm.save_as_mainfile(filepath=OUT, compress=True)
+print("SAVED", OUT, [s.name for s in bpy.data.scenes], "DEFAULT", target_scene.name)
+'''
+
+
+def _blender_globe_script(
+    glb_path: Path,
+    blend_path: Path,
+    note: str,
+    sub_observer_lon: float,
+    sub_observer_lat: float,
+    subsolar_lon: float,
+    subsolar_lat: float,
+    default_scene: str,
+) -> str:
+    return (
+        _BLENDER_GLOBE_TEMPLATE
+        .replace("__GLB__", repr(str(glb_path)))
+        .replace("__OUT__", repr(str(blend_path)))
+        .replace("__SUB_OBSERVER_LON__", repr(float(sub_observer_lon)))
+        .replace("__SUB_OBSERVER_LAT__", repr(float(sub_observer_lat)))
+        .replace("__SUBSOLAR_LON__", repr(float(subsolar_lon)))
+        .replace("__SUBSOLAR_LAT__", repr(float(subsolar_lat)))
+        .replace("__DEFAULT_SCENE__", repr(str(default_scene)))
+        .replace("__NOTE__", repr(str(note)))
+    )
+
+
 class MoonService:
     """Holds the terrain and the view cache, so requests stay cheap."""
 
@@ -744,6 +1292,13 @@ class MoonService:
         self._lock = threading.Lock()
         # Held for the length of a ray march, so two of them cannot run at once.
         self._render_lock = threading.Lock()
+        # Blender is a separate process and needs a whole scene directory; one
+        # preview at a time keeps two imports from competing for memory.
+        self._blender_lock = threading.Lock()
+        # The whole-Moon mesh and equirectangular albedo are independent of the
+        # selection; build them once per terrain object.
+        self._globe_lock = threading.Lock()
+        self._globe_cache: Optional[Tuple[int, bytes, Dict[str, Any]]] = None
         # The flag the running render polls.  Set by /api/cancel, replaced at the
         # start of every render: a cancel that arrives after the frame it was
         # meant for must not stop the next one.
@@ -926,11 +1481,13 @@ class MoonService:
                 self._catalogue = moonlib.annotation_catalogue()
             return self._catalogue
 
-    def view(self, when_utc: str, site: moonlib.Observer, earth_albedo: float = 0.0):
-        return self.report(when_utc, site, earth_albedo)["view"]
+    def view(self, when_utc: str, site: moonlib.Observer,
+             earth_albedo: float = 0.0, viewpoint: str = "earth"):
+        return self.report(when_utc, site, earth_albedo, viewpoint)["view"]
 
     def report(self, when_utc: str, site: moonlib.Observer,
-               earth_albedo: float = 0.0) -> Dict[str, Any]:
+               earth_albedo: float = 0.0, viewpoint: str = "earth"
+               ) -> Dict[str, Any]:
         """Geometry plus the full moon_report, cached together.
 
         The report includes rise, transit and set, which are found by root
@@ -940,19 +1497,23 @@ class MoonService:
         A non-default Earth albedo is part of that key rather than a detail of
         the render: it is read once, while the view is built, so two albedos are
         two views -- and the earthshine the frame reports has to be the one it
-        was drawn with.
+        was drawn with.  The viewpoint is part of the key for the same reason:
+        a far-side frame and a near-side frame are different views of the same
+        instant, and must not hand each other's geometry back.
         """
         key = (
             str(when_utc),
             round(site.lat, 6),
             round(site.lon, 6),
             round(float(earth_albedo or 0.0), 6),
+            str(viewpoint),
         )
         with self._lock:
             cached = self._views.get(key)
         if cached is None:
             view = moonlib.view_geometry(
-                site, when_utc, earth_albedo=earth_albedo or None
+                site, when_utc, earth_albedo=earth_albedo or None,
+                viewpoint=viewpoint,
             )
             try:
                 report = moonlib.moon_report(site, when_utc).to_dict()
@@ -1482,11 +2043,13 @@ class MoonService:
             )
         when = request.get("when") or {}
         site = parse_observer(when)
+        viewpoint = parse_viewpoint(request)
         earth = _earthshine(request.get("earthshine"))
         # The albedo describes the Earth, not the switch: a frame drawn with
         # earthshine off still reports the truth about the sky it was taken in.
         view = self.view(
-            when.get("at") or None, site, earth["earth_geometric_albedo"]
+            when.get("at") or None, site, earth["earth_geometric_albedo"],
+            viewpoint,
         )
         settings = MoonRenderSettings(
             width=int(width),
@@ -1528,8 +2091,13 @@ class MoonService:
                     cancel=_combined_cancel(frame_cancel, cancel),
                 )
         geometry = moonlib.view_summary(render.view)
+        # The left-hand 月球信息 panel is about the real Moon in the observer's
+        # sky even when the picture is the far side: rise/set/altitude have no
+        # meaning for a virtual geocentric observer.  The picture's own
+        # viewpoint travels in `geometry["viewpoint"]`.
         geometry["report"] = self.report(
-            when.get("at") or None, site, earth["earth_geometric_albedo"]
+            when.get("at") or None, site, earth["earth_geometric_albedo"],
+            "earth",
         )["report"]
         if not geometry["report"]:  # pragma: no cover - fallback
             geometry["moon_altitude_deg"] = moonlib.az_el(
@@ -1607,11 +2175,13 @@ class MoonService:
                 "No selection: drag a box on the Moon image first."
             )
         site = parse_observer(when)
+        viewpoint = parse_viewpoint(request)
         earth = _earthshine(request.get("earthshine"))
         # The albedo describes the Earth, not the switch: a frame drawn with
         # earthshine off still reports the truth about the sky it was taken in.
         view = self.view(
-            when.get("at") or None, site, earth["earth_geometric_albedo"]
+            when.get("at") or None, site, earth["earth_geometric_albedo"],
+            viewpoint,
         )
         train = parse_train(request)
         output = request.get("output") or {}
@@ -1646,14 +2216,31 @@ class MoonService:
             **earth,
         )
         started = time.time()
+        lon = _f(selection, "lon", 0.0)
+        lat = _f(selection, "lat", 0.0)
+        rotation = _f(selection, "rotation_deg", 0.0)
+        fov = _f(selection, "fov_radius_arcsec", 200.0)
+        base_aspect = _f(selection, "aspect", 1.0)
+        corrected = bool(selection.get("corrected"))
+        correction = None
+        if corrected:
+            # The page's box is still the ordinary sky rectangle; the corrected
+            # frame is the smallest rectangle around its irregular preimage.
+            # Both the render and the mask are built from this one answer.
+            correction = moonlib.selection_correction(
+                view, lon, lat,
+                fov_radius_arcsec=fov, aspect=base_aspect,
+                rotation_deg=rotation, terrain=self.terrain(),
+            )
+            fov = correction.fov_radius_arcsec
         with self._render_slot():
             with self._rendering() as frame_cancel:
                 render = moonlib.render_region(
                     view,
-                    _f(selection, "lon", 0.0),
-                    _f(selection, "lat", 0.0),
-                    fov_radius_arcsec=_f(selection, "fov_radius_arcsec", 200.0),
-                    rotation_deg=_f(selection, "rotation_deg", 0.0),
+                    lon,
+                    lat,
+                    fov_radius_arcsec=fov,
+                    rotation_deg=rotation,
                     arcsec_per_pixel=_opt_f(output, "arcsec_per_pixel"),
                     settings=settings,
                     terrain=self.terrain(),
@@ -1671,6 +2258,23 @@ class MoonService:
             else None
         )
         linear = sunlit if earthshine is None else sunlit + earthshine
+        mask_fraction = None
+        if correction is not None:
+            # The camera covers the bounding sky box; the irregular selection
+            # is the only part that is processed.  Masking the *linear* frame,
+            # before it is cached, is what makes every later slider pass and
+            # every exported component agree about the black surround.
+            mask = _corrected_region_mask(
+                view, correction, lon, lat, rotation,
+                int(render.region.width), int(render.region.height),
+                float(render.region.target_elevation_km), self.terrain(),
+            )
+            mask_fraction = float(np.mean(mask))
+            sunlit = _apply_region_mask(sunlit, mask)
+            if earthshine is not None:
+                earthshine = _apply_region_mask(earthshine, mask)
+            linear = _apply_region_mask(linear, mask)
+
 
         # The counter and the frame it names are written together: two requests
         # arriving at once must not be handed the same render_id, or the page
@@ -1703,7 +2307,17 @@ class MoonService:
                 "sub_observer_lat_deg": float(view.libration_lat_deg),
                 "observer_distance_km": float(view.distance_km),
                 "angular_diameter_deg": float(view.angular_diameter_deg),
+                "viewpoint": view.viewpoint.value,
+                "corrected": bool(corrected),
             })
+            if correction is not None:
+                region_context.update({
+                    "corrected_fov_radius_arcsec": float(correction.fov_radius_arcsec),
+                    "corrected_aspect": float(correction.aspect),
+                    "ground_width_km": float(correction.ground_width_km),
+                    "ground_height_km": float(correction.ground_height_km),
+                    "mask_fraction": mask_fraction,
+                })
             self._linear_context = {
                 "region": region_context,
                 "train": train.to_dict(),
@@ -1717,6 +2331,16 @@ class MoonService:
             "component": component,
         }
         body["region"]["render_seconds"] = time.time() - started
+        body["region"]["corrected"] = bool(corrected)
+        if correction is not None:
+            body["region"].update({
+                "corrected_fov_radius_arcsec": float(correction.fov_radius_arcsec),
+                "corrected_aspect": float(correction.aspect),
+                "ground_width_km": float(correction.ground_width_km),
+                "ground_height_km": float(correction.ground_height_km),
+                "mask_fraction": mask_fraction,
+                "ground_box_km": list(correction.ground_box),
+            })
         # Reported the way the disk render reports it, so the pane that says how
         # the frame was produced reads the same fields from both endpoints.
         body["region"]["bands"] = int(render.stats.get("bands", 1))
@@ -1730,6 +2354,7 @@ class MoonService:
         body["region"]["sub_observer_lat_deg"] = float(view.libration_lat_deg)
         body["region"]["observer_distance_km"] = float(view.distance_km)
         body["region"]["angular_diameter_deg"] = float(view.angular_diameter_deg)
+        body["region"]["viewpoint"] = view.viewpoint.value
         # The page shows two pictures of the same frame: what the geometry
         # produced, and what the processing made of it.  Both come from the one
         # cached array, so producing them together costs one extra tone map --
@@ -1766,6 +2391,303 @@ class MoonService:
         frame the labels were laid out in.
         """
         return dict(IDENTITY_PROCESSING)
+
+    def _mesh_tile(self, request: Dict[str, Any]):
+        """Build the TerrainTile a mesh request describes.
+
+        Kept separate from the JSON and file responses so both export paths
+        share exactly the same selection, projection and DEM-window decisions.
+        """
+        when = request.get("when") or {}
+        selection = request.get("selection") or {}
+        if not selection:
+            raise moonlib.MoonlibError("先在月面上选择一块区域。")
+        site = parse_observer(when)
+        viewpoint = parse_viewpoint(request)
+        view = self.view(
+            when.get("at") or None, site, viewpoint=viewpoint
+        )
+        options = request.get("mesh") or {}
+        corrected = bool(selection.get("corrected"))
+        projection = bool(options.get("projection", True))
+        # The page sends a valid fallback number in `resolution` as well as
+        # `resolution_mode`: an older server that does not know the auto mode
+        # then still exports at that number instead of rejecting the 0 sentinel.
+        # This server recomputes the exact DEM-matched count from the mode.
+        resolution_mode = str(options.get("resolution_mode") or "").strip().lower()
+        resolution = (
+            0 if resolution_mode == "auto"
+            else int(_f(options, "resolution", 0))
+        )
+        tile = moonlib.selection_tile(
+            view,
+            _f(selection, "lon", 0.0),
+            _f(selection, "lat", 0.0),
+            fov_radius_arcsec=_f(selection, "fov_radius_arcsec", 0.0),
+            aspect=_f(selection, "aspect", 1.0),
+            rotation_deg=_f(selection, "rotation_deg", 0.0),
+            long_side_mm=_f(options, "long_side_mm", 100.0),
+            base_depth_km=_f(options, "base_depth_km", 2.0),
+            vertical_exaggeration=_f(options, "vertical_exaggeration", 1.0),
+            resolution=resolution,
+            terrain=self.terrain(),
+            projection=projection,
+            corrected=corrected,
+        )
+        return tile, options
+
+    def mesh(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Cut the current selection into a printable STL and return it.
+
+        Kept as the JSON/base64 endpoint for API clients and for pages that
+        predate the binary file endpoint.  New pages use :meth:`mesh_file`.
+        """
+        tile, _options = self._mesh_tile(request)
+        encoded = base64.b64encode(tile.stl_bytes()).decode("ascii")
+        info = tile.as_dict()
+        info.update({"format": "stl", "units": "mm"})
+        return {
+            "info": info,
+            "stl": "data:model/stl;base64," + encoded,
+        }
+
+    def mesh_file(self, request: Dict[str, Any]):
+        """The finished model as binary: STL, or a textured GLB for Blender."""
+        tile, options = self._mesh_tile(request)
+        model_format = str(options.get("format") or "stl").strip().lower()
+        if model_format in ("glb", "gltf", "gltf-binary", "model/gltf-binary"):
+            data = tile.glb_bytes()
+            info = tile.as_dict()
+            info.update({"format": "glb", "units": "m"})
+            return data, info, "model/gltf-binary"
+        if model_format not in ("stl", "model/stl"):
+            raise moonlib.MoonlibError(
+                "mesh.format must be 'stl' or 'glb' "
+                f"(got {model_format!r})."
+            )
+        data = tile.stl_bytes()
+        info = tile.as_dict()
+        info.update({"format": "stl", "units": "mm"})
+        return data, info, "model/stl"
+
+    def blender_preview(self, request: Dict[str, Any]):
+        """Build the same GLB, import it with Blender, and return a .blend.
+
+        The .blend is self-contained: the mesh is imported (not linked), the
+        albedo texture is packed, and the scene carries a studio rig plus the
+        infinite-sun lunar views.  This is why the page needs a local Blender
+        for this one button; STL and GLB export do not.
+        """
+        with self._blender_lock:
+            blender = _find_blender()
+            if blender is None:
+                raise moonlib.MoonlibError(
+                    "未找到 Blender。安装 Blender，或用 MOONLIB_BLENDER "
+                    "环境变量指定可执行文件。"
+                )
+            tile, options = self._mesh_tile(request)
+            info = tile.as_dict()
+            blend_light = str(options.get("blend_light") or "phase").strip().lower()
+            if blend_light not in ("low", "phase"):
+                blend_light = "phase"
+            default_scene = "Lunar Terminator" if blend_light == "low" else "Lunar Sun"
+            when = request.get("when") or {}
+            at = when.get("at") or None
+            lon = float(info.get("lon_deg") or 0.0)
+            lat = float(info.get("lat_deg") or 0.0)
+            has_solar = False
+            solar_alt = 25.0
+            solar_az = 250.0
+            solar_illuminated = False
+            solar_when = str(at or "当前")
+            try:
+                row = moonlib.lunar_surface_solar(lon, lat, at)
+                has_solar = True
+                solar_alt = float(row.altitude_deg)
+                solar_az = float(row.azimuth_deg)
+                solar_illuminated = bool(row.illuminated)
+                solar_when = row.when_utc.isoformat()
+            except Exception:
+                # A preview is still useful if the ephemeris is unavailable;
+                # the Sun then falls back to the fixed studio direction.
+                has_solar = False
+            solar_line = (
+                f"高度 {solar_alt:.2f}°，方位 {solar_az:.2f}°"
+                if has_solar else "未计算（使用默认方向）"
+            )
+            long_mm = float(info.get("long_side_mm") or 0.0)
+            short_mm = float(info.get("short_side_mm") or 0.0)
+            note = (
+                f"模型：{long_mm:.1f} × {short_mm:.1f} mm\n"
+                f"位置：{lat:.2f}°，{lon:.2f}°\n"
+                f"时刻：{solar_when}\n"
+                f"太阳：{solar_line}\n"
+                f"纹理：{'已打包' if info.get('has_texture') else '无'}\n"
+                f"数据源：{info.get('terrain_source') or '未知'}\n"
+                f"默认场景：{default_scene}\n"
+                "场景：Studio / Lunar Sun / Lunar Terminator\n"
+            )
+            with tempfile.TemporaryDirectory(prefix="moonlib-blender-") as directory:
+                root = Path(directory)
+                glb_path = root / "model.glb"
+                blend_path = root / "preview.blend"
+                script_path = root / "build_preview.py"
+                glb_path.write_bytes(tile.glb_bytes())
+                script_path.write_text(
+                    _blender_preview_script(
+                        glb_path, blend_path, note,
+                        solar_alt, solar_az, has_solar, default_scene,
+                    ),
+                    encoding="utf-8",
+                )
+                _run_blender(blender, script_path, blend_path)
+                data = blend_path.read_bytes()
+            info.update({
+                "format": "blend",
+                "units": "m",
+                "blender": True,
+                "blend_light": blend_light,
+                "default_scene": default_scene,
+                "scenes": ["Studio", "Lunar Sun", "Lunar Terminator"],
+                "solar_altitude_deg": solar_alt,
+                "solar_azimuth_deg": solar_az,
+                "solar_illuminated": solar_illuminated,
+                "solar_has_ephemeris": has_solar,
+                "solar_when_utc": solar_when,
+            })
+            return data, info, "application/x-blender"
+
+    def _whole_moon_texture(self, terrain: Any) -> Optional[np.ndarray]:
+        """The albedo mosaic as an equirectangular RGB texture, north at row 0."""
+        if getattr(terrain, "albedo", None) is None:
+            return None
+        width, height = 2048, 1024
+        lon = -180.0 + (np.arange(width) + 0.5) / width * 360.0
+        lat = 90.0 - (np.arange(height) + 0.5) / height * 180.0
+        lon_grid, lat_grid = np.meshgrid(lon, lat)
+        colors = terrain.albedo_rgb(lon_grid, lat_grid, 0)
+        if colors is None:
+            return None
+        return np.asarray(colors[..., :3], dtype=np.float32)
+
+    def _moon_globe(self):
+        """Build (and cache) the whole-Moon textured GLB.
+
+        The globe is a display model: its radius is 0.1 m, so the finished
+        diameter is 200 mm.  The terrain displacement is preserved relative to
+        the mean radius, but kilometres are deliberately not used as Blender
+        units for a body 3,474 km across.
+        """
+        with self._globe_lock:
+            terrain = self.terrain()
+            key = id(terrain)
+            if self._globe_cache and self._globe_cache[0] == key:
+                data, info = self._globe_cache[1], self._globe_cache[2]
+                return data, dict(info)
+            mesh = terrain.build_mesh(level=2, step=None, with_albedo=False)
+            texture = self._whole_moon_texture(terrain)
+            data = mesh.glb_bytes(texture, radius_m=0.1, name="Moon")
+            sources = getattr(terrain, "sources", None)
+            source = ""
+            if sources is not None and getattr(sources, "dem_path", None):
+                source = os.path.basename(str(sources.dem_path))
+            info = {
+                "format": "glb",
+                "units": "m",
+                "scope": "moon",
+                "diameter_m": 0.2,
+                "diameter_mm": 200.0,
+                "diameter_km": 3474.8,
+                "radius_m": 0.1,
+                "n_vertices": int(mesh.n_vertices),
+                "n_faces": int(mesh.n_faces),
+                "has_texture": texture is not None,
+                "texture_size": [2048, 1024] if texture is not None else [2, 2],
+                "glb_bytes": len(data),
+                "terrain_source": source,
+            }
+            self._globe_cache = (key, data, info)
+            return data, dict(info)
+
+    def whole_moon_glb(self, request: Dict[str, Any]):
+        data, info = self._moon_globe()
+        return data, info, "model/gltf-binary"
+
+    def whole_moon_blender(self, request: Dict[str, Any]):
+        """A textured globe .blend with current-phase and low-angle scenes."""
+        with self._blender_lock:
+            blender = _find_blender()
+            if blender is None:
+                raise moonlib.MoonlibError(
+                    "未找到 Blender。安装 Blender，或用 MOONLIB_BLENDER "
+                    "环境变量指定可执行文件。"
+                )
+            data, base_info = self._moon_globe()
+            when = request.get("when") or {}
+            at = when.get("at") or None
+            site = parse_observer(when)
+            viewpoint = parse_viewpoint(request)
+            view = self.view(at, site, viewpoint=viewpoint)
+            sub_observer_lon = float(view.sub_observer_lon_deg)
+            sub_observer_lat = float(view.sub_observer_lat_deg)
+            solar_ok = False
+            subsolar_lon = 0.0
+            subsolar_lat = 0.0
+            try:
+                solar = moonlib.lunar_surface_solar(0.0, 0.0, at)
+                subsolar_lon = float(solar.subsolar_lon_deg)
+                subsolar_lat = float(solar.subsolar_lat_deg)
+                solar_ok = True
+            except Exception:
+                solar_ok = False
+            moon_options = request.get("moon") or {}
+            blend_light = str(
+                moon_options.get("blend_light") or "phase"
+            ).strip().lower()
+            if blend_light not in ("low", "phase"):
+                blend_light = "phase"
+            default_scene = "Low angle" if blend_light == "low" else "Current phase"
+            note = (
+                "全月面：直径 200.0 mm（显示比例，实际 3,474.8 km）\n"
+                f"太阳下点：{subsolar_lon:.2f}°，{subsolar_lat:.2f}°\n"
+                f"相机下点：{sub_observer_lon:.2f}°，{sub_observer_lat:.2f}°\n"
+                f"默认场景：{default_scene}\n"
+                "场景：Current phase / Low angle\n"
+                f"纹理：{'已打包' if base_info.get('has_texture') else '无'}\n"
+            )
+            with tempfile.TemporaryDirectory(prefix="moonlib-globe-") as directory:
+                root = Path(directory)
+                glb_path = root / "moon.glb"
+                blend_path = root / "moon.blend"
+                script_path = root / "build_globe_preview.py"
+                glb_path.write_bytes(data)
+                script_path.write_text(
+                    _blender_globe_script(
+                        glb_path, blend_path, note,
+                        sub_observer_lon, sub_observer_lat,
+                        subsolar_lon, subsolar_lat,
+                        default_scene,
+                    ),
+                    encoding="utf-8",
+                )
+                _run_blender(blender, script_path, blend_path)
+                blend = blend_path.read_bytes()
+            info = dict(base_info)
+            info.update({
+                "format": "blend",
+                "units": "m",
+                "scope": "moon",
+                "blender": True,
+                "blend_light": blend_light,
+                "default_scene": default_scene,
+                "scenes": ["Current phase", "Low angle"],
+                "subsolar_lon_deg": subsolar_lon,
+                "subsolar_lat_deg": subsolar_lat,
+                "sub_observer_lon_deg": sub_observer_lon,
+                "sub_observer_lat_deg": sub_observer_lat,
+                "solar_has_ephemeris": solar_ok,
+            })
+            return blend, info, "application/x-blender"
 
     def process(
         self,
@@ -1995,7 +2917,9 @@ class MoonService:
         height = int(_f(output, "height", width))
         when = request.get("when") or {}
         site = parse_observer(when)
-        view = self.view(when.get("at") or None, site)
+        view = self.view(
+            when.get("at") or None, site, viewpoint=parse_viewpoint(request)
+        )
 
         footprint = moonlib.selection_footprint(
             view, lon, lat, fov_radius_arcsec=fov, width=width, height=height,
@@ -2089,6 +3013,7 @@ class MoonService:
         """
         when = request.get("when") or {}
         site = parse_observer(when)
+        viewpoint = parse_viewpoint(request)
         start = str(request.get("start") or "")
         end = str(request.get("end") or "")
         if not start or not end:
@@ -2187,6 +3112,7 @@ class MoonService:
             return self._animation_preview(
                 site, start, end, step, settings, region, train, atmosphere,
                 processing, smooth_px, timestamp, annotations, scale_to,
+                viewpoint,
             )
 
         # The cancel flag is made *here*, before the thread exists: 终止 pressed
@@ -2224,7 +3150,7 @@ class MoonService:
                 args=(job_id, site, start, end, step, settings, fps,
                       bool(hdr.get("on")), float(_f(hdr, "stops", 3.0)),
                       region, cancel, finish, scale_to, train, atmosphere,
-                      processing, smooth_px, timestamp, annotations),
+                      processing, smooth_px, timestamp, annotations, viewpoint),
                 daemon=True,
             )
             thread.start()
@@ -2241,7 +3167,7 @@ class MoonService:
         region: Optional[Dict[str, Any]], train: Any, atmosphere: Dict[str, Any],
         processing: Dict[str, Any], smooth_px: float,
         timestamp: Optional[Dict[str, Any]], annotations: Dict[str, Any],
-        scale_to: Optional[Any],
+        scale_to: Optional[Any], viewpoint: str = "earth",
     ) -> Dict[str, Any]:
         """The run's first frame, finished exactly the way the file's would be.
 
@@ -2257,7 +3183,7 @@ class MoonService:
         started = time.time()
         frames = moonlib.animation_frames(
             site, start, end, step, settings=settings, region=region,
-            terrain=self.terrain(), graceful=True,
+            terrain=self.terrain(), graceful=True, viewpoint=viewpoint,
         )
         with self._render_slot():
             frame = next(iter(frames))
@@ -2327,7 +3253,8 @@ class MoonService:
                        processing: Optional[Dict[str, Any]] = None,
                        smooth_px: float = 0.0,
                        timestamp: Optional[Dict[str, Any]] = None,
-                       annotations: Optional[Dict[str, Any]] = None) -> None:
+                       annotations: Optional[Dict[str, Any]] = None,
+                       viewpoint: str = "earth") -> None:
         """Render every frame and encode them, off the request thread.
 
         Owns the render slot and the cancel flag that :meth:`animation` took
@@ -2344,6 +3271,7 @@ class MoonService:
                 cancel=lambda: bool(cancel.is_set() or finish.is_set()),
                 graceful=True,
                 render_cancel=cancel.is_set,
+                viewpoint=viewpoint,
             )
 
             processor = (
@@ -2578,7 +3506,11 @@ class MoonService:
         }
         if frame_name == "disk":
             when = request.get("when") or {}
-            view = self.view(when.get("at") or None, parse_observer(when))
+            view = self.view(
+                when.get("at") or None,
+                parse_observer(when),
+                viewpoint=parse_viewpoint(request),
+            )
             preview = request.get("preview") or {}
             width = int(_f(preview, "width", PREVIEW_WIDTH))
             frame = moonlib.disk_frame(view, width, width)
@@ -3348,6 +4280,27 @@ def _shift_gain(data: np.ndarray, dx: int, dy: int) -> np.ndarray:
     return out
 
 
+def _globe_filename(
+    request: Dict[str, Any], info: Dict[str, Any], extension: str
+) -> str:
+    when = (request.get("when") or {}).get("at") or "now"
+    stamp = re.sub(r"[^0-9]", "", str(when))[:12] or "now"
+    return f"moon-globe-{stamp}.{extension.lstrip('.')}"
+
+
+def _model_filename(
+    request: Dict[str, Any], info: Dict[str, Any], extension: str
+) -> str:
+    when = (request.get("when") or {}).get("at") or "now"
+    stamp = re.sub(r"[^0-9]", "", str(when))[:12] or "now"
+    lat = float(info.get("lat_deg") or 0.0)
+    lon = float(info.get("lon_deg") or 0.0)
+    return (
+        f"moon-3d-{stamp}-{lat:.1f}_{lon:.1f}."
+        f"{extension.lstrip('.')}"
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     service: MoonService = None  # type: ignore[assignment]
     server_version = "moonlib-web"
@@ -3357,7 +4310,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- helpers --------------------------------------------------------
     def _send(self, status: int, body: bytes, content_type: str,
-              filename: Optional[str] = None) -> None:
+              filename: Optional[str] = None,
+              extra_headers: Optional[Dict[str, str]] = None) -> None:
         # The whole response is inside the guard, not only the body write: a
         # page refresh between `send_response` and `end_headers` raises
         # BrokenPipeError from `flush_headers`, which used to fall through to
@@ -3367,6 +4321,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
             if filename:
                 # The animation is a file the reader asked for, so the browser
                 # must save it under a name rather than render it in a tab.
@@ -3506,6 +4462,53 @@ class Handler(BaseHTTPRequestHandler):
                      "image": _data_url(encode_png(image)),
                      "image_raw": _data_url(encode_png(raw))},
                 )
+            if path == "/api/moon/glb":
+                data, info, content_type = self.service.whole_moon_glb(request)
+                filename = _globe_filename(request, info, "glb")
+                model_info = quote(
+                    json.dumps(info, ensure_ascii=False, separators=(",", ":")),
+                    safe="",
+                )
+                return self._send(
+                    200, data, content_type, filename=filename,
+                    extra_headers={"X-Moonlib-Mesh-Info": model_info},
+                )
+            if path == "/api/moon/blender":
+                data, info, content_type = self.service.whole_moon_blender(request)
+                filename = _globe_filename(request, info, "blend")
+                model_info = quote(
+                    json.dumps(info, ensure_ascii=False, separators=(",", ":")),
+                    safe="",
+                )
+                return self._send(
+                    200, data, content_type, filename=filename,
+                    extra_headers={"X-Moonlib-Mesh-Info": model_info},
+                )
+            if path == "/api/mesh/blender":
+                data, info, content_type = self.service.blender_preview(request)
+                filename = _model_filename(request, info, "blend")
+                model_info = quote(
+                    json.dumps(info, ensure_ascii=False, separators=(",", ":")),
+                    safe="",
+                )
+                return self._send(
+                    200, data, content_type, filename=filename,
+                    extra_headers={"X-Moonlib-Mesh-Info": model_info},
+                )
+            if path == "/api/mesh/file":
+                data, info, content_type = self.service.mesh_file(request)
+                extension = "glb" if content_type == "model/gltf-binary" else "stl"
+                filename = _model_filename(request, info, extension)
+                model_info = quote(
+                    json.dumps(info, ensure_ascii=False, separators=(",", ":")),
+                    safe="",
+                )
+                return self._send(
+                    200, data, content_type, filename=filename,
+                    extra_headers={"X-Moonlib-Mesh-Info": model_info},
+                )
+            if path == "/api/mesh":
+                return self._json(200, self.service.mesh(request))
             if path == "/api/sky":
                 # Samples, not a picture: the window draws, re-ranges and
                 # labels the same tracks without another round trip.

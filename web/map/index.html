@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>月面地图 · Lunar Map</title>
+<link rel="stylesheet" href="/static/map.css">
+</head>
+<body>
+<header class="map-header">
+  <div class="brand">
+    <span class="moon-mark" aria-hidden="true">☾</span>
+    <div>
+      <h1>月面地图</h1>
+      <p>Lunar Map</p>
+    </div>
+  </div>
+
+  <form class="search" id="search-form" autocomplete="off">
+    <input id="search-input" type="search" placeholder="搜索地名" aria-label="搜索地名">
+    <button type="submit" aria-label="搜索">搜索</button>
+    <div class="search-results" id="search-results" hidden></div>
+  </form>
+
+  <div class="header-actions">
+    <button id="zoom-out" title="缩小">−</button>
+    <span id="zoom-label">1×</span>
+    <button id="zoom-in" title="放大">+</button>
+    <button id="fit" title="显示整个月面">全月</button>
+    <button id="export-map" title="把当前视图保存为 PNG">导出</button>
+  </div>
+</header>
+
+<main class="map-shell">
+  <aside class="panel layer-panel">
+    <div class="panel-heading">
+      <h2>图层</h2>
+      <span class="hint" id="layer-count"></span>
+    </div>
+    <div id="layer-list" class="layer-list"></div>
+    <div class="panel-actions">
+      <button id="layers-all">全选</button>
+      <button id="layers-none">全不选</button>
+    </div>
+
+    <h2>显示</h2>
+    <label class="field">
+      <span>底图亮度</span>
+      <input id="base-brightness" type="range" min="0.35" max="1.6" step="0.05" value="1">
+    </label>
+    <label class="check">
+      <input id="labels-toggle" type="checkbox" checked>
+      <span>名称</span>
+    </label>
+    <label class="check">
+      <input id="diameter-toggle" type="checkbox" checked>
+      <span>真实直径</span>
+    </label>
+
+    <h2>工具</h2>
+    <div class="panel-actions">
+      <button id="copy-coords">复制坐标</button>
+      <button id="clear-selection">清除选中</button>
+    </div>
+    <div id="tool-slot" class="tool-slot"></div>
+  </aside>
+
+  <section class="map-stage" id="map-stage">
+    <canvas id="map-canvas"></canvas>
+    <div class="map-loading" id="map-loading" hidden>渲染中…</div>
+    <div class="map-tooltip" id="map-tooltip" hidden></div>
+    <div class="map-coords" id="map-coords">—</div>
+    <div class="scale-bar" id="scale-bar">
+      <span id="scale-label"></span>
+      <i id="scale-rule"></i>
+    </div>
+  </section>
+
+  <aside class="panel info-panel">
+    <h2>选中对象</h2>
+    <div id="selection-info" class="selection-info empty">—</div>
+
+    <h2>位置</h2>
+    <dl class="facts" id="position-info">
+      <dt>经度</dt><dd id="fact-lon">—</dd>
+      <dt>纬度</dt><dd id="fact-lat">—</dd>
+      <dt>高程</dt><dd id="fact-elevation">—</dd>
+      <dt>缩放</dt><dd id="fact-zoom">—</dd>
+    </dl>
+
+    <h2>数据</h2>
+    <dl class="facts" id="data-info">
+      <dt>高程</dt><dd id="fact-dem">—</dd>
+      <dt>色彩</dt><dd id="fact-albedo">—</dd>
+      <dt>标注</dt><dd id="fact-features">—</dd>
+    </dl>
+  </aside>
+</main>
+
+<footer class="map-footer">
+  <span id="status">正在连接本地地图服务…</span>
+  <span id="source-label"></span>
+  <span id="feature-count"></span>
+</footer>
+
+<script src="/static/map.js"></script>
+</body>
+</html>

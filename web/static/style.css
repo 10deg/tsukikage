@@ -499,6 +499,15 @@ label > output {
 /* A hint with nothing in it takes no room: several of them are filled in only
    once a render has reported something. */
 .hint:empty { display: none; }
+.download-link {
+  align-self: center;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+.download-link[hidden] { display: none; }
 .hint {
   margin: 5px 0 6px;
   font-size: 10.5px;
@@ -626,6 +635,22 @@ button[aria-pressed="true"] {
    own controls no longer live up here -- the resolution went into the picture's
    top-left corner and the save row below it. */
 .view-title { color: var(--accent); font-weight: 600; }
+/* The full-disk title row: the title on the left, the one uncommon camera
+   switch on the right.  Keeping it out of the parameter columns is what lets
+   the left column stay the height it was. */
+.disk-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+.viewpoint-toggle {
+  margin-left: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.viewpoint-toggle .en { margin-left: 2px; }
 
 /* Controls floating over a picture.  Both sit above the label layer (z-index 1)
    and neither may start a selection drag: the script checks for `.view-tools`. */
@@ -807,6 +832,7 @@ button.outline {
   font-weight: 600;
 }
 button.outline:hover { border-color: var(--ink); color: var(--ink); }
+button.compact { padding: 3px 8px; font-size: 11px; }
 
 /* ── the landform panel, at the top of the full disk ───────────────────────
    The names and the geometric overlays both land on this picture, so the panel

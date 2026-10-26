@@ -648,13 +648,21 @@ def format_moon_view(view: Any, language: str = "both") -> str:
         f"   {view.when_utc:%Y-%m-%d %H:%M:%S} UTC"
     )
     lines.append(_RULE)
+    viewpoint = getattr(view, "viewpoint", "earth")
+    far_side = getattr(viewpoint, "value", viewpoint) == "far_side"
+    if far_side:
+        lines.append(
+            f"  {_label('视角', 'Viewpoint', language):<22}: "
+            "月背 / far side (hypothetical geocentric Earth, site not used)"
+        )
     observer = view.observer
     lines.append(
         f"  {_label('观测地', 'Site', language):<22}: {observer.name}  "
         f"({observer.lat:+.4f}°, {observer.lon:+.4f}°, {observer.height_km:.3f} km)"
     )
+    distance_label = '地心距离' if far_side else '站心距离'
     lines.append(
-        f"  {_label('站心距离', 'Distance', language):<22}: "
+        f"  {_label(distance_label, 'Distance', language):<22}: "
         f"{view.distance_km:,.1f} km"
     )
     lines.append(

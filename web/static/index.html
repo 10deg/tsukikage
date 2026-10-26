@@ -156,7 +156,15 @@
 
       <figure class="view view-disk" data-view="disk">
         <figcaption class="disk-head">
-          <span class="view-title">全月面 <span class="en">Full disk</span></span>
+          <div class="disk-title-row">
+            <span class="view-title">全月面 <span class="en">Full disk</span></span>
+            <!-- 视角不是常用功能，所以它不占左栏的常驻行：只在全月面标题栏
+                 最右侧留一个小按钮。按下＝月背（假想地心），弹起＝近地侧。
+                 该视角与观测地点无关；从月背看，月面东侧在画面左边。 -->
+            <button class="ghost mini viewpoint-toggle" id="viewpoint"
+                    aria-pressed="false"
+                    title="月背视角：把相机放在与真实地球关于月心对称的假想地球上（地心），从那一侧看月背。太阳照明仍按真实星历；地照来自同一颗假想地球，相位与真实地球互补。与观测地点无关；从月背看，月面东侧在画面左边。">月背 <span class="en">Far side</span></button>
+          </div>
 
           <!-- ── 月面地貌标注：名字与几何标注都画在全月面上，控件就放在这张图
                的顶上。第一行是开关、搜索，右边的小箭头把下面这一整块（外观设置、
@@ -883,6 +891,7 @@
           <span class="tabs" id="proc-image-tabs">
             <button class="tab" data-image="imaging" aria-pressed="true">成像模拟</button>
             <button class="tab" data-image="post" aria-pressed="false">后期处理</button>
+            <button class="tab" data-image="model" aria-pressed="false">3D模型</button>
           </span>
           <div id="proc-controls">
           <div class="train-pane" id="proc-imaging">
@@ -1016,6 +1025,75 @@
                    min="-180" max="180" step="0.5" value="0.0">
             <span class="unit">°</span>
           </div>
+          </div>
+
+          <!-- 3D模型：成像模拟 / 后期处理之后的第三种输出。不是第三张照片，
+               而是当前选框的实体切片。 -->
+          <div class="train-pane" id="proc-model" hidden>
+            <div class="param-row">
+              <span class="slider-label">范围</span>
+              <select id="mesh-scope">
+                <option value="selection" selected>当前选框</option>
+                <option value="moon">全月面</option>
+              </select>
+            </div>
+            <p class="hint" id="mesh-plan" hidden></p>
+            <div id="mesh-selection-controls">
+            <div class="param-row">
+              <span class="slider-label">长边尺寸</span>
+              <input type="number" id="mesh-size-mm" value="100" min="5" max="2000" step="1">
+              <span class="unit">mm</span>
+            </div>
+            <div class="param-row"
+                 title="底部平面距离选框内 DEM 最低点多少公里；这是模型的底座厚度">
+              <span class="slider-label">底部厚度</span>
+              <input type="number" id="mesh-base-km" value="2" min="0" max="100" step="0.1">
+              <span class="unit">km</span>
+            </div>
+            <div class="param-row"
+                 title="只放大高度方向；1 是物理正确值，起伏太小、想打印得更明显时可以调高">
+              <span class="slider-label">垂向夸张</span>
+              <input type="number" id="mesh-vertical" value="1" min="0.1" max="20" step="0.1">
+              <span class="unit">×</span>
+            </div>
+            <div class="param-row"
+                 title="沿长边的采样数；匹配当前数据源按当前 DEM 的原生分辨率计算采样数。">
+              <span class="slider-label">采样</span>
+              <select id="mesh-resolution">
+                <option value="auto" selected>匹配当前数据源</option>
+                <option value="128">128</option>
+                <option value="256">256</option>
+                <option value="384">384</option>
+                <option value="512">512</option>
+                <option value="768">768</option>
+              </select>
+              <span class="unit">长边</span>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="mesh-projection" checked>
+              <span>投影修正</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="mesh-corrected">
+              <span>使用带投影修正的选框</span>
+            </label>
+            </div>
+            <div class="param-row">
+              <span class="slider-label">光照</span>
+              <select id="mesh-blend-light" title="生成 Blender 预览场景时使用的默认光照">
+                <option value="low">低角度光照</option>
+                <option value="phase" selected>当前月相光照</option>
+              </select>
+            </div>
+            <div class="row">
+              <button class="primary" id="mesh-export">导出 STL <span class="en">Export STL</span></button>
+              <button class="outline" id="mesh-export-glb"
+                      title="带地貌纹理的 GLB（单位 m），可直接拖进 Blender 查看">导出 GLB <span class="en">Export GLB</span></button>
+              <button class="outline compact" id="mesh-export-blend"
+                      title="生成可直接用 Blender 打开的 .blend 预览场景（含纹理与无穷远太阳）">生成 Blender 预览场景</button>
+              <a class="download-link" id="mesh-download" hidden>下载文件</a>
+            </div>
+            <p class="hint" id="mesh-status" hidden></p>
           </div>
 
           <div class="row proc-actions">
@@ -1285,6 +1363,7 @@
             <p class="hint anim-plan" id="anim-plan"><span id="anim-scale-note"></span><span id="anim-span"></span></p>
             <p class="hint" id="anim-status" hidden></p>
           </div>
+
         </section>
       </div>
 

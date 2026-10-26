@@ -23,19 +23,22 @@ const SELECT_OPTIONS = new Map(
 
 /* Which controls are checkboxes is read out of the markup, the way the browser
    reads it, so the stub cannot disagree with the page about what a control is. */
-const CHECKBOX_IDS = new Set(
+const CHECKBOX_TAGS = new Map(
   [...readStatic('index.html').matchAll(/<input[^>]*>/g)]
     .map((tag) => tag[0])
     .filter((tag) => /type="checkbox"/.test(tag))
-    .map((tag) => (tag.match(/id="([^"]+)"/) || [])[1])
-    .filter(Boolean));
+    .map((tag) => [(tag.match(/id="([^"]+)"/) || [])[1], tag])
+    .filter(([id]) => Boolean(id)));
+const CHECKBOX_IDS = new Set(CHECKBOX_TAGS.keys());
+const CHECKBOX_DEFAULT = new Map(
+  [...CHECKBOX_TAGS].map(([id, tag]) => [id, /(^|\s)checked(\s|>|=)/.test(tag)]));
 
 function makeElement(id) {
   return {
     id,
     type: CHECKBOX_IDS.has(id) ? 'checkbox' : 'text',
     value: id === 'sel-rotation' ? '0' : '',
-    checked: CHECKBOX_IDS.has(id),
+    checked: CHECKBOX_DEFAULT.get(id) || false,
     disabled: false,
     options: (SELECT_OPTIONS.get(id) || []).map((value) => ({ value })),
     selectedOptions: [{ textContent: '全月面预览' }],

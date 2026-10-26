@@ -47,7 +47,7 @@ is why the umbra radius carries the conventional 2% allowance.
     The "Jewelled Handle" (also called the Golden Handle): the bright arc where
     the rising Sun first clears the Montes Jura, near Promontorium Laplace.
     The anchor is 36.60°W, 43.39°N and the solar altitude band is -2.5°–2.0°
-    with 0.5° as the best moment.  First described by Patrick Moore.
+    with -2.0° as the best moment.  First described by Patrick Moore.
 """
 
 from __future__ import annotations
@@ -144,12 +144,12 @@ LXV_ANCHOR_LAT_DEG = -58.54
 
 #: The Jewelled Handle (the Golden Handle), near Promontorium Laplace on the
 #: Montes Jura.  The anchor and the band are the ones the observer supplied for
-#: this release; 0.5° remains the best moment, inside the wider band.
+#: this release; -2.0° is the best moment, inside the wider band.
 JEWELLED_HANDLE_ANCHOR_LON_DEG = -36.60
 JEWELLED_HANDLE_ANCHOR_LAT_DEG = 43.39
 JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG = -2.5
 JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG = 2.0
-JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = 0.5
+JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = -2.0
 
 KIND_LABELS = {
     "full_moon": "满月",

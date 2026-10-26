@@ -85,6 +85,8 @@ __all__ = [
     "ENV_TERRAIN_DIR",
     "TOPOGRAPHY_PROBE",
     "TerrainSources",
+    "SurfaceMesh",
+    "TerrainTile",
     "found_sources",
     "find_sources",
     "find_covering_region",
@@ -1920,6 +1922,197 @@ class SurfaceMesh:
             raise TerrainDataError(f"Cannot write mesh {target}: {exc}") from exc
         return target
 
+    def glb_bytes(
+        self,
+        texture: Optional[np.ndarray] = None,
+        *,
+        radius_m: float = 0.1,
+        name: str = "Moon",
+    ) -> bytes:
+        """Binary glTF of this surface with an embedded equirectangular texture.
+
+        The mesh is the displaced sphere in kilometres; positions are scaled to
+        a display radius in **metres** and rotated from the Moon-fixed z-up frame
+        into glTF's y-up frame.  ``uv`` carries selenographic lon/lat and is
+        normalised here; ``texture`` is an RGB array whose row 0 is +90 deg
+        latitude (north) and whose columns run -180..180 deg.  The image is
+        embedded, so Blender needs no external mosaic.
+        """
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        normals = np.asarray(self.normals, dtype=np.float64)
+        uv = np.asarray(self.uv, dtype=np.float64)
+        faces = np.asarray(self.faces, dtype=np.int64)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise TerrainDataError("GLB vertices must be an (n, 3) array.")
+        if normals.shape != vertices.shape:
+            raise TerrainDataError("GLB normals must match the vertices.")
+        if uv.shape != (len(vertices), 2):
+            raise TerrainDataError("GLB UVs must be an (n, 2) array of lon/lat.")
+        if faces.ndim != 2 or faces.shape[1] != 3 or not len(faces):
+            raise TerrainDataError("GLB faces must be a non-empty (m, 3) array.")
+        if faces.min() < 0 or faces.max() >= len(vertices):
+            raise TerrainDataError("GLB face index outside the vertex array.")
+        if not (radius_m > 0.0):
+            raise TerrainDataError("GLB radius must be positive.")
+
+        scale = float(radius_m) / float(MOON_REFERENCE_RADIUS_KM)
+        positions = np.stack(
+            [vertices[:, 0], vertices[:, 2], -vertices[:, 1]], axis=1
+        ) * scale
+        normals_gltf = np.stack(
+            [normals[:, 0], normals[:, 2], -normals[:, 1]], axis=1
+        )
+        lengths = np.linalg.norm(normals_gltf, axis=1)
+        good = lengths > 1e-12
+        normals_gltf[good] /= lengths[good, None]
+        normals_gltf[~good] = (0.0, 1.0, 0.0)
+
+        # The grid has degenerate faces at the poles; their cross product is
+        # zero.  For the rest, align the winding with the outward vertex
+        # normals so Blender sees the visible side.
+        triangles = vertices[faces]
+        cross = np.cross(
+            triangles[:, 1] - triangles[:, 0],
+            triangles[:, 2] - triangles[:, 0],
+        )
+        face_normals = normals[faces].mean(axis=1)
+        outward = np.einsum("ij,ij->i", cross, face_normals) >= 0.0
+        if int(np.count_nonzero(outward)) < len(faces) // 2:
+            faces = faces[:, ::-1]
+
+        u = (uv[:, 0] + 180.0) / 360.0
+        v = (90.0 - uv[:, 1]) / 180.0
+        uvs = np.stack([np.clip(u, 0.0, 1.0), np.clip(v, 0.0, 1.0)], axis=1)
+        if texture is None:
+            texture = np.full((2, 2, 3), 0.5, dtype=np.float64)
+        texture = np.asarray(texture, dtype=np.float64)
+        if texture.ndim != 3 or texture.shape[2] < 3:
+            raise TerrainDataError("GLB texture must be an (h, w, 3+) array.")
+        image = _png_rgb8(_srgb_u8(texture[..., :3]))
+        positions32 = np.ascontiguousarray(positions, dtype=np.float32)
+        normals32 = np.ascontiguousarray(normals_gltf, dtype=np.float32)
+        uvs32 = np.ascontiguousarray(uvs, dtype=np.float32)
+        indices32 = np.ascontiguousarray(faces.reshape(-1), dtype=np.uint32)
+
+        buffer = bytearray()
+        views: List[Dict[str, Any]] = []
+        accessors: List[Dict[str, Any]] = []
+
+        def add_view(data: bytes, target: Optional[int] = None) -> int:
+            while len(buffer) % 4:
+                buffer.append(0)
+            offset = len(buffer)
+            buffer.extend(data)
+            view: Dict[str, Any] = {
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": len(data),
+            }
+            if target is not None:
+                view["target"] = int(target)
+            views.append(view)
+            return len(views) - 1
+
+        def add_accessor(
+            view: int,
+            component: int,
+            count: int,
+            kind: str,
+            minimum: Optional[Any] = None,
+            maximum: Optional[Any] = None,
+        ) -> int:
+            accessor: Dict[str, Any] = {
+                "bufferView": int(view),
+                "componentType": int(component),
+                "count": int(count),
+                "type": kind,
+            }
+            if minimum is not None:
+                accessor["min"] = [float(value) for value in minimum]
+            if maximum is not None:
+                accessor["max"] = [float(value) for value in maximum]
+            accessors.append(accessor)
+            return len(accessors) - 1
+
+        position_view = add_view(positions32.tobytes(), 34962)
+        normal_view = add_view(normals32.tobytes(), 34962)
+        uv_view = add_view(uvs32.tobytes(), 34962)
+        index_view = add_view(indices32.tobytes(), 34963)
+        image_view = add_view(image)
+        position_accessor = add_accessor(
+            position_view, 5126, len(positions32), "VEC3",
+            positions32.min(axis=0), positions32.max(axis=0),
+        )
+        normal_accessor = add_accessor(
+            normal_view, 5126, len(normals32), "VEC3"
+        )
+        uv_accessor = add_accessor(uv_view, 5126, len(uvs32), "VEC2")
+        index_accessor = add_accessor(
+            index_view, 5125, int(indices32.size), "SCALAR"
+        )
+
+        document: Dict[str, Any] = {
+            "asset": {
+                "version": "2.0",
+                "generator": "Tsukikage moonlib",
+                "extras": {
+                    "units": "m",
+                    "radius_m": float(radius_m),
+                    "frame": "glTF y-up; source MOON_ME z-up",
+                },
+            },
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0, "name": name}],
+            "meshes": [{
+                "name": name,
+                "primitives": [{
+                    "attributes": {
+                        "POSITION": position_accessor,
+                        "NORMAL": normal_accessor,
+                        "TEXCOORD_0": uv_accessor,
+                    },
+                    "indices": index_accessor,
+                    "material": 0,
+                    "mode": 4,
+                }],
+            }],
+            "materials": [{
+                "name": "Lunar surface",
+                "pbrMetallicRoughness": {
+                    "baseColorTexture": {"index": 0},
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 0.9,
+                },
+            }],
+            "textures": [{"sampler": 0, "source": 0}],
+            "samplers": [{
+                "magFilter": 9729,
+                "minFilter": 9729,
+                "wrapS": 33071,
+                "wrapT": 33071,
+            }],
+            "images": [{"bufferView": image_view, "mimeType": "image/png"}],
+            "buffers": [{"byteLength": len(buffer)}],
+            "bufferViews": views,
+            "accessors": accessors,
+        }
+        encoded = json.dumps(
+            document, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        while len(encoded) % 4:
+            encoded += b" "
+        while len(buffer) % 4:
+            buffer.append(0)
+        total = 12 + 8 + len(encoded) + 8 + len(buffer)
+        return (
+            struct.pack("<4sII", b"glTF", 2, total)
+            + struct.pack("<II", len(encoded), 0x4E4F534A)
+            + encoded
+            + struct.pack("<II", len(buffer), 0x004E4942)
+            + bytes(buffer)
+        )
+
     def export_obj(self, path: Any) -> Path:
         """Write a Wavefront OBJ with texture coordinates and vertex colours.
 
@@ -1960,6 +2153,386 @@ class SurfaceMesh:
                     handle.write(f"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n")
         except OSError as exc:
             raise TerrainDataError(f"Cannot write mesh {target}: {exc}") from exc
+        return target
+
+
+def _srgb_u8(linear: np.ndarray) -> np.ndarray:
+    """Linear RGB (0..1) to 8-bit sRGB for a glTF base-colour texture."""
+    value = np.clip(np.asarray(linear, dtype=np.float64), 0.0, 1.0)
+    srgb = np.where(
+        value <= 0.0031308,
+        value * 12.92,
+        1.055 * np.power(value, 1.0 / 2.4) - 0.055,
+    )
+    return np.clip(srgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+def _png_rgb8(rgb: np.ndarray) -> bytes:
+    """A minimal RGB8 PNG writer, so a GLB needs no Pillow at export time."""
+    array = np.asarray(rgb, dtype=np.uint8)
+    if array.ndim == 2:
+        array = np.repeat(array[..., None], 3, axis=-1)
+    if array.ndim != 3 or array.shape[2] < 3:
+        raise TerrainDataError("PNG texture must have three colour channels.")
+    height, width = int(array.shape[0]), int(array.shape[1])
+    raw = bytearray()
+    for row in array[..., :3]:
+        raw.append(0)  # filter type: none
+        raw.extend(row.tobytes())
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+        + chunk(b"IEND", b"")
+    )
+
+
+@dataclass(frozen=True)
+class TerrainTile:
+    """A closed, flat-bottomed local terrain tile, ready for STL.
+
+    Unlike :class:`SurfaceMesh`, which is a displaced *sphere*, this is a solid
+    cut from the DEM in a local tangent frame:
+
+    * ``x`` and ``y`` are ground distances in millimetres, not degrees, and
+      they are sampled on a regular Cartesian grid -- so a crater at a high
+      latitude is not compressed by ``cos(latitude)`` the way an equal-degree
+      lon/lat grid would compress it;
+    * ``z`` is up in millimetres, measured from the flat bottom;
+    * the top is the DEM, the four sides drop vertically, and the bottom is one
+      plane at ``z = 0``.  The bottom therefore sits a requested distance below
+      the lowest DEM point in the tile.
+
+    The vertices and faces are the mesh; ``info`` is the JSON-safe description
+    a viewer or the page needs (dimensions, relief, resolution, warning flags).
+    Units are millimetres because that is what STL consumers (slicers, printer
+    software) assume.
+    """
+
+    vertices: np.ndarray
+    faces: np.ndarray
+    info: Dict[str, Any] = field(default_factory=dict)
+    #: Top-surface colour sampled from the DEM's albedo mosaic, shape
+    #: ``(ny, nx, 3)`` in linear RGB.  ``None`` means the viewer gets a
+    #: neutral material rather than a texture.
+    texture: Optional[np.ndarray] = None
+    #: ``(nx, ny)`` of the top grid.  ``top_count``/``n_top_faces`` split the
+    #: indexed tile into its textured top and its plain sides/bottom.
+    top_resolution: Optional[Tuple[int, int]] = None
+    top_count: int = 0
+    n_top_faces: int = 0
+
+    @property
+    def n_vertices(self) -> int:
+        return int(self.vertices.shape[0])
+
+    @property
+    def n_faces(self) -> int:
+        return int(self.faces.shape[0])
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "n_vertices": self.n_vertices,
+            "n_faces": self.n_faces,
+            "stl_bytes": self.stl_size,
+            "has_texture": self.texture is not None,
+            "glb_available": bool(self.top_resolution and self.top_count and self.n_top_faces),
+            **{key: value for key, value in self.info.items()},
+        }
+
+    @property
+    def stl_size(self) -> int:
+        """Bytes of the binary STL this tile writes: 84 + 50 bytes/triangle."""
+        return 84 + 50 * self.n_faces
+
+    def stl_bytes(self) -> bytes:
+        """Binary little-endian STL in millimetres, z-up, normals per facet."""
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        faces = np.asarray(self.faces, dtype=np.int64)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise TerrainDataError("STL vertices must be an (n, 3) array.")
+        if faces.ndim != 2 or faces.shape[1] != 3:
+            raise TerrainDataError("STL faces must be an (m, 3) array.")
+        if faces.size and (faces.min() < 0 or faces.max() >= len(vertices)):
+            raise TerrainDataError("STL face index outside the vertex array.")
+        triangles = vertices[faces]  # (m, 3, 3)
+        normals = np.cross(
+            triangles[:, 1] - triangles[:, 0],
+            triangles[:, 2] - triangles[:, 0],
+        )
+        lengths = np.linalg.norm(normals, axis=1)
+        good = lengths > 1e-12
+        normals[good] /= lengths[good, None]
+        normals[~good] = 0.0
+        header = b"moonlib STL: local lunar terrain tile, mm, z-up"
+        header = header[:80].ljust(80, b" ")
+        record = np.dtype([
+            ("normal", "<f4", (3,)),
+            ("v", "<f4", (3, 3)),
+            ("attr", "<u2"),
+        ])
+        records = np.empty(len(faces), dtype=record)
+        records["normal"] = normals.astype(np.float32)
+        records["v"] = triangles.astype(np.float32)
+        records["attr"] = 0
+        return (
+            header
+            + struct.pack("<I", len(faces))
+            + records.tobytes()
+        )
+
+    def glb_bytes(self) -> bytes:
+        """A binary glTF (GLB) of the tile, textured for Blender/three.js.
+
+        The top is a smooth-shaded indexed grid carrying an embedded albedo
+        PNG; the sides and the flat bottom are a second primitive with a plain
+        material.  Positions are in **metres** and converted from the tile's
+        local z-up frame to glTF's y-up frame, so Blender's glTF importer puts
+        the model back on its base with no extra rotation.  The STL remains the
+        millimetre/z-up file for slicers; this is the viewing/collaboration
+        file.
+
+        A tile produced by :func:`moonlib.selection_tile` carries the texture
+        and top-grid split.  Constructing a bare ``TerrainTile`` still works for
+        STL; GLB raises a clear error rather than guessing which faces are the
+        top.
+        """
+        if not self.top_resolution or not self.top_count or not self.n_top_faces:
+            raise TerrainDataError(
+                "GLB export needs a tile produced by selection_tile() with its "
+                "textured top grid."
+            )
+        nx, ny = (int(value) for value in self.top_resolution)
+        if nx * ny != self.top_count:
+            raise TerrainDataError(
+                "GLB top grid does not match the tile's top vertex count."
+            )
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        faces = np.asarray(self.faces, dtype=np.int64)
+        if faces.ndim != 2 or faces.shape[1] != 3:
+            raise TerrainDataError("GLB faces must be an (m, 3) array.")
+        top = vertices[:self.top_count] * 0.001
+        top_faces = faces[:self.n_top_faces]
+        base_faces = faces[self.n_top_faces:]
+        # Original frame: x east, y north, z up, millimetres.  glTF is y-up,
+        # right-handed: (x, z, -y) is a proper rotation, and Blender's importer
+        # turns it back into (x, y, z) on import.
+        top_gltf = np.stack([top[:, 0], top[:, 2], -top[:, 1]], axis=1)
+        x = top[:, 0].reshape(ny, nx)
+        y = top[:, 1].reshape(ny, nx)
+        z = top[:, 2].reshape(ny, nx)
+        dx = (float(np.max(x)) - float(np.min(x))) / max(1, nx - 1)
+        dy = (float(np.max(y)) - float(np.min(y))) / max(1, ny - 1)
+        if dx > 0.0 and dy > 0.0:
+            dz_dy, dz_dx = np.gradient(z, dy, dx)
+        else:  # pragma: no cover - a degenerate grid cannot get here
+            dz_dx = np.zeros_like(z)
+            dz_dy = np.zeros_like(z)
+        normal = np.stack([-dz_dx, -dz_dy, np.ones_like(z)], axis=-1)
+        normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+        normal_gltf = np.stack(
+            [normal[..., 0], normal[..., 2], -normal[..., 1]], axis=-1
+        ).reshape(-1, 3)
+        x_min, x_max = float(np.min(x)), float(np.max(x))
+        y_min, y_max = float(np.min(y)), float(np.max(y))
+        u = (x - x_min) / max(x_max - x_min, 1e-12)
+        # glTF/Blender's texture origin is the top-left of the image; the
+        # texture is flipped below so row 0 is north and v=0 is north.
+        v = 1.0 - (y - y_min) / max(y_max - y_min, 1e-12)
+        uv = np.stack([u.ravel(), v.ravel()], axis=1)
+        texture = self.texture
+        if (texture is None or np.asarray(texture).shape[:2] != (ny, nx)):
+            texture = np.full((ny, nx, 3), 0.52, dtype=np.float64)
+        texture = np.asarray(texture, dtype=np.float64)[..., :3][::-1]
+        png = _png_rgb8(_srgb_u8(texture))
+
+        base = vertices[base_faces] * 0.001
+        base_gltf = np.stack([base[..., 0], base[..., 2], -base[..., 1]], axis=-1)
+        base_normal = np.cross(
+            base_gltf[:, 1] - base_gltf[:, 0],
+            base_gltf[:, 2] - base_gltf[:, 0],
+        )
+        lengths = np.linalg.norm(base_normal, axis=1)
+        good = lengths > 1e-12
+        base_normal[good] /= lengths[good, None]
+        base_normal[~good] = (0.0, 1.0, 0.0)
+        base_positions = np.ascontiguousarray(base_gltf.reshape(-1, 3), dtype=np.float32)
+        base_normals = np.ascontiguousarray(
+            np.repeat(base_normal, 3, axis=0), dtype=np.float32
+        )
+        top_positions = np.ascontiguousarray(top_gltf, dtype=np.float32)
+        top_normals = np.ascontiguousarray(normal_gltf, dtype=np.float32)
+        top_uvs = np.ascontiguousarray(uv, dtype=np.float32)
+        top_indices = np.ascontiguousarray(top_faces.reshape(-1), dtype=np.uint32)
+
+        buffer = bytearray()
+        buffer_views: List[Dict[str, Any]] = []
+        accessors: List[Dict[str, Any]] = []
+
+        def add_view(data: bytes, target: Optional[int] = None) -> int:
+            while len(buffer) % 4:
+                buffer.append(0)
+            offset = len(buffer)
+            buffer.extend(data)
+            view = {
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": len(data),
+            }
+            if target is not None:
+                view["target"] = int(target)
+            buffer_views.append(view)
+            return len(buffer_views) - 1
+
+        def add_accessor(
+            view: int,
+            component: int,
+            count: int,
+            kind: str,
+            minimum: Optional[Any] = None,
+            maximum: Optional[Any] = None,
+        ) -> int:
+            accessor = {
+                "bufferView": int(view),
+                "componentType": int(component),
+                "count": int(count),
+                "type": kind,
+            }
+            if minimum is not None:
+                accessor["min"] = [float(value) for value in minimum]
+            if maximum is not None:
+                accessor["max"] = [float(value) for value in maximum]
+            accessors.append(accessor)
+            return len(accessors) - 1
+
+        position_view = add_view(top_positions.tobytes(), 34962)
+        normal_view = add_view(top_normals.tobytes(), 34962)
+        uv_view = add_view(top_uvs.tobytes(), 34962)
+        index_view = add_view(top_indices.tobytes(), 34963)
+        base_position_view = add_view(base_positions.tobytes(), 34962)
+        base_normal_view = add_view(base_normals.tobytes(), 34962)
+        image_view = add_view(png)
+
+        position_accessor = add_accessor(
+            position_view, 5126, len(top_positions), "VEC3",
+            top_positions.min(axis=0), top_positions.max(axis=0),
+        )
+        normal_accessor = add_accessor(
+            normal_view, 5126, len(top_normals), "VEC3"
+        )
+        uv_accessor = add_accessor(uv_view, 5126, len(top_uvs), "VEC2")
+        index_accessor = add_accessor(
+            index_view, 5125, int(top_indices.size), "SCALAR"
+        )
+        base_position_accessor = add_accessor(
+            base_position_view, 5126, len(base_positions), "VEC3",
+            base_positions.min(axis=0), base_positions.max(axis=0),
+        )
+        base_normal_accessor = add_accessor(
+            base_normal_view, 5126, len(base_normals), "VEC3"
+        )
+
+        document: Dict[str, Any] = {
+            "asset": {
+                "version": "2.0",
+                "generator": "Tsukikage moonlib",
+                "extras": {
+                    "units": "m",
+                    "model_long_side_mm": float(self.info.get("long_side_mm", 0.0)),
+                    "source": str(self.info.get("terrain_source", "")),
+                    "frame": "glTF y-up; local x east, -z north, y up",
+                },
+            },
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0, "name": "Moon terrain"}],
+            "meshes": [{
+                "name": "Moon terrain",
+                "primitives": [
+                    {
+                        "attributes": {
+                            "POSITION": position_accessor,
+                            "NORMAL": normal_accessor,
+                            "TEXCOORD_0": uv_accessor,
+                        },
+                        "indices": index_accessor,
+                        "material": 0,
+                        "mode": 4,
+                    },
+                    {
+                        "attributes": {
+                            "POSITION": base_position_accessor,
+                            "NORMAL": base_normal_accessor,
+                        },
+                        "material": 1,
+                        "mode": 4,
+                    },
+                ],
+            }],
+            "materials": [
+                {
+                    "name": "Lunar surface",
+                    "pbrMetallicRoughness": {
+                        "baseColorTexture": {"index": 0},
+                        "metallicFactor": 0.0,
+                        "roughnessFactor": 0.88,
+                    },
+                },
+                {
+                    "name": "Base",
+                    "pbrMetallicRoughness": {
+                        "baseColorFactor": [0.42, 0.41, 0.39, 1.0],
+                        "metallicFactor": 0.0,
+                        "roughnessFactor": 1.0,
+                    },
+                },
+            ],
+            "textures": [{"sampler": 0, "source": 0}],
+            "samplers": [{
+                "magFilter": 9729,
+                "minFilter": 9729,
+                "wrapS": 33071,
+                "wrapT": 33071,
+            }],
+            "images": [{"bufferView": image_view, "mimeType": "image/png"}],
+            "buffers": [{"byteLength": len(buffer)}],
+            "bufferViews": buffer_views,
+            "accessors": accessors,
+        }
+        encoded = json.dumps(
+            document, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        while len(encoded) % 4:
+            encoded += b" "
+        while len(buffer) % 4:
+            buffer.append(0)
+        total = 12 + 8 + len(encoded) + 8 + len(buffer)
+        return (
+            struct.pack("<4sII", b"glTF", 2, total)
+            + struct.pack("<II", len(encoded), 0x4E4F534A)
+            + encoded
+            + struct.pack("<II", len(buffer), 0x004E4942)
+            + bytes(buffer)
+        )
+
+    def export_stl(self, path: Any) -> Path:
+        """Write :meth:`stl_bytes` to *path*; create the parent directory."""
+        target = Path(path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.stl_bytes())
+        except OSError as exc:
+            raise TerrainDataError(f"Cannot write STL {target}: {exc}") from exc
         return target
 
 

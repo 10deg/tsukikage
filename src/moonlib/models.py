@@ -48,8 +48,10 @@ __all__ = [
     "TargetVisibility",
     "PhotometricModel",
     "ToneMapping",
+    "Viewpoint",
     "as_photometric_model",
     "as_tone_mapping",
+    "as_viewpoint",
     "MoonView",
     "MoonRegion",
     "SurfaceFeature",
@@ -106,12 +108,17 @@ def jsonable(value: Any) -> Any:
     rejects, or refuses outright.  So the sentinel is translated exactly once,
     here, at the boundary where Python values stop and the payload begins.
     """
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None:
+        return value
+    # Enums first: several of them subclass ``str`` (PhotometricModel,
+    # ToneMapping, Viewpoint), so the plain-str branch below would hand back
+    # the enum member rather than its wire value.
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
-    if isinstance(value, enum.Enum):
-        return value.value
     if isinstance(value, datetime):
         return _iso(value)
     if is_dataclass(value) and not isinstance(value, type):
@@ -1080,6 +1087,49 @@ def as_tone_mapping(value: "ToneMapping | str") -> ToneMapping:
         ) from exc
 
 
+class Viewpoint(str, enum.Enum):
+    """Which side of the Moon the simulated camera looks at.
+
+    ``EARTH``
+        The normal view: the near side, from the observer's site on Earth.
+        The viewpoint is topocentric, so it carries the observer's parallax
+        (up to about 0.95°) on top of the geocentric libration, and the real
+        Earth is the earthshine source.
+
+    ``FAR_SIDE``
+        A hypothetical **geocentric** observer at the antipode of the real
+        Earth, so the far side is in view.  This is the "symmetric Earth"
+        construction: the Moon's orientation and the Sun are untouched -- the
+        far-side terrain is lit by the real Sun at that instant -- and only the
+        camera moves through the Moon's centre to the other side.  The Earth
+        used for earthshine is mirrored with the camera, so it is a virtual
+        Earth whose phase is the complement of the real one.  It is
+        deliberately **not** the real Earth shining through the Moon.
+
+    The far-side view is geocentric because the construction is a hypothetical
+    Earth at the point diametrically opposite the real Earth; a surface site on
+    that Earth would add a parallax the construction does not need.  The
+    observer passed alongside it is still carried in the result for time zone
+    and context, but it does not move the camera.
+    """
+
+    EARTH = "earth"
+    FAR_SIDE = "far_side"
+
+
+def as_viewpoint(value: "Viewpoint | str") -> Viewpoint:
+    """Coerce a string or enum member into a :class:`Viewpoint`."""
+    if isinstance(value, Viewpoint):
+        return value
+    try:
+        return Viewpoint(str(value).strip().lower())
+    except ValueError as exc:
+        options = ", ".join(item.value for item in Viewpoint)
+        raise MoonlibError(
+            f"Unknown viewpoint {value!r}; choose one of {options}."
+        ) from exc
+
+
 @dataclass(frozen=True)
 class MoonView:
     """Illumination geometry of the Moon for one observer at one instant.
@@ -1096,18 +1146,23 @@ class MoonView:
     observer: Observer
     et: float
     distance_km: float
-    """Topocentric distance to the Moon's centre."""
+    """Distance to the Moon's centre: topocentric for ``EARTH``, geocentric
+    for ``FAR_SIDE``."""
     angular_diameter_deg: float
     """Apparent angular diameter of the 1737.4 km reference sphere."""
     sub_observer_lon_deg: float
-    """Selenographic longitude of the topocentric sub-observer point."""
+    """Selenographic longitude of the sub-observer point."""
     sub_observer_lat_deg: float
     sub_solar_lon_deg: float
     sub_solar_lat_deg: float
     sun_direction: Tuple[float, float, float]
     """Unit vector from the Moon's centre towards the Sun."""
     earth_direction: Tuple[float, float, float]
-    """Unit vector from the Moon's centre towards the Earth's centre."""
+    """Unit vector from the Moon's centre towards the Earth's centre.
+
+    For ``FAR_SIDE`` this is the mirrored Earth -- the virtual Earth on the far
+    side -- because that is the body whose light reaches the visible surface.
+    """
     observer_direction: Tuple[float, float, float]
     """Unit vector from the Moon's centre towards the observer."""
     phase_angle_deg: float
@@ -1119,10 +1174,19 @@ class MoonView:
     earth_angular_diameter_deg: float
     """Apparent angular diameter of the Earth as seen from the Moon."""
     earth_phase_angle_deg: float
-    """Sun-Earth-Moon angle: the Earth's phase angle as seen from the Moon."""
+    """Sun-Earth-Moon angle: the Earth's phase angle as seen from the Moon.
+
+    For ``FAR_SIDE`` this is the *mirrored* Earth's phase angle, which is the
+    complement of the real one: the far side sees a full virtual Earth when
+    the near side sees a new one.
+    """
     earth_illuminated_fraction: float
     earthshine_ratio: float
-    """Earthshine irradiance at the Moon divided by the solar irradiance."""
+    """Earthshine irradiance at the Moon divided by the solar irradiance.
+
+    For ``FAR_SIDE`` this is the hypothetical mirrored Earth's contribution,
+    not light from the real Earth (which the Moon would block).
+    """
     earthshine_magnitude: float
     """Apparent magnitude of the fully lit Earth as seen from the Moon."""
     earthshine_apparent_magnitude: float
@@ -1131,12 +1195,15 @@ class MoonView:
     This is 地照亮度: how bright the *dark* part of the Moon -- the part the Sun
     does not light -- looks in our own sky, lit only by the Earth.  It is not
     the brightness of the Earth.  Infinite at full moon, where there is no
-    night side to see.
+    night side to see.  In a far-side view the same quantity is measured from
+    the virtual Earth, which is the observer of that view.
     """
     bright_limb_position_angle_deg: float
     """Position angle of the midpoint of the bright limb, north through east."""
     moon_elevation_deg: Optional[float] = None
     """Geometric elevation of the Moon above the observer's horizon."""
+    viewpoint: Viewpoint = Viewpoint.EARTH
+    """Which side the camera looks at; see :class:`Viewpoint`."""
 
     @property
     def libration_lon_deg(self) -> float:

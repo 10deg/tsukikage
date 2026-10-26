@@ -196,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_observer_options(render)
     _add_output_options(render)
     render.add_argument("--at", help="instant (ISO-8601); defaults to now")
+    render.add_argument(
+        "--viewpoint", default="earth", choices=["earth", "far_side"],
+        help="'earth' is the normal near-side view; 'far_side' is the "
+             "hypothetical geocentric observer at the antipode of the Earth",
+    )
     render.add_argument("--out", help="output PNG path; omit to only print the geometry")
     render.add_argument("--width", type=int, default=1024, help="image width in pixels")
     render.add_argument(
@@ -744,7 +749,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
         args.target_lon, args.target_lat = resolved.lon_deg, resolved.lat_deg
 
     site = _observer(args)
-    view = view_geometry(site, args.at)
+    view = view_geometry(site, args.at, viewpoint=args.viewpoint)
 
     if close_up and args.json:
         from .service import moon_feature, moon_region
@@ -755,6 +760,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
                     site,
                     args.at,
                     feature=args.feature,
+                    viewpoint=args.viewpoint,
                     margin=args.margin,
                     width=args.width,
                     height=args.height_px or args.width,
@@ -776,6 +782,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
             moon_region(
                 site,
                 args.at,
+                viewpoint=args.viewpoint,
                 lon=args.target_lon,
                 lat=args.target_lat,
                 span_km=args.span_km,
@@ -803,6 +810,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
             moon_view(
                 site,
                 args.at,
+                viewpoint=args.viewpoint,
                 width=args.width,
                 height=args.height_px or args.width,
                 samples=args.samples,

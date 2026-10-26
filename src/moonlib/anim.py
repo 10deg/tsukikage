@@ -34,7 +34,7 @@ import numpy as np
 from .caption import stamp_frame, stamp_text
 from .encode import resize_frame, smooth_frame, write_mp4
 from .errors import MoonlibError
-from .models import MoonRenderSettings
+from .models import MoonRenderSettings, Viewpoint
 from .moonview import region_terrain, render_moon, render_region, view_geometry
 from .observer import Observer
 from .terrain import open_terrain
@@ -344,6 +344,7 @@ def animation_frames(
     cancel: Optional[Any] = None,
     graceful: bool = False,
     render_cancel: Optional[Any] = None,
+    viewpoint: Any = Viewpoint.EARTH,
 ) -> Iterator[AnimationFrame]:
     """Render the instants from *start* to *end* inclusive, one frame each.
 
@@ -393,6 +394,11 @@ def animation_frames(
         Only used with *graceful*: the callable forwarded to every render.  When
         it reports true the frame in flight is abandoned and the generator
         raises ``MoonlibError("animation cancelled")``, which is what 终止 does.
+    viewpoint
+        ``"earth"`` (default) or ``"far_side"``, forwarded to every frame's
+        :func:`moonlib.moonview.view_geometry`.  A far-side animation is the
+        virtual-Earth view of the terrain as the lunation turns; see
+        :class:`moonlib.models.Viewpoint`.
 
     Yields
     ------
@@ -420,7 +426,8 @@ def animation_frames(
     def views_for(instants: Sequence[float]) -> list:
         return [
             view_geometry(site, float(instant),
-                          earth_albedo=options.earth_geometric_albedo)
+                          earth_albedo=options.earth_geometric_albedo,
+                          viewpoint=viewpoint)
             for instant in instants
         ]
 
@@ -456,7 +463,12 @@ def animation_frames(
             et = float(instant)
             # The same call render_moon makes for itself when no view is given,
             # so a frame is bit-for-bit an independent render of this instant.
-            view = view_geometry(site, et, earth_albedo=options.earth_geometric_albedo)
+            view = view_geometry(
+                site,
+                et,
+                earth_albedo=options.earth_geometric_albedo,
+                viewpoint=viewpoint,
+            )
             # A graceful stop must not cut a frame in half; a hard cancel must.
             interrupt = render_cancel if graceful else cancel
             try:

@@ -116,7 +116,7 @@ const state = {
   experimentSelected: null, // row clicked in the table, marked on the chart
   experimentStepOpen: false,
   experimentRangeOpen: false,
-  procImageTab: 'imaging', // 成像模拟 / 后期处理 inside the processing group
+  procImageTab: 'imaging', // 成像模拟 / 后期处理 / 3D模型 in the processing group
   rawComponent: null,  // component the geometry pane currently shows
   rawRenderId: null,   // render the geometry pane was made from
   processRunning: false, // one /api/process at a time; later moves coalesce
@@ -297,6 +297,17 @@ async function post(path, body, signal) {
 
 /* ── request assembly ────────────────────────────────────────────── */
 
+/** 视角: the normal near side, or the hypothetical geocentric far side.
+ *
+ *  The value travels inside the ``when`` block because it belongs to the same
+ *  statement as the instant and the observer: which Moon this request is about.
+ *  The server falls back to ``earth`` for anything else. */
+function viewpointValue() {
+  const button = $('viewpoint');
+  return button && button.getAttribute('aria-pressed') === 'true'
+    ? 'far_side' : 'earth';
+}
+
 function whenPayload() {
   const local = $('when').value;               // "YYYY-MM-DDTHH:MM"
   const offset = Number($('tz').value);
@@ -309,6 +320,7 @@ function whenPayload() {
   return {
     at,
     tz_offset_hours: offset,
+    viewpoint: viewpointValue(),
     observer: { lat: Number($('lat').value), lon: Number($('lon').value) },
   };
 }
@@ -439,6 +451,13 @@ function selectionPayload() {
     lat: s.lat,
     fov_radius_arcsec: selectionArcsec(),
     rotation_deg: s.rotationDeg || 0,
+    // The mesh uses the same rectangle as the close-up; the region endpoint
+    // ignores this extra key, the 3D endpoint needs it to reconstruct the
+    // selection's true aspect.
+    aspect: shapeAspect(),
+    // The irregular preimage of a ground rectangle.  The server rebuilds the
+    // exact same shape from the same numbers; this flag is what tells it to.
+    corrected: selectionCorrected(),
   };
 }
 
@@ -866,17 +885,20 @@ function describeEarthshine(block, context) {
   // placeholder that lists the settings back at the reader is not one.
   if (!block || block.earthshine_ratio === undefined) { el.textContent = ''; return; }
   const parts = [];
+  const ctx = context || {};
+  if (ctx.viewpoint === 'far_side') parts.push('假想地球');
   if (block.earthshine_on === false) parts.push('地照已关闭（未画）');
   // The Moon's own magnitude is the library's (moonlib.moonview.moon_magnitude,
   // Allen's fit); the page only prints it.  The albedo is an input the reader
   // typed, so it is not repeated here.
-  const ctx = context || {};
   const magnitude = Number(ctx.moon_magnitude);
   if (Number.isFinite(magnitude)) parts.push(`月球亮度 ${magnitude.toFixed(2)} mag`);
   const ashen = Number(block.earthshine_apparent_magnitude);
   if (Number.isFinite(ashen)) parts.push(`地照亮度 ${ashen.toFixed(2)} mag`);
   el.textContent = parts.join('　');
-  el.title = '地照亮度：月面夜侧（被地球照亮的那一部分）在地球天空里的星等。';
+  el.title = ctx.viewpoint === 'far_side'
+    ? '月背视角：地照来自与真实地球关于月心对称的假想地球，它的相位与真实地球互补。'
+    : '地照亮度：月面夜侧（被地球照亮的那一部分）在地球天空里的星等。';
 }
 
 /* ── drawing the disk ────────────────────────────────────────────── */
@@ -903,6 +925,292 @@ function selectionArcsec() {
   const s = state.selection;
   if (!s || !state.geometry) return null;
   return s.radiusFraction * (state.geometry.angular_diameter_deg / 2) * 3600;
+}
+
+/* ── the projection-corrected selection ─────────────────────────────────────
+ *
+ * An ordinary box is a rectangle in the sky.  The ground under it is not a
+ * rectangle: the sky-to-ground map curves, so a tile cut from the box has four
+ * curved sides.  The checkbox "使用带投影修正的选框" works the other way
+ * round: take the ground bounding rectangle of the ordinary box, and ask which
+ * irregular piece of sky maps onto it.  That piece is drawn on the full disk
+ * and masked into the close-ups; exporting its ground rectangle gives a model
+ * whose four sides are straight.
+ *
+ * These helpers mirror `moonlib.moonview.selection_correction()`; the two must
+ * agree about the camera and the tangent frame or the drawn shape will not be
+ * the shape the server masks.
+ */
+const LUNAR_REFERENCE_RADIUS_KM = 1737.4;
+
+function selectionCorrected() {
+  const box = $('mesh-corrected');
+  return !!(box && box.checked);
+}
+
+/** The close-up camera aimed at the selection centre, in MOON_ME km. */
+function selectionCameraGeometry() {
+  const g = state.geometry;
+  const s = state.selection;
+  if (!g || !s) return null;
+  const radiusKm = Number(g.moon_radius_km)
+    || Number(((g.report || {}).state || {}).moon_radius_km)
+    || LUNAR_REFERENCE_RADIUS_KM;
+  let distance = Number(g.distance_km);
+  if (!(distance > radiusKm)) {
+    const angular = (Number(g.angular_diameter_deg) || 0) / 2 * Math.PI / 180;
+    distance = angular > 0 ? radiusKm / Math.sin(angular) : NaN;
+  }
+  if (!(distance > radiusKm)) return null;
+  const sub = moonVector(Number(g.libration_lon_deg) || 0,
+                         Number(g.libration_lat_deg) || 0);
+  const origin = sub.map((value) => value * distance);
+  const target = moonVector(s.lon, s.lat).map((value) => value * radiusKm);
+  const toTarget = target.map((value, index) => value - origin[index]);
+  const range = Math.hypot(toTarget[0], toTarget[1], toTarget[2]);
+  if (!(range > 0)) return null;
+  const forward = toTarget.map((value) => value / range);
+  const pole = [0, 0, 1];
+  const dotPole = dot3(pole, forward);
+  const up0cam = unit3([-dotPole * forward[0], -dotPole * forward[1],
+                        1 - dotPole * forward[2]]);
+  const right0 = unit3(cross3(forward, up0cam));
+  const roll = (Number(s.rotationDeg) || 0) * Math.PI / 180;
+  const cos = Math.cos(roll);
+  const sin = Math.sin(roll);
+  const right = [
+    right0[0] * cos + up0cam[0] * sin,
+    right0[1] * cos + up0cam[1] * sin,
+    right0[2] * cos + up0cam[2] * sin,
+  ];
+  const up = [
+    -right0[0] * sin + up0cam[0] * cos,
+    -right0[1] * sin + up0cam[1] * cos,
+    -right0[2] * sin + up0cam[2] * cos,
+  ];
+  const up0 = moonVector(s.lon, s.lat);
+  const lon = Number(s.lon) * Math.PI / 180;
+  const east0 = [-Math.sin(lon), Math.cos(lon), 0];
+  let u = right.map((value, index) => value - dot3(right, up0) * up0[index]);
+  let norm = Math.hypot(u[0], u[1], u[2]);
+  if (norm < 1e-9) { u = east0; norm = 1; }
+  u = u.map((value) => value / norm);
+  let v = up.map((value, index) => value - dot3(up, up0) * up0[index]);
+  const alongU = dot3(v, u);
+  v = v.map((value, index) => value - alongU * u[index]);
+  norm = Math.hypot(v[0], v[1], v[2]);
+  if (norm < 1e-9) { v = cross3(up0, u); norm = Math.hypot(v[0], v[1], v[2]); }
+  v = v.map((value) => value / norm);
+  if (dot3(cross3(u, v), up0) < 0) v = v.map((value) => -value);
+  return { radiusKm, distance, origin, forward, right, up, up0, u, v };
+}
+
+/** The ordinary selection's two sky half-angles, in radians. */
+function selectionSkyHalfAngles() {
+  const fov = selectionArcsec();
+  if (!(fov > 0)) return null;
+  const aspect = shapeAspect();
+  const short = (fov / 3600) * Math.PI / 180;
+  return aspect >= 1
+    ? { w: short, h: short * aspect }
+    : { w: short / aspect, h: short };
+}
+
+function moonSphereHit(origin, direction, radius) {
+  const b = dot3(direction, origin);
+  const disc = b * b - (dot3(origin, origin) - radius * radius);
+  if (!(disc > 0)) return null;
+  const t = -b - Math.sqrt(disc);
+  if (!(t > 0)) return null;
+  return [
+    origin[0] + t * direction[0],
+    origin[1] + t * direction[1],
+    origin[2] + t * direction[2],
+  ];
+}
+
+/** Ground kilometres of one point in the camera's tan plane. */
+function skyGroundPoint(camera, tanU, tanV) {
+  const direction = unit3([
+    camera.forward[0] + tanU * camera.right[0] + tanV * camera.up[0],
+    camera.forward[1] + tanU * camera.right[1] + tanV * camera.up[1],
+    camera.forward[2] + tanU * camera.right[2] + tanV * camera.up[2],
+  ]);
+  const point = moonSphereHit(camera.origin, direction, camera.radiusKm);
+  if (!point) return null;
+  const relative = [
+    point[0] - camera.radiusKm * camera.up0[0],
+    point[1] - camera.radiusKm * camera.up0[1],
+    point[2] - camera.radiusKm * camera.up0[2],
+  ];
+  return {
+    x: dot3(relative, camera.u),
+    y: dot3(relative, camera.v),
+    cos: dot3(point, camera.up0) / camera.radiusKm,
+  };
+}
+
+/** Bounding ground rectangle of the ordinary sky box. */
+function selectionGroundBox() {
+  const camera = selectionCameraGeometry();
+  const half = selectionSkyHalfAngles();
+  if (!camera || !half) return null;
+  const tu = Math.tan(half.w);
+  const tv = Math.tan(half.h);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  let valid = 0;
+  const take = (tanU, tanV) => {
+    const point = skyGroundPoint(camera, tanU, tanV);
+    // A box near the limb can have a few rays that miss the sphere.  Those
+    // samples are simply not part of the visible footprint; one miss must not
+    // throw away the whole corrected shape and fall back to a rectangle.
+    if (!point) return false;
+    valid += 1;
+    x0 = Math.min(x0, point.x); x1 = Math.max(x1, point.x);
+    y0 = Math.min(y0, point.y); y1 = Math.max(y1, point.y);
+    return true;
+  };
+  for (let index = 0; index <= 128; index += 1) {
+    const t = -1 + 2 * index / 128;
+    take(t * tu, -tv);
+    take(tu, t * tv);
+    take(-t * tu, tv);
+    take(-tu, -t * tv);
+  }
+  for (let row = 0; row <= 8; row += 1) {
+    for (let col = 0; col <= 8; col += 1) {
+      take((-1 + 2 * row / 8) * tu, (-1 + 2 * col / 8) * tv);
+    }
+  }
+  if (valid < 8) return null;
+  return { camera, half, x0, x1, y0, y1 };
+}
+
+/** Ground km -> a point on the reference sphere, in the selection frame. */
+function groundSurfacePoint(camera, x, y) {
+  const inside = camera.radiusKm * camera.radiusKm - x * x - y * y;
+  if (!(inside > 0)) return null;
+  const height = Math.sqrt(inside);
+  return [
+    height * camera.up0[0] + x * camera.u[0] + y * camera.v[0],
+    height * camera.up0[1] + x * camera.u[1] + y * camera.v[1],
+    height * camera.up0[2] + x * camera.u[2] + y * camera.v[2],
+  ];
+}
+
+/** Smallest sky box containing the irregular preimage of the ground box. */
+function correctedSkyBounds() {
+  const ground = selectionGroundBox();
+  if (!ground) return null;
+  const { camera, x0, x1, y0, y1 } = ground;
+  let halfU = 0, halfV = 0;
+  let valid = 0;
+  const take = (x, y) => {
+    const point = groundSurfacePoint(camera, x, y);
+    if (!point) return false;
+    const direction = [
+      point[0] - camera.origin[0],
+      point[1] - camera.origin[1],
+      point[2] - camera.origin[2],
+    ];
+    const depth = dot3(direction, camera.forward);
+    if (!(depth > 0)) return false;
+    valid += 1;
+    halfU = Math.max(halfU, Math.abs(dot3(direction, camera.right) / depth));
+    halfV = Math.max(halfV, Math.abs(dot3(direction, camera.up) / depth));
+    return true;
+  };
+  for (let index = 0; index <= 256; index += 1) {
+    take(x0 + (x1 - x0) * index / 256, y0);
+  }
+  for (let index = 1; index <= 256; index += 1) {
+    take(x1, y0 + (y1 - y0) * index / 256);
+  }
+  for (let index = 1; index <= 256; index += 1) {
+    take(x1 - (x1 - x0) * index / 256, y1);
+  }
+  for (let index = 1; index < 256; index += 1) {
+    take(x0, y1 - (y1 - y0) * index / 256);
+  }
+  if (valid < 8 || !(halfU > 0 && halfV > 0)) return null;
+  return { halfU, halfV, ground };
+}
+
+/** Arcseconds across the *effective* selection (the corrected bounding box). */
+function effectiveSelectionArcsec() {
+  if (!state.selection) return null;
+  if (!selectionCorrected()) return selectionArcsec();
+  const bounds = correctedSkyBounds();
+  if (!bounds) return selectionArcsec();
+  return Math.atan(Math.min(bounds.halfU, bounds.halfV)) * 206264.806;
+}
+
+/** Effective height / width of the selection. */
+function effectiveSelectionAspect() {
+  if (!state.selection) return 1;
+  if (!selectionCorrected()) return shapeAspect();
+  const bounds = correctedSkyBounds();
+  if (!bounds) return shapeAspect();
+  return bounds.halfV / bounds.halfU;
+}
+
+/** The corrected selection boundary, split into visible segments.
+ *
+ * A normal selection is far enough from the limb that this is one closed loop.
+ * Very close to the limb, part of the preimage can be on the hidden hemisphere;
+ * that part is not drawable, so the boundary is split there instead of being
+ * connected across the disk with a jump.  ``closed`` is true only when the
+ * whole loop is visible.
+ */
+function correctedBoundarySegments() {
+  const ground = selectionGroundBox();
+  if (!ground) return null;
+  const { camera, x0, x1, y0, y1 } = ground;
+  const geom = diskGeom();
+  const segments = [];
+  let current = [];
+  let breaks = 0;
+  const finish = () => {
+    if (current.length >= 2) segments.push(current);
+    current = [];
+  };
+  const take = (x, y) => {
+    const point = groundSurfacePoint(camera, x, y);
+    if (!point) { breaks += 1; finish(); return; }
+    const radius = Math.hypot(point[0], point[1], point[2]);
+    const [lon, lat] = lonLatFromVector([
+      point[0] / radius, point[1] / radius, point[2] / radius,
+    ]);
+    const projected = projectSelenographic(lon, lat, geom);
+    if (projected.far) { breaks += 1; finish(); return; }
+    current.push({ x: projected.x, y: projected.y });
+  };
+  // One edge at a time: interleaving the four edges would draw a zig-zag
+  // through the selection instead of its outline.
+  for (let index = 0; index <= 256; index += 1) {
+    take(x0 + (x1 - x0) * index / 256, y0);
+  }
+  for (let index = 1; index <= 256; index += 1) {
+    take(x1, y0 + (y1 - y0) * index / 256);
+  }
+  for (let index = 1; index <= 256; index += 1) {
+    take(x1 - (x1 - x0) * index / 256, y1);
+  }
+  for (let index = 1; index < 256; index += 1) {
+    take(x0, y1 - (y1 - y0) * index / 256);
+  }
+  finish();
+  if (!segments.length) return null;
+  return {
+    segments,
+    closed: breaks === 0 && segments.length === 1 && segments[0].length >= 3,
+  };
+}
+
+/** One closed boundary, or null when the loop is not fully visible. */
+function correctedBoundaryPixels() {
+  const boundary = correctedBoundarySegments();
+  return boundary && boundary.closed ? boundary.segments[0] : null;
 }
 
 /* ── the camera, and the projection both halves have to agree on ───────────
@@ -1431,10 +1739,17 @@ function boxGeometry() {
   const { radius } = diskGeom();
   const centre = lonLatToPixel(s.lon, s.lat);
   if (!centre) return null;
-  // `radiusFraction` is the frame's *shorter* half-side -- the number the
-  // server's fov_radius means -- and the aspect turns it into the two sides.
-  const aspect = shapeAspect();
-  const shortHalf = Math.max(6, s.radiusFraction * radius);
+  // The effective short half-side is the ordinary selection, or -- with the
+  // corrected box on -- the smallest sky box around its irregular preimage.
+  const aspect = effectiveSelectionAspect();
+  const full = (state.geometry.angular_diameter_deg / 2) * 3600;
+  const shortArcsec = effectiveSelectionArcsec();
+  const shortHalf = Math.max(
+    6,
+    Number.isFinite(shortArcsec) && full > 0
+      ? (shortArcsec / full) * radius
+      : s.radiusFraction * radius,
+  );
   const halfW = aspect >= 1 ? shortHalf : shortHalf / aspect;
   const halfH = shortHalf * Math.max(1, aspect);
   return {
@@ -1642,12 +1957,12 @@ function wireResolutionPicker(inputId, selectId) {
 
 /** Aspect of the selection box (height / width); 1 when nothing is selected. */
 function selectionAspect() {
-  return state.selection ? shapeAspect() : 1;
+  return state.selection ? effectiveSelectionAspect() : 1;
 }
 
 /** Arcseconds across the selection, which is the frame's shorter side. */
 function selectionSpanArcsec() {
-  const radius = selectionArcsec();
+  const radius = effectiveSelectionArcsec();
   return radius === null ? null : 2 * radius;
 }
 
@@ -2025,24 +2340,58 @@ function drawSelection() {
   const centre = imageToOverlay(box.centre.x, box.centre.y);
   const halfW = imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x;
   const halfH = imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y;
+  const corrected = selectionCorrected();
+  const boundary = corrected ? correctedBoundarySegments() : null;
 
+  if (boundary) {
+    // The corrected selection is the irregular preimage of the ground
+    // rectangle.  It is already in screen coordinates; draw that shape, not
+    // the rectangle it fits in.  A near-limb selection can be split into
+    // visible arcs; draw each arc and never connect across the hidden part.
+    for (const pass of [
+      { color: SELECTION_SHADOW, width: 3.2 * px },
+      { color: SELECTION_COLOR, width: 1.5 * px },
+    ]) {
+      ctx.lineWidth = pass.width;
+      ctx.strokeStyle = pass.color;
+      ctx.setLineDash([7 * px, 5 * px]);
+      ctx.beginPath();
+      for (const segment of boundary.segments) {
+        const first = imageToOverlay(segment[0].x, segment[0].y);
+        ctx.moveTo(first.x, first.y);
+        for (let index = 1; index < segment.length; index += 1) {
+          const point = imageToOverlay(segment[index].x, segment[index].y);
+          ctx.lineTo(point.x, point.y);
+        }
+        if (boundary.closed) ctx.closePath();
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  } else if (!corrected) {
+    ctx.save();
+    ctx.translate(centre.x, centre.y);
+    ctx.rotate(-box.rotation);
+    for (const pass of [
+      { color: SELECTION_SHADOW, width: 3.2 * px },
+      { color: SELECTION_COLOR, width: 1.5 * px },
+    ]) {
+      ctx.lineWidth = pass.width;
+      ctx.strokeStyle = pass.color;
+      ctx.setLineDash([7 * px, 5 * px]);
+      ctx.strokeRect(-halfW, -halfH, halfW * 2, halfH * 2);
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+  // Resize ticks stay on the bounding box, which is also the hit target.
   ctx.save();
   ctx.translate(centre.x, centre.y);
   ctx.rotate(-box.rotation);
-  for (const pass of [
-    { color: SELECTION_SHADOW, width: 3.2 * px },
-    { color: SELECTION_COLOR, width: 1.5 * px },
-  ]) {
-    ctx.lineWidth = pass.width;
-    ctx.strokeStyle = pass.color;
-    ctx.setLineDash([7 * px, 5 * px]);
-    ctx.strokeRect(-halfW, -halfH, halfW * 2, halfH * 2);
-    ctx.setLineDash([]);
-    const tick = 4 * px;
-    ctx.fillStyle = pass.color;
-    for (const [dx, dy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-      ctx.fillRect(dx * halfW - tick / 2, dy * halfH - tick / 2, tick, tick);
-    }
+  const tick = 4 * px;
+  ctx.fillStyle = SELECTION_COLOR;
+  for (const [dx, dy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+    ctx.fillRect(dx * halfW - tick / 2, dy * halfH - tick / 2, tick, tick);
   }
   ctx.restore();
 
@@ -4021,7 +4370,32 @@ function downloadUrl(url, name) {
   const link = document.createElement('a');
   link.href = url;
   link.download = name;
+  link.rel = 'noopener';
+  // A detached anchor's click is ignored by some browsers (notably Safari).
+  // Putting it in the document for the click is the difference between a file
+  // appearing in Downloads and the button looking like it did nothing.
+  document.body.appendChild(link);
   link.click();
+  if (link.remove) link.remove();
+  else if (document.body.removeChild) document.body.removeChild(link);
+}
+
+let meshDownloadUrl = null;
+
+/** Download a Blob and keep a visible link, in case the automatic click is
+ *  blocked by the browser's download policy. */
+function showMeshDownload(blob, name) {
+  if (meshDownloadUrl && URL.revokeObjectURL) URL.revokeObjectURL(meshDownloadUrl);
+  meshDownloadUrl = URL.createObjectURL(blob);
+  const link = $('mesh-download');
+  if (link) {
+    link.href = meshDownloadUrl;
+    link.download = name;
+    link.textContent = `下载 ${name}`;
+    link.hidden = false;
+  }
+  downloadUrl(meshDownloadUrl, name);
+  return meshDownloadUrl;
 }
 
 /** The file the save button hands over: the picture at the save size, in the
@@ -4462,7 +4836,7 @@ function magnifierView(availW, availH) {
   const height = 2 * halfH * margin;
   const scale = Math.max(0.02, Math.min((availW - 2) / width, (availH - 2) / height));
   return {
-    fit: true, box, centreX, centreY, halfW, halfH,
+    fit: true, box, centreX, centreY, halfW, halfH, ratio,
     rotation: box ? box.rotation : 0,
     scale,                                   // screen pixels per image pixel
     width: Math.max(24, Math.round(width * scale)),
@@ -4507,6 +4881,30 @@ function drawMagnifier() {
   ctx.translate(-view.centreX, -view.centreY);
   ctx.drawImage(source, 0, 0);
   ctx.restore();
+  if (selectionCorrected()) {
+    // Only the irregular selection is processed.  The window still covers the
+    // smallest box around it, and everything outside is black -- the same rule
+    // the high-resolution render applies on the server.
+    const outline = correctedBoundaryPixels();
+    if (outline) {
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.scale(view.scale * dpr, view.scale * dpr);
+      ctx.rotate(view.rotation);
+      ctx.translate(-view.centreX, -view.centreY);
+      ctx.beginPath();
+      ctx.rect(-1e7, -1e7, 2e7, 2e7);
+      ctx.moveTo(outline[0].x * view.ratio, outline[0].y * view.ratio);
+      for (let index = 1; index < outline.length; index += 1) {
+        ctx.lineTo(outline[index].x * view.ratio,
+                   outline[index].y * view.ratio);
+      }
+      ctx.closePath();
+      ctx.fillStyle = '#07090d';
+      ctx.fill('evenodd');
+      ctx.restore();
+    }
+  }
   if (!info) return;
   const kmPerImage = kilometresPerImagePixel();
   const parts = [];
@@ -4547,7 +4945,7 @@ function drawMagnifier() {
  */
 function kilometresPerImagePixel() {
   const box = boxGeometry();
-  const arcsec = selectionArcsec();
+  const arcsec = effectiveSelectionArcsec();
   if (!box || !arcsec || !box.halfW) return null;
   const distance = (state.geometry && state.geometry.distance_km) || 384400;
   return (arcsec / 206264.806) * distance / box.halfW;
@@ -10872,6 +11270,7 @@ async function refreshDisk() {
     drawMagnifier();
     drawPhaseStrip();
     describeDisk(payload.geometry);
+    updateMeshPlan();
     updateDiskScale();
     syncKmPxToDisk();
     setStatus('就绪');
@@ -10904,10 +11303,12 @@ async function refreshDisk() {
  *  machine rather than the picture, and nobody aims a selection with them. */
 function describeDisk(g) {
   fillMoonInfo(g);
+  const farSide = g.viewpoint === 'far_side';
   const px = state.diskImage ? `${state.diskImage.width}×${state.diskImage.height} px` : '—';
   const kmPerPx = diskKmPerPixel();
   $('disk-info-size').textContent = `${px}　` +
-    (kmPerPx ? `1 px = ${groundScaleText(kmPerPx)}` : '');
+    (kmPerPx ? `1 px = ${groundScaleText(kmPerPx)}` : '') +
+    (farSide ? '　月背：假想地心视角' : '');
   describeEarthshine(g.earthshine, g);
 }
 
@@ -11042,6 +11443,9 @@ function applyTerrainFloorToControls() {
     copyPresetOptions('out-kmpx-preset', 'anim-kmpx-preset', true);
     syncCopiedPresets('out-kmpx-preset', 'anim-kmpx-preset');
   }
+  // The 3D pane's "匹配当前数据源" estimate follows the same floor; without
+  // this the row kept the previous source's sample count until another edit.
+  updateMeshPlan();
 }
 
 /* ── 数据源 / data source ────────────────────────────────────────────── */
@@ -11159,7 +11563,7 @@ function selectionInsidePatch(patch, selection) {
   if (!patch || !patch.bounds || !selection) return true;
   const [west, east, south, north] = patch.bounds;
   if (![west, east, south, north].every(Number.isFinite)) return true;
-  const radiusDeg = Math.max(0, Number(selectionArcsec()) || 0) / 3600;
+  const radiusDeg = Math.max(0, Number(effectiveSelectionArcsec()) || 0) / 3600;
   const cosLat = Math.max(Math.cos(selection.lat * Math.PI / 180), 0.01);
   const lonPad = radiusDeg / cosLat;
   const span = ((east - west) % 360 + 360) % 360;
@@ -11535,6 +11939,8 @@ function sizeCanvas(canvas, img) {
  * place to keep in step. */
 const SETTING_FIELDS = [
   'when', 'tz', 'lat', 'lon', 'auto-refresh',
+  'mesh-size-mm', 'mesh-base-km', 'mesh-vertical', 'mesh-resolution',
+  'mesh-projection', 'mesh-corrected',
   'sel-lon', 'sel-lat', 'sel-rotation', 'sel-locked',
   'manual-train', 'aperture', 'focal-ratio', 'focal-length', 'barlow',
   'back-focus', 'obstruction',
@@ -11661,6 +12067,8 @@ function collectSettings() {
   values['label-satellite'] = satelliteMode();
   values['label-focus'] = $('label-focus')
     && $('label-focus').getAttribute('aria-pressed') === 'true';
+  // 视角 is a latch on the full-disk title bar, not a form field.
+  values['viewpoint'] = viewpointValue();
   // The columns are not form fields, so they travel in their own block.
   values['layout'] = layoutSettings();
   return values;
@@ -11679,6 +12087,16 @@ function applySettings(values) {
     // Range inputs drive their <output> spans from an input listener; a value
     // written straight into the control would leave the number behind.
     if (element.type === 'range') element.dispatchEvent(new Event('input'));
+  }
+  // A stored file can ask for the corrected box and leave the export's
+  // projection switch in any state; the corrected box owns that switch.
+  syncMeshCorrection();
+  // 视角 is a latch on the full-disk title bar, not an input whose value can be
+  // written straight back; put its pressed state and count it as applied.
+  if (values['viewpoint'] !== undefined) {
+    $('viewpoint').setAttribute(
+      'aria-pressed', String(values['viewpoint'] === 'far_side'));
+    applied++;
   }
   // A stored 轨迹特写 choice is the reader's, not the automatic heuristic's.
   if (values['sky-closeup'] !== undefined) state.skyCloseupTouched = true;
@@ -12108,8 +12526,12 @@ function fillMoonInfo(g) {
   set('mi-dec', fmt(snapshot.dec_deg, 3) + '°');
   set('mi-elong', fmt(snapshot.elongation_deg, 2) + '°');
   set('mi-sunalt', fmt(snapshot.sun_elevation_deg, 2) + '°');
-  set('mi-earth', g.earthshine_magnitudes_below_sunlight === undefined ? '—'
-    : `${fmt(g.earth_illuminated_percent, 1)} %　${fmt(g.earthshine_magnitudes_below_sunlight, 2)} mag`);
+  const earthText = g.earthshine_magnitudes_below_sunlight === undefined ? '—'
+    : `${fmt(g.earth_illuminated_percent, 1)} %　${fmt(g.earthshine_magnitudes_below_sunlight, 2)} mag`;
+  // The rest of this panel is the real Moon in the observer's sky; in a
+  // far-side frame the earthshine number describes the *virtual* Earth, so the
+  // word 假想 keeps the two sources from being read as one.
+  set('mi-earth', g.viewpoint === 'far_side' ? `假想 ${earthText}` : earthText);
   set('mi-vel', fmt(snapshot.velocity_kms, 3) + ' km/s');
   set('mi-light', fmt(snapshot.light_time_s, 3) + ' s');
   set('mi-rise', localTime(rs.rise_utc, tz));
@@ -12358,7 +12780,7 @@ async function generate() {
 /** 更新图像: the real render, at the size the save row asks for. */
 async function renderOutput() {
   if (!state.selection) {
-    setStatus('先在「全月面」上拖一个选框，或点一个地名', 'error');
+    setStatus('先选择一块区域，或点一个地名', 'error');
     return;
   }
   const { width, height } = renderPixels();
@@ -12665,7 +13087,7 @@ function activeTarget() {
  *  its own under the telescope, because post-processing a frame is the step
  *  after taking it and a tab put it behind a click in another column. */
 function setProcTab(name) {
-  state.procTab = name === 'animation' ? 'animation' : 'events';
+  state.procTab = ['events', 'animation'].includes(name) ? name : 'events';
   for (const button of document.querySelectorAll('#proc-tabs .tab')) {
     button.setAttribute('aria-pressed', String(button.dataset.proc === state.procTab));
   }
@@ -12685,20 +13107,478 @@ function setProcTab(name) {
   }
 }
 
-/** 成像模拟 / 后期处理: two pages of one parameter block.
+/** 3D模型: the current selection, as a solid STL.
  *
- *  The split follows the light path: seeing, diffraction and sharpening happen
- *  before the sensor records the frame; contrast, colour, noise and rotation
- *  happen to the finished picture.  Mirror and 更新图像 live outside both pages
- *  because either page wants them. */
+ *  The request is deliberately the same selection block the close-up uses,
+ *  plus the aspect the region endpoint does not need: the server reconstructs
+ *  the true sky rectangle and measures the ground under it. */
+/** Samples the current selection would ask for with 匹配当前数据源. */
+function autoMeshSamples() {
+  const { ground } = meshModelSize();
+  const native = Number(LIMITS.terrain_km_per_px) || 0.118;
+  if (!ground || !(native > 0)) return 768;
+  const longKm = Math.max(
+    ground.x1 - ground.x0, ground.y1 - ground.y0);
+  if (!(longKm > 0)) return 768;
+  return Math.max(2, Math.min(768, Math.ceil(longKm / native) + 1));
+}
+
+function meshPayload(format = 'stl') {
+  const selection = selectionPayload();
+  if (!selection) return null;
+  const auto = $('mesh-resolution').value === 'auto';
+  // `resolution` is a valid fallback number, not the 0 sentinel.  A server
+  // from before the auto mode existed would reject 0 with "2-768 samples";
+  // sending a number lets it fall back to that resolution, while the current
+  // server reads `resolution_mode` and computes the exact DEM-matched count.
+  const resolution = auto
+    ? autoMeshSamples()
+    : (Number($('mesh-resolution').value) || 256);
+  return {
+    when: whenPayload(),
+    selection,
+    mesh: {
+      long_side_mm: num('mesh-size-mm') ?? 100,
+      base_depth_km: num('mesh-base-km') ?? 2,
+      vertical_exaggeration: num('mesh-vertical') ?? 1,
+      resolution,
+      resolution_mode: auto ? 'auto' : 'manual',
+      projection: $('mesh-projection') ? $('mesh-projection').checked : true,
+      format: format === 'glb' ? 'glb' : 'stl',
+      blend_light: meshLighting(),
+    },
+  };
+}
+
+/** Keep the export's projection switch consistent with the corrected box.
+ *
+ *  A corrected box only means anything if the tile is built in ground
+ *  coordinates, so selecting it forces 投影修正 on and locks it. */
+function syncMeshCorrection() {
+  const corrected = $('mesh-corrected');
+  const projection = $('mesh-projection');
+  if (!corrected || !projection) return;
+  if (corrected.checked) {
+    projection.checked = true;
+    projection.disabled = true;
+  } else {
+    projection.disabled = false;
+  }
+}
+
+function meshCorrectionChanged() {
+  syncMeshCorrection();
+  drawDisk();
+  drawMagnifier();
+  updateMeshPlan();
+  if (state.renderId) {
+    // The picture on screen was traced before the selection changed shape.
+    // The next 生成模拟 will mask it; say that rather than leaving the old
+    // frame looking like the new selection.
+    setStatus('选框已改，请点「更新模拟」');
+  }
+}
+
+/** The model's own two dimensions, from the effective selection. */
+function meshModelSize() {
+  const longMm = Number(num('mesh-size-mm') ?? 100) || 100;
+  const projectionOn = $('mesh-projection') ? $('mesh-projection').checked : true;
+  const ground = projectionOn ? selectionGroundBox() : null;
+  const ratio = ground
+    ? (ground.y1 - ground.y0) / Math.max(1e-9, ground.x1 - ground.x0)
+    : effectiveSelectionAspect();
+  const safe = Math.max(1e-6, Number(ratio) || 1);
+  const shortMm = longMm * Math.min(1, safe) / Math.max(1, safe);
+  return { longMm, shortMm, ratio: safe, ground };
+}
+
+function meshScope() {
+  const select = $('mesh-scope');
+  return select && select.value === 'moon' ? 'moon' : 'selection';
+}
+
+function meshLighting() {
+  const select = $('mesh-blend-light');
+  return select && select.value === 'low' ? 'low' : 'phase';
+}
+
+function moonPayload() {
+  return {
+    when: whenPayload(),
+    moon: { blend_light: meshLighting() },
+  };
+}
+
+/** What the 3D pane can say before a file exists: the two model dimensions,
+ *  or the whole-Moon display size. */
+function updateMeshPlan() {
+  const plan = $('mesh-plan');
+  if (!plan) return;
+  const status = $('mesh-status');
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+  }
+  const downloadLink = $('mesh-download');
+  if (downloadLink) downloadLink.hidden = true;
+  const scope = meshScope();
+  const controls = $('mesh-selection-controls');
+  if (controls) controls.hidden = scope === 'moon';
+  const stlButton = $('mesh-export');
+  const glbButton = $('mesh-export-glb');
+  const blendButton = $('mesh-export-blend');
+  const buttons = [stlButton, glbButton, blendButton].filter(Boolean);
+  if (stlButton) stlButton.hidden = scope === 'moon';
+  if (scope === 'moon') {
+    plan.hidden = false;
+    plan.textContent = '全月面　直径 3,474.8 km　显示 φ 200 mm';
+    if (stlButton) stlButton.disabled = true;
+    if (glbButton) {
+      glbButton.disabled = false;
+      glbButton.title = '全月面网格与纹理的 GLB（单位 m）';
+    }
+    if (blendButton) {
+      blendButton.disabled = false;
+      blendButton.title = '生成全月面 Blender 预览场景（当前月相 / 低角度）';
+    }
+    return;
+  }
+  if (glbButton) {
+    glbButton.title = '带地貌纹理的 GLB（单位 m），可直接拖进 Blender 查看';
+  }
+  if (blendButton) {
+    blendButton.title = '生成可直接用 Blender 打开的 .blend 预览场景（含纹理与无穷远太阳）';
+  }
+  if (stlButton) stlButton.disabled = true;
+  buttons.forEach((button) => { button.disabled = true; });
+  if (!state.selection) {
+    plan.hidden = true;
+    plan.textContent = '';
+    return;
+  }
+  const arcsec = effectiveSelectionArcsec();
+  if (!(arcsec > 0)) {
+    plan.hidden = true;
+    plan.textContent = '';
+    return;
+  }
+  const { longMm, shortMm, ground } = meshModelSize();
+  const auto = $('mesh-resolution').value === 'auto';
+  let samples = '';
+  let match = '';
+  if (auto) {
+    samples = `　采样 ${autoMeshSamples()}`;
+    // How large the model would have to be for the 768-sample cap to be
+    // exactly one sample per native DEM pixel.  A 768-point grid has 767
+    // intervals; using 768 here overstated the match by one pixel.
+    const native = Number(LIMITS.terrain_km_per_px);
+    const longKm = ground
+      ? Math.max(ground.x1 - ground.x0, ground.y1 - ground.y0)
+      : 0;
+    if (native > 0 && longKm > 0) {
+      const matchMm = longMm * ((768 - 1) * native) / longKm;
+      if (Number.isFinite(matchMm) && matchMm > 0) {
+        match = `　长边尺寸 ${fmt(matchMm, 0)} mm 时匹配当前最高分辨率`;
+      }
+    }
+  }
+  plan.hidden = false;
+  plan.textContent = `模型 ${longMm} × ${shortMm.toFixed(1)} mm${samples}${match}`;
+  buttons.forEach((button) => { button.disabled = false; });
+}
+
+function meshFileName(info, format = 'stl') {
+  const when = ($('when').value || 'now').replace(/[:T-]/g, '').slice(0, 12);
+  const lat = Number(info.lat_deg || 0).toFixed(1);
+  const lon = Number(info.lon_deg || 0).toFixed(1);
+  const extension = format === 'glb' ? 'glb' : (format === 'blend' ? 'blend' : 'stl');
+  return `moon-3d-${when}-${lat}_${lon}.${extension}`;
+}
+
+async function exportMesh(format = 'stl') {
+  const body = meshPayload(format);
+  const status = $('mesh-status');
+  const buttons = [$('mesh-export'), $('mesh-export-glb'), $('mesh-export-blend')].filter(Boolean);
+  if (!body) {
+    setStatus('先在月面上选择一块区域', 'error');
+    return;
+  }
+  if (buttons.some((button) => button.disabled)) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  const downloadLink = $('mesh-download');
+  if (downloadLink) downloadLink.hidden = true;
+  const label = format === 'glb' ? 'GLB' : 'STL';
+  if (status) {
+    status.hidden = false;
+    status.textContent = `正在按选框切片并生成 ${label}…`;
+  }
+  setStatus('正在生成 3D 模型…', 'busy');
+  try {
+    let blob = null;
+    let info = null;
+    const response = await fetch('/api/mesh/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (response.ok) {
+      blob = await response.blob();
+      const header = response.headers && response.headers.get
+        ? response.headers.get('X-Moonlib-Mesh-Info') : null;
+      if (header) {
+        try { info = JSON.parse(decodeURIComponent(header)); } catch (error) { info = null; }
+      }
+    } else if (response.status === 404 && format === 'stl') {
+      // A server from before the binary endpoint still has the JSON STL
+      // endpoint; keep that path working instead of making the button dead.
+      const payload = await post('/api/mesh', body);
+      if (!payload.stl) throw new Error('服务器没有返回 STL。');
+      blob = dataUrlToBlob(payload.stl);
+      info = payload.info || {};
+    } else {
+      let message = '';
+      try {
+        const payload = await response.json();
+        message = payload.error || '';
+      } catch (error) { message = ''; }
+      if (!message && response.status === 404 && format === 'glb') {
+        message = '服务端没有 GLB 导出接口，请重启 web/server.py。';
+      }
+      throw new Error(message || `导出失败（HTTP ${response.status}）`);
+    }
+    if (!blob) throw new Error('服务器没有返回模型文件。');
+    if (!info) info = {};
+    const name = meshFileName(info, format);
+    // Keep a link visible next to the button: if the browser suppresses the
+    // programmatic download, the file is still one click away.
+    showMeshDownload(blob, name);
+    const mb = Number(blob.size || 0) / (1024 * 1024);
+    if (status) {
+      const grid = Array.isArray(info.resolution)
+        ? `，采样 ${info.resolution.join('×')}` : '';
+      const cell = Number.isFinite(Number(info.sample_km))
+        ? `，${fmt(Number(info.sample_km) * 1000, 0)} m/格` : '';
+      const native = Number(info.terrain_native_km_per_pixel);
+      const source = info.terrain_source
+        ? `，${info.terrain_source}` +
+          (Number.isFinite(native) ? `（${fmt(native * 1000, 0)} m/px）` : '')
+        : '';
+      const corrected = info.corrected ? '，投影修正选框'
+        : (info.projection === false ? '，未投影修正' : '');
+      const form = format === 'glb' ? '，GLB（米）' : '';
+      status.textContent =
+        `已导出 ${name}：地面 ${fmt(info.width_km, 1)}×${fmt(info.height_km, 1)} km，` +
+        `起伏 ${fmt(info.relief_km, 2)} km，模型 ${fmt(info.long_side_mm, 0)}×` +
+        `${fmt(info.short_side_mm, 1)} mm，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
+        `${mb.toFixed(1)} MB${grid}${cell}${source}${corrected}${form}` +
+        (info.resolution_capped ? '；采样已到上限' : '') +
+        (info.terrain_limited ? '；采样细于 DEM，模型含插值' : '');
+    }
+    setStatus(`已导出 3D 模型 ${name}`);
+  } catch (error) {
+    if (status) status.textContent = '导出失败：' + String(error.message || error);
+    setStatus('3D 模型导出失败', 'error');
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+function moonFileName(info, format = 'glb') {
+  const when = ($('when').value || 'now').replace(/[:T-]/g, '').slice(0, 12);
+  return `moon-globe-${when}.${format === 'blend' ? 'blend' : 'glb'}`;
+}
+
+async function exportMoonGlb() {
+  const body = moonPayload();
+  const status = $('mesh-status');
+  const buttons = [$('mesh-export-glb'), $('mesh-export-blend')].filter(Boolean);
+  if (buttons.some((button) => button.disabled)) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  const downloadLink = $('mesh-download');
+  if (downloadLink) downloadLink.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = '正在生成全月面 GLB…';
+  }
+  setStatus('正在生成全月面模型…', 'busy');
+  try {
+    const response = await fetch('/api/moon/glb', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      let message = '';
+      try { message = (await response.json()).error || ''; } catch (error) { message = ''; }
+      if (!message && response.status === 404) {
+        message = '服务端没有全月面接口，请重启 web/server.py。';
+      }
+      throw new Error(message || `导出失败（HTTP ${response.status}）`);
+    }
+    const blob = await response.blob();
+    const header = response.headers && response.headers.get
+      ? response.headers.get('X-Moonlib-Mesh-Info') : null;
+    let info = {};
+    if (header) {
+      try { info = JSON.parse(decodeURIComponent(header)); } catch (error) { info = {}; }
+    }
+    const name = moonFileName(info, 'glb');
+    showMeshDownload(blob, name);
+    const mb = Number(blob.size || 0) / (1024 * 1024);
+    if (status) {
+      status.textContent =
+        `已导出 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，` +
+        `${(info.n_faces || 0).toLocaleString()} 个三角面，${mb.toFixed(1)} MB` +
+        `${info.has_texture === false ? '，无纹理' : '，纹理已打包'}`;
+    }
+    setStatus(`已导出全月面 ${name}`);
+  } catch (error) {
+    if (status) status.textContent = '导出失败：' + String(error.message || error);
+    setStatus('全月面模型导出失败', 'error');
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+async function exportMoonBlender() {
+  const body = moonPayload();
+  const status = $('mesh-status');
+  const buttons = [$('mesh-export-glb'), $('mesh-export-blend')].filter(Boolean);
+  if (buttons.some((button) => button.disabled)) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  const downloadLink = $('mesh-download');
+  if (downloadLink) downloadLink.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = '正在生成全月面 Blender 预览场景…';
+  }
+  setStatus('正在生成全月面 Blender 预览场景…', 'busy');
+  try {
+    const response = await fetch('/api/moon/blender', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      let message = '';
+      try { message = (await response.json()).error || ''; } catch (error) { message = ''; }
+      if (!message && response.status === 404) {
+        message = '服务端没有全月面 Blender 接口，请重启 web/server.py。';
+      }
+      throw new Error(message || `生成失败（HTTP ${response.status}）`);
+    }
+    const blob = await response.blob();
+    const header = response.headers && response.headers.get
+      ? response.headers.get('X-Moonlib-Mesh-Info') : null;
+    let info = {};
+    if (header) {
+      try { info = JSON.parse(decodeURIComponent(header)); } catch (error) { info = {}; }
+    }
+    const name = moonFileName(info, 'blend');
+    showMeshDownload(blob, name);
+    const mb = Number(blob.size || 0) / (1024 * 1024);
+    const light = info.blend_light === 'low' ? '低角度光照' : '当前月相光照';
+    if (status) {
+      status.textContent =
+        `已生成 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，${mb.toFixed(1)} MB，` +
+        `纹理已打包，默认 ${light}`;
+    }
+    setStatus(`已生成全月面 Blender 预览场景 ${name}`);
+  } catch (error) {
+    if (status) status.textContent = '生成失败：' + String(error.message || error);
+    setStatus('全月面 Blender 预览场景生成失败', 'error');
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+async function exportBlenderPreview() {
+  const body = meshPayload('glb');
+  const status = $('mesh-status');
+  const buttons = [$('mesh-export'), $('mesh-export-glb'), $('mesh-export-blend')].filter(Boolean);
+  if (!body) {
+    setStatus('先在月面上选择一块区域', 'error');
+    return;
+  }
+  if (buttons.some((button) => button.disabled)) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  const downloadLink = $('mesh-download');
+  if (downloadLink) downloadLink.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = '正在生成 Blender 预览场景…';
+  }
+  setStatus('正在生成 Blender 预览场景…', 'busy');
+  try {
+    const response = await fetch('/api/mesh/blender', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      let message = '';
+      try {
+        const payload = await response.json();
+        message = payload.error || '';
+      } catch (error) { message = ''; }
+      if (!message && response.status === 404) {
+        message = '服务端没有 Blender 预览接口，请重启 web/server.py。';
+      }
+      throw new Error(message || `生成失败（HTTP ${response.status}）`);
+    }
+    const blob = await response.blob();
+    const header = response.headers && response.headers.get
+      ? response.headers.get('X-Moonlib-Mesh-Info') : null;
+    let info = {};
+    if (header) {
+      try { info = JSON.parse(decodeURIComponent(header)); } catch (error) { info = {}; }
+    }
+    const name = meshFileName(info, 'blend');
+    showMeshDownload(blob, name);
+    const mb = Number(blob.size || 0) / (1024 * 1024);
+    if (status) {
+      const solar = Number.isFinite(Number(info.solar_altitude_deg))
+        ? `，太阳 ${fmt(info.solar_altitude_deg, 1)}° / ${fmt(info.solar_azimuth_deg, 1)}°` +
+          (info.solar_illuminated === false ? '（地平线下）' : '')
+        : '';
+      const texture = info.has_texture === false ? '无纹理' : '纹理已打包';
+      const light = info.blend_light === 'low' ? '低角度光照' : '当前月相光照';
+      status.textContent =
+        `已生成 ${name}：模型 ${fmt(info.long_side_mm, 0)}×` +
+        `${fmt(info.short_side_mm, 1)} mm，${mb.toFixed(1)} MB，${texture}` +
+        `，Studio / Lunar Sun / Lunar Terminator，默认 ${light}${solar}`;
+    }
+    setStatus(`已生成 Blender 预览场景 ${name}`);
+  } catch (error) {
+    if (status) status.textContent = '生成失败：' + String(error.message || error);
+    setStatus('Blender 预览场景生成失败', 'error');
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+/** 成像模拟 / 后期处理 / 3D模型: three pages of one parameter block.
+ *
+ *  The first two follow the light path: seeing, diffraction and sharpening
+ *  happen before the sensor records the frame; contrast, colour, noise and
+ *  rotation happen to the finished picture.  The third is not a picture at
+ *  all: it cuts the selection into a printable solid.  Mirror and 更新图像
+ *  live outside the two image pages because either of them wants those. */
 function setProcImageTab(name) {
-  state.procImageTab = name === 'post' ? 'post' : 'imaging';
+  state.procImageTab = ['imaging', 'post', 'model'].includes(name)
+    ? name : 'imaging';
   for (const button of document.querySelectorAll('#proc-image-tabs .tab')) {
     button.setAttribute('aria-pressed',
       String(button.dataset.image === state.procImageTab));
   }
   $('proc-imaging').hidden = state.procImageTab !== 'imaging';
   $('proc-post').hidden = state.procImageTab !== 'post';
+  $('proc-model').hidden = state.procImageTab !== 'model';
+  // 镜像 / 更新图像 belong to the image pages; the 3D page is a file
+  // exporter and has no picture to process.
+  const actions = document.querySelector('.proc-actions');
+  if (actions) actions.hidden = state.procImageTab === 'model';
+  if (state.procImageTab === 'model') updateMeshPlan();
 }
 
 /** The animation's default range: one night either side of the current time.
@@ -13654,7 +14534,11 @@ function smoothImage(source, px) {
  *  which is exactly what the reader draws the box to decide. */
 function animationAspect() {
   if ($('anim-scope').value !== 'region') return 1;
-  return Math.max(1e-3, selectionAspect());
+  // Animation frames still use the ordinary sky box: the irregular preimage
+  // and its mask are a still/3D feature.  Keeping the aspect on the box that
+  // is actually rendered avoids stretching the video to a shape it is not.
+  return Math.max(1e-3,
+    selectionCorrected() ? shapeAspect() : selectionAspect());
 }
 
 /** A frame whose *shorter* side is *shortPx*, in the given proportions. */
@@ -13719,7 +14603,8 @@ function animationSkyKm() {
   const g = state.geometry;
   if (!g) return null;
   if ($('anim-scope').value === 'region') {
-    const radius = selectionArcsec();
+    const radius = selectionCorrected()
+      ? selectionArcsec() : effectiveSelectionArcsec();
     if (radius === null) return null;
     return (2 * radius / 206264.806) * g.distance_km;
   }
@@ -13883,6 +14768,16 @@ function animationRequest() {
   const render = animationRenderSize();
   const output = animationOutputSize();
   const train = trainPayload();
+  // The animation's region mapping is the older shape: it carries only the
+  // keys `animation_frames()` understands.  The still-only `aspect` and the
+  // projection-corrected flag are stripped here rather than taught to the
+  // animation renderer; the animation already has its frame's proportions in
+  // `output`, and a corrected mask is a still/3D feature.
+  const region = $('anim-scope').value === 'region' ? selectionPayload() : null;
+  if (region) {
+    delete region.aspect;
+    delete region.corrected;
+  }
   return {
     when: whenPayload(),
     start: localToUtc($('anim-start').value),
@@ -13933,7 +14828,7 @@ function animationRequest() {
       on: $('anim-hdr').checked,
       stops: num('anim-hdr-stops') || 3,
     },
-    region: $('anim-scope').value === 'region' ? selectionPayload() : null,
+    region,
   };
 }
 
@@ -14467,6 +15362,7 @@ function afterSelectionChange() {
   // page arguing with itself.
   drawDisk();
   drawMagnifier();
+  updateMeshPlan();
   if (state.labelsOn) refreshLabels();
 }
 
@@ -15027,6 +15923,39 @@ function init() {
   for (const button of document.querySelectorAll('#proc-image-tabs .tab')) {
     button.addEventListener('click', () => setProcImageTab(button.dataset.image));
   }
+  // 3D模型: either the selection tile or the whole globe, with the same
+  // lighting choice for the optional Blender scene.
+  $('mesh-export').addEventListener('click', () => {
+    if (meshScope() === 'selection') exportMesh('stl');
+  });
+  if ($('mesh-export-glb')) {
+    $('mesh-export-glb').addEventListener('click', () => {
+      if (meshScope() === 'moon') exportMoonGlb();
+      else exportMesh('glb');
+    });
+  }
+  if ($('mesh-export-blend')) {
+    $('mesh-export-blend').addEventListener('click', () => {
+      if (meshScope() === 'moon') exportMoonBlender();
+      else exportBlenderPreview();
+    });
+  }
+  if ($('mesh-scope')) {
+    $('mesh-scope').addEventListener('change', updateMeshPlan);
+  }
+  for (const id of ['mesh-size-mm', 'mesh-base-km', 'mesh-vertical',
+                    'mesh-resolution']) {
+    const field = $(id);
+    if (field) field.addEventListener('change', updateMeshPlan);
+  }
+  if ($('mesh-corrected')) {
+    $('mesh-corrected').addEventListener('change', meshCorrectionChanged);
+  }
+  if ($('mesh-projection')) {
+    $('mesh-projection').addEventListener('change', updateMeshPlan);
+  }
+  syncMeshCorrection();
+  updateMeshPlan();
   setProcImageTab('imaging');
   buildEventKinds();
   for (const id of ['events-start', 'events-end']) {
@@ -15446,7 +16375,7 @@ function init() {
     const button = $('label-focus');
     const on = button.getAttribute('aria-pressed') !== 'true';
     if (on && !state.selection) {
-      setStatus('先在全月面上拖一个选框，再针对选框标注', 'error');
+      setStatus('先选择一块区域，再针对选框标注', 'error');
       return;
     }
     button.setAttribute('aria-pressed', String(on));
@@ -15622,6 +16551,22 @@ function init() {
       setStatus('观测信息已改，全月面会自动重渲染');
     });
   }
+  // 视角 is not an observing-site coordinate: it chooses which side of the Moon
+  // the camera is on.  Switching it invalidates both the disk and the close-up,
+  // because the old selection may now be on the hidden hemisphere; the box is
+  // kept (it is still a place) and simply fails the close-up's visibility check
+  // until it is moved onto the visible side.
+  $('viewpoint').addEventListener('click', () => {
+    const far = $('viewpoint').getAttribute('aria-pressed') !== 'true';
+    $('viewpoint').setAttribute('aria-pressed', String(far));
+    state.diskExport = null;
+    state.regionInfo = null;
+    autoRefresh();
+    setStatus(far
+      ? '已切到月背视角（假想地心）：观测地点不参与视角，重新渲染…'
+      : '已切回地球视角（近地侧），重新渲染…');
+    drawDisk();
+  });
   for (const id of ['aperture', 'focal-ratio', 'focal-length', 'barlow', 'back-focus',
                     'obstruction', 'sensor-w', 'sensor-h', 'pixel-um',
                     'sensor-color']) {
