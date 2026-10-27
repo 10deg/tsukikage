@@ -179,6 +179,9 @@ const LAND_CLASSES = [
       + '100 个目视观测目标。前 3 项（月球本体、地照、月海/月陆二分）没有月面点，'
       + '不参与标注；其余 97 项各自按表中的原名与序号标注，选中后全部显示、不受密度限制，'
       + '月溪、辐射纹、区域等没有直径的项目只画点。' },
+  { key: 'libration',    zh: '天平动目标',             en: 'Libration target',      color: '#c7d8e6',
+    title: '极限天平动观测目标：从随机天平动目标表读取，按各自的月面坐标标注；'
+      + '与 Lunar 100 一样是独立观测列表，选中后按目标显示。' },
   { key: 'other',        zh: '其他',                 en: 'Other',                color: '#b9bec9' },
 ];
 
@@ -189,7 +192,7 @@ const LAND_CLASSES = [
    landing region up close.  A first look at the Moon is not covered in them.
    `resetClasses()` reads this list, so "复位" and the first paint agree. */
 const DEFAULT_OFF_CLASSES = ['basin', 'dome', 'pit', 'pyroclastic', 'imp', 'impact',
-                             'statio', 'lunar100', 'other'];
+                             'statio', 'lunar100', 'libration', 'other'];
 
 /* The classes in the order the switches show them: the ones that are on to
  * begin with first, the ones that start switched off after them.
@@ -2513,14 +2516,20 @@ function updateClassesAllButton() {
  * them on would be a different page from the one that was just opened.
  */
 function resetClasses() {
-  for (const box of document.querySelectorAll('#label-classes input[type="checkbox"]')) {
-    const key = String(box.id).replace('class-', '');
-    const want = !DEFAULT_OFF_CLASSES.includes(key);
-    if (box.checked === want) continue;
-    box.checked = want;
-    box.dispatchEvent(new Event('change'));
+  suppressClassRefresh = true;
+  try {
+    for (const box of document.querySelectorAll('#label-classes input[type="checkbox"]')) {
+      const key = String(box.id).replace('class-', '');
+      const want = !DEFAULT_OFF_CLASSES.includes(key);
+      if (box.checked === want) continue;
+      box.checked = want;
+      box.dispatchEvent(new Event('change'));
+    }
+  } finally {
+    suppressClassRefresh = false;
   }
   updateClassesAllButton();
+  refreshLabelPlans();
 }
 
 /** The label switch follows a manual change of what is drawn.
@@ -2534,12 +2543,18 @@ function ensureLabelsOn() {
 }
 
 function setAllClasses(on) {
-  for (const box of document.querySelectorAll('#label-classes input[type="checkbox"]')) {
-    if (box.checked === on) continue;
-    box.checked = on;
-    box.dispatchEvent(new Event('change'));
+  suppressClassRefresh = true;
+  try {
+    for (const box of document.querySelectorAll('#label-classes input[type="checkbox"]')) {
+      if (box.checked === on) continue;
+      box.checked = on;
+      box.dispatchEvent(new Event('change'));
+    }
+  } finally {
+    suppressClassRefresh = false;
   }
   updateClassesAllButton();
+  refreshLabelPlans();
 }
 
 /** The classes whose switch is on.  The server filters on this list. */
@@ -2602,7 +2617,7 @@ function buildClassToggles() {
       // reader had dragged or put away in it come back where the catalogue puts
       // them.  Only that family -- the other classes keep their edits.
       if (box.checked) resetLabelClass(entry.key);
-      refreshLabelPlans();
+      if (!suppressClassRefresh) refreshLabelPlans();
     });
     host.appendChild(chip);
   }
@@ -10659,6 +10674,10 @@ async function diskLabelsAt(width, when) {
  * change that alters *what* is being placed -- re-flows immediately.
  */
 let labelSeq = 0;
+// The all/none/reset buttons toggle many chips; without this each chip would
+// ask the server for a fresh annotation plan.  A single refresh after the loop
+// is the same result with one request.
+let suppressClassRefresh = false;
 
 async function refreshLabels() {
   const seq = ++labelSeq;
@@ -10809,7 +10828,8 @@ $('body-disk').addEventListener('pointerdown', (event) => {
   // The preview controls and the zoom cluster float over the picture; a press
   // on one of them is a press on a control, not the start of a selection box.
   const target = event.target;
-  if (target && target.closest && target.closest('.view-tools, .zoom')) return;
+  if (target && target.closest
+      && target.closest('.view-tools, .zoom, .disk-bottom-hud, .selection-inputs')) return;
   // Ctrl / ⌘ + click drops a manual anchor instead of starting a box.
   if ((event.ctrlKey || event.metaKey) && addManualMark('disk', event)) {
     event.preventDefault();
@@ -13205,7 +13225,10 @@ function meshLighting() {
 function moonPayload() {
   return {
     when: whenPayload(),
-    moon: { blend_light: meshLighting() },
+    moon: {
+      size_mm: Number(num('mesh-moon-size-mm') ?? 200) || 200,
+      resolution: Number($('mesh-moon-resolution').value) || 1024,
+    },
   };
 }
 
@@ -13224,14 +13247,20 @@ function updateMeshPlan() {
   const scope = meshScope();
   const controls = $('mesh-selection-controls');
   if (controls) controls.hidden = scope === 'moon';
+  const moonControls = $('mesh-moon-controls');
+  if (moonControls) moonControls.hidden = scope !== 'moon';
+  const lightingRow = $('mesh-lighting-row');
+  if (lightingRow) lightingRow.hidden = scope === 'moon';
   const stlButton = $('mesh-export');
   const glbButton = $('mesh-export-glb');
   const blendButton = $('mesh-export-blend');
   const buttons = [stlButton, glbButton, blendButton].filter(Boolean);
   if (stlButton) stlButton.hidden = scope === 'moon';
   if (scope === 'moon') {
+    const size = Number(num('mesh-moon-size-mm') ?? 200) || 200;
+    const resolution = Number($('mesh-moon-resolution').value) || 1024;
     plan.hidden = false;
-    plan.textContent = '全月面　直径 3,474.8 km　显示 φ 200 mm';
+    plan.textContent = `全月面　直径 ${fmt(size, 0)} mm　分辨率 ${resolution}`;
     if (stlButton) stlButton.disabled = true;
     if (glbButton) {
       glbButton.disabled = false;
@@ -13267,18 +13296,23 @@ function updateMeshPlan() {
   let samples = '';
   let match = '';
   if (auto) {
-    samples = `　采样 ${autoMeshSamples()}`;
-    // How large the model would have to be for the 768-sample cap to be
-    // exactly one sample per native DEM pixel.  A 768-point grid has 767
-    // intervals; using 768 here overstated the match by one pixel.
+    const samplesCount = autoMeshSamples();
+    samples = `　采样 ${samplesCount}`;
     const native = Number(LIMITS.terrain_km_per_px);
     const longKm = ground
       ? Math.max(ground.x1 - ground.x0, ground.y1 - ground.y0)
       : 0;
     if (native > 0 && longKm > 0) {
-      const matchMm = longMm * ((768 - 1) * native) / longKm;
+      // At the current samples-per-mm density, how long the model would need
+      // to be to hold every native DEM pixel across the selection.  This grows
+      // with the selection; the old expression inverted it and collapsed to a
+      // few tens of millimetres for large boxes.
+      const nativePixels = longKm / native;
+      const matchMm = longMm * nativePixels / Math.max(1, samplesCount - 1);
+      const kmPerMm = longKm / longMm;
       if (Number.isFinite(matchMm) && matchMm > 0) {
-        match = `　长边尺寸 ${fmt(matchMm, 0)} mm 时匹配当前最高分辨率`;
+        match = `　长边尺寸 ${fmt(matchMm, 0)} mm 时匹配当前最高分辨率` +
+          `　1 mm = ${groundScaleText(kmPerMm)}`;
       }
     }
   }
@@ -13366,11 +13400,14 @@ async function exportMesh(format = 'stl') {
       const corrected = info.corrected ? '，投影修正选框'
         : (info.projection === false ? '，未投影修正' : '');
       const form = format === 'glb' ? '，GLB（米）' : '';
+      const scale = Number(info.scale_mm_per_km);
+      const physical = scale > 0
+        ? `，1 mm = ${groundScaleText(1 / scale)}` : '';
       status.textContent =
         `已导出 ${name}：地面 ${fmt(info.width_km, 1)}×${fmt(info.height_km, 1)} km，` +
         `起伏 ${fmt(info.relief_km, 2)} km，模型 ${fmt(info.long_side_mm, 0)}×` +
         `${fmt(info.short_side_mm, 1)} mm，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
-        `${mb.toFixed(1)} MB${grid}${cell}${source}${corrected}${form}` +
+        `${mb.toFixed(1)} MB${grid}${cell}${source}${corrected}${form}${physical}` +
         (info.resolution_capped ? '；采样已到上限' : '') +
         (info.terrain_limited ? '；采样细于 DEM，模型含插值' : '');
     }
@@ -13426,10 +13463,12 @@ async function exportMoonGlb() {
     showMeshDownload(blob, name);
     const mb = Number(blob.size || 0) / (1024 * 1024);
     if (status) {
+      const physical = Number(info.diameter_mm) > 0
+        ? `，1 mm = ${groundScaleText(3474.8 / Number(info.diameter_mm))}` : '';
       status.textContent =
         `已导出 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，` +
-        `${(info.n_faces || 0).toLocaleString()} 个三角面，${mb.toFixed(1)} MB` +
-        `${info.has_texture === false ? '，无纹理' : '，纹理已打包'}`;
+        `分辨率 ${info.resolution || '—'}，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
+        `${mb.toFixed(1)} MB${physical}${info.has_texture === false ? '，无纹理' : '，纹理已打包'}`;
     }
     setStatus(`已导出全月面 ${name}`);
   } catch (error) {
@@ -13477,11 +13516,13 @@ async function exportMoonBlender() {
     const name = moonFileName(info, 'blend');
     showMeshDownload(blob, name);
     const mb = Number(blob.size || 0) / (1024 * 1024);
-    const light = info.blend_light === 'low' ? '低角度光照' : '当前月相光照';
     if (status) {
+      const physical = Number(info.diameter_mm) > 0
+        ? `，1 mm = ${groundScaleText(3474.8 / Number(info.diameter_mm))}` : '';
       status.textContent =
-        `已生成 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，${mb.toFixed(1)} MB，` +
-        `纹理已打包，默认 ${light}`;
+        `已生成 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，` +
+        `分辨率 ${info.resolution || '—'}，${mb.toFixed(1)} MB${physical}，` +
+        `当前月相光照，纹理已打包`;
     }
     setStatus(`已生成全月面 Blender 预览场景 ${name}`);
   } catch (error) {
@@ -13543,10 +13584,13 @@ async function exportBlenderPreview() {
         : '';
       const texture = info.has_texture === false ? '无纹理' : '纹理已打包';
       const light = info.blend_light === 'low' ? '低角度光照' : '当前月相光照';
+      const scale = Number(info.scale_mm_per_km);
+      const physical = scale > 0
+        ? `，1 mm = ${groundScaleText(1 / scale)}` : '';
       status.textContent =
         `已生成 ${name}：模型 ${fmt(info.long_side_mm, 0)}×` +
         `${fmt(info.short_side_mm, 1)} mm，${mb.toFixed(1)} MB，${texture}` +
-        `，Studio / Lunar Sun / Lunar Terminator，默认 ${light}${solar}`;
+        `${physical}，Studio / Lunar Sun / Lunar Terminator，默认 ${light}${solar}`;
     }
     setStatus(`已生成 Blender 预览场景 ${name}`);
   } catch (error) {
@@ -13645,7 +13689,7 @@ function buildEventKinds() {
     ['supermoon', '超级月亮'], ['micromoon', '最小月亮'],
     ['highest_moon', '最高月亮'], ['lowest_moon', '最低月亮'],
     ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
-    ['jewelled_handle', 'the jewelled handle（实验功能）'],
+    ['jewelled_handle', 'the jewelled handle'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
@@ -13932,7 +13976,7 @@ const EVENT_COLUMNS = {
   magnitude: '亮度', surfaceBrightness: '月面亮度', earthshine: '地照亮度',
   best: '最佳时刻', start: '开始时间', end: '结束时间',
   duration: '持续时长', elongation: '距角', colongitude: '余经度',
-  detail: '详情',
+  detail: '备注',
 };
 
 const PHASE_COLUMNS = ['date', 'time', 'label', 'age', 'lunar', 'phaseAngle',
@@ -13969,8 +14013,12 @@ const EVENT_COLUMN_SETS = {
 };
 
 function eventColumnsFor(kind) {
-  return EVENT_COLUMN_SETS[kind]
+  const columns = EVENT_COLUMN_SETS[kind]
     || ['date', 'time', 'label', 'altitude', 'detail'];
+  // 备注 is not a per-kind metric; every forecast has one, and the floating
+  // table is where the reader has room to read it.  Append it to each set
+  // instead of repeating it in every array above.
+  return columns.includes('detail') ? columns : [...columns, 'detail'];
 }
 
 /** One numeric metric, or the row's legacy field when the CSV had none. */
@@ -15831,6 +15879,10 @@ function init() {
     const body = views[name].body;
     if (!body) continue;
     body.addEventListener('wheel', (event) => {
+      if (event.target && event.target.closest
+          && event.target.closest('.disk-bottom-hud, .selection-inputs')) {
+        return;
+      }
       event.preventDefault();
       setZoom(name, views[name].zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
     }, { passive: false });
@@ -15944,7 +15996,8 @@ function init() {
     $('mesh-scope').addEventListener('change', updateMeshPlan);
   }
   for (const id of ['mesh-size-mm', 'mesh-base-km', 'mesh-vertical',
-                    'mesh-resolution']) {
+                    'mesh-resolution', 'mesh-moon-size-mm',
+                    'mesh-moon-resolution']) {
     const field = $(id);
     if (field) field.addEventListener('change', updateMeshPlan);
   }

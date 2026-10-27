@@ -56,16 +56,16 @@ from moonlib.annotations import (  # noqa: E402
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
-MAX_ZOOM = 6
+MAX_ZOOM = 8
 #: Tile-cache entries; a screenful at one zoom is a few dozen, and a reader
 #: panning around should not make the process grow without bound.
 TILE_CACHE = 384
 #: The map's own "largest useful" catalogue density, by zoom.  Below this the
 #: payload is all labels and no picture; above it the page is a wall of text.
-_MIN_DIAMETER_BY_ZOOM = {0: 220.0, 1: 120.0, 2: 70.0, 3: 35.0, 4: 15.0, 5: 6.0, 6: 0.0}
+_MIN_DIAMETER_BY_ZOOM = {0: 220.0, 1: 120.0, 2: 70.0, 3: 35.0, 4: 15.0, 5: 6.0, 6: 2.5, 7: 1.0, 8: 0.0}
 #: Classes that are meaningful even when the feature is a point, so the size
 #: filter above must not drop them.
-_POINT_CLASSES = frozenset({"statio", "lunar100", "impact", "albedo", "imp", "other"})
+_POINT_CLASSES = frozenset({"statio", "lunar100", "libration", "impact", "albedo", "imp", "other"})
 
 
 def _finite(value: Any, default: float = float("nan")) -> float:
@@ -100,7 +100,7 @@ class LunarMapService:
         self._lock = threading.RLock()
         self._terrain = None
         self._features: Optional[List[Dict[str, Any]]] = None
-        self._tiles: "OrderedDict[Tuple[int, int, int], bytes]" = OrderedDict()
+        self._tiles: "OrderedDict[Tuple[Any, ...], bytes]" = OrderedDict()
 
     # -- data ------------------------------------------------------------
     def terrain(self):
@@ -304,18 +304,58 @@ class LunarMapService:
             "level": level,
         }
 
+    # -- lighting --------------------------------------------------------
+    def lighting(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """Current Moon phase geometry for the map's date/observer fields."""
+        lat = _finite(query.get("lat"), 0.0)
+        lon = _finite(query.get("lon"), 0.0)
+        when = query.get("when") or None
+        observer = moonlib.Observer(lat=lat, lon=lon)
+        state = moonlib.moon_state(observer=observer, when=when)
+        lib = state.libration
+        phase = state.phase
+        return {
+            "when_utc": state.when_utc.isoformat(),
+            "observer": {"lat": float(observer.lat), "lon": float(observer.lon)},
+            "subsolar": {
+                "lon": float(lib.subsolar_lon_deg),
+                "lat": float(lib.subsolar_lat_deg),
+            },
+            "sub_earth": {
+                "lon": float(lib.sub_earth_lon_deg),
+                "lat": float(lib.sub_earth_lat_deg),
+            },
+            "colongitude": float(lib.colongitude_deg),
+            "phase": {
+                "label": phase.label,
+                "name_zh": phase.name_zh,
+                "name_en": phase.name_en,
+                "illumination_percent": float(phase.illuminated_percent_geo),
+            },
+            "moon": {
+                "azimuth_deg": float(state.azimuth_deg),
+                "elevation_deg": float(state.elevation_deg),
+                "distance_km": float(state.geo_distance_km),
+            },
+        }
+
     # -- tiles -----------------------------------------------------------
-    def tile(self, zoom: int, x: int, y: int) -> bytes:
+    def tile(self, zoom: int, x: int, y: int,
+             light: Optional[Tuple[float, float]] = None) -> bytes:
         cols, rows = _tile_counts(zoom)
         if not (0 <= zoom <= MAX_ZOOM and 0 <= x < cols and 0 <= y < rows):
             raise moonlib.MoonlibError("tile outside the pyramid.")
-        key = (int(zoom), int(x), int(y))
+        light_key = (
+            (round(float(light[0]), 3), round(float(light[1]), 3))
+            if light is not None else None
+        )
+        key = (int(zoom), int(x), int(y), light_key)
         with self._lock:
             cached = self._tiles.get(key)
             if cached is not None:
                 self._tiles.move_to_end(key)
                 return cached
-        png = self._render_tile(int(zoom), int(x), int(y))
+        png = self._render_tile(int(zoom), int(x), int(y), light)
         with self._lock:
             self._tiles[key] = png
             self._tiles.move_to_end(key)
@@ -323,7 +363,8 @@ class LunarMapService:
                 self._tiles.popitem(last=False)
         return png
 
-    def _render_tile(self, zoom: int, x: int, y: int) -> bytes:
+    def _render_tile(self, zoom: int, x: int, y: int,
+                     light: Optional[Tuple[float, float]] = None) -> bytes:
         from PIL import Image
 
         terrain = self.terrain()
@@ -371,17 +412,39 @@ class LunarMapService:
         normal_east = -slope_east / norm
         normal_north = -slope_north / norm
         normal_up = 1.0 / norm
-        azimuth = math.radians(315.0)
-        altitude = math.radians(45.0)
-        light_east = math.sin(azimuth) * math.cos(altitude)
-        light_north = math.cos(azimuth) * math.cos(altitude)
-        light_up = math.sin(altitude)
+        if light is None:
+            azimuth = math.radians(315.0)
+            altitude = math.radians(45.0)
+            light_east = math.sin(azimuth) * math.cos(altitude)
+            light_north = math.cos(azimuth) * math.cos(altitude)
+            light_up = math.sin(altitude)
+        else:
+            sun_lon = math.radians(float(light[0]))
+            sun_lat = math.radians(float(light[1]))
+            sx = math.cos(sun_lat) * math.cos(sun_lon)
+            sy = math.cos(sun_lat) * math.sin(sun_lon)
+            sz = math.sin(sun_lat)
+            lon_r = np.radians(lon)
+            lat_r = np.radians(lat)
+            light_east = -np.sin(lon_r) * sx + np.cos(lon_r) * sy
+            light_north = (
+                -np.sin(lat_r) * np.cos(lon_r) * sx
+                - np.sin(lat_r) * np.sin(lon_r) * sy
+                + np.cos(lat_r) * sz
+            )
+            light_up = (
+                np.cos(lat_r) * np.cos(lon_r) * sx
+                + np.cos(lat_r) * np.sin(lon_r) * sy
+                + np.sin(lat_r) * sz
+            )
         shade = (
             normal_east * light_east
             + normal_north * light_north
             + normal_up * light_up
         )
-        shade = np.clip(0.18 + 0.92 * np.maximum(shade, 0.0), 0.0, 1.15)
+        ambient = 0.18 if light is None else 0.10
+        gain = 0.92 if light is None else 1.05
+        shade = np.clip(ambient + gain * np.maximum(shade, 0.0), 0.0, 1.15)
 
         colors = None
         if terrain.albedo is not None:
@@ -468,10 +531,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.search(query))
             if path == "/api/map/point":
                 return self._json(200, self.service.point(query))
+            if path == "/api/map/lighting":
+                return self._json(200, self.service.lighting(query))
             match = re.fullmatch(r"/api/map/tile/(\d+)/(\d+)/(\d+)\.png", path)
             if match:
                 zoom, x, y = (int(part) for part in match.groups())
-                png = self.service.tile(zoom, x, y)
+                light = None
+                raw_light = query.get("light")
+                if raw_light:
+                    parts = raw_light.split(",")
+                    if len(parts) == 2:
+                        light_lon = _finite(parts[0])
+                        light_lat = _finite(parts[1])
+                        if math.isfinite(light_lon) and math.isfinite(light_lat):
+                            light = (light_lon, light_lat)
+                png = self.service.tile(zoom, x, y, light)
                 return self._send(200, png, "image/png",
                                   cache="public, max-age=86400")
             return self._error(404, f"no route {path}")

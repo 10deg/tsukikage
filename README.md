@@ -1,6 +1,6 @@
 # Tsukikage
 
-**当前版本 / Version：1.6.0**
+**当前版本 / Version：1.6.1**
 
 一套可**完全离线**运行的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
 **位置、月相、升落、天平动等信息**，并能用 NASA SVS 的 LOLA 高程与
@@ -66,15 +66,6 @@ print(moonlib.reporting.format_moon_report(report))
 ```bash
 ./.venv/bin/python web/server.py --port 8765     # 打开 http://127.0.0.1:8765/
 ```
-
-第二个本地服务：月面地图（独立进程，可与模拟器同时开）：
-
-```bash
-./.venv/bin/python web/map_server.py --port 8766  # 打开 http://127.0.0.1:8766/
-```
-
-地图是 2:1 等距圆柱投影的离线瓦片金字塔：按缩放级别从同一份 DEM/色彩数据渲染，
-带地貌多图层标注、搜索、坐标与高程读数。页面与接口都是模板，新增图层不需要改渲染器。
 
 每个子命令都支持 `--json`，输出与 HTTP API 完全相同的载荷。
 
@@ -195,9 +186,9 @@ matplotlib 就有），两条路径结果一致。
 | **3D 地形切片（STL，可直接打印）** | `moonlib.selection_tile`、网页「3D模型」 |
 | **带纹理 GLB（Blender 直接查看）** | `TerrainTile.glb_bytes()`、网页「导出 GLB」 |
 | **Blender 预览场景（.blend，含三个光照场景）** | 网页「生成 Blender 预览场景」、`POST /api/mesh/blender` |
-| **全月面 GLB / Blender 场景（当前月相 / 低角度）** | 网页「全月面」范围、`POST /api/moon/glb`、`POST /api/moon/blender` |
+| **全月面 GLB / Blender 场景（尺寸/分辨率可设，当前月相光照）** | 网页「全月面」范围、`POST /api/moon/glb`、`POST /api/moon/blender` |
 | **可打印的投影修正选框** | `moonlib.selection_correction`、网页「使用带投影修正的选框」 |
-| **交互式月面地图（第二个本地服务）** | `web/map_server.py`、`web/map/` |
+| **天平动目标分类（独立观测列表）** | `moonlib.annotations.load_libration_targets`、网页「天平动目标」 |
 | **月面特写与自动取景** | `moonlib.moonview.render_region`、`moonlib.render_feature` |
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
 | **月面 X / V / L预报** | `moonlib.events` |

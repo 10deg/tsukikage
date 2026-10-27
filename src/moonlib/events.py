@@ -37,7 +37,7 @@ is why the umbra radius carries the conventional 2% allowance.
     Ukert, a few hours after first quarter, and the bright L-shaped ridge west
     of Zach G.  The X/V anchor is the eastern arm of the X near Blanchinus B
     (lon 1.8°, lat -25°); the L anchor is the stated Zach G west point
-    (lon -0.5°, lat -58.54°).  X/V uses the Sun's -0.5°–1.5° band with 0.5°
+    (lon -0.5°, lat -58.54°).  X/V uses the Sun's -0.5°–1.0° band with 0.5°
     as the best moment and keeps the colongitude gate at 358°.  L has its own
     band: -0.75°–0.20°, best -0.30°, fitted to the reported one-hour/three-hour/
     five-hour offsets.  L is paired with the X/V of the same sunrise train: one
@@ -114,13 +114,12 @@ XVL_ANCHOR_LAT_DEG = -25.0
 XVL_COLONGITUDE_DEG = 358.0
 XVL_COLONGITUDE_TOLERANCE_DEG = 2.0
 
-#: The Sun's altitude at the X/V anchor.  The old upper edge was 1.5° and the
-#: window began at the horizon; the observing notes put the letters' best
-#: contrast near 0.5°, so the window is the whole -0.5°…1.5° band and 0.5° is
-#: reported as the best moment.  Below the horizon the terminator is still
-#: close enough to catch the grazing light, which is why the start is negative.
+#: The Sun's altitude at the X/V anchor.  The window begins below the horizon
+#: and ends at 1.0°: the observing notes put the letters' best contrast near
+#: 0.5°, and the old 1.5° end kept the window open after the letters had
+#: already disappeared.  0.5° is still reported as the best moment.
 XVL_SUN_ALTITUDE_MIN_DEG = -0.5
-XVL_SUN_ALTITUDE_MAX_DEG = 1.5
+XVL_SUN_ALTITUDE_MAX_DEG = 1.0
 XVL_SUN_ALTITUDE_BEST_DEG = 0.5
 
 #: The Sun's altitude at the L anchor.  L is not the same grazing geometry as
@@ -162,7 +161,7 @@ KIND_LABELS = {
     "lowest_moon": "最低月亮",
     "lunar_eclipse": "月食",
     "xvl": "月面 X/V/L",
-    "jewelled_handle": "the jewelled handle（实验功能）",
+    "jewelled_handle": "the jewelled handle",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -618,7 +617,7 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
             kind="jewelled_handle",
             when_utc=to_utc(best),
             altitude_deg=moon_altitude,
-            title="the jewelled handle（实验功能）",
+            title="the jewelled handle",
             detail=(
                 f"太阳高度 {JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG:g}–"
                 f"{JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "

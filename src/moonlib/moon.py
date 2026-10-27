@@ -170,7 +170,11 @@ def _build_phase(et: float, observer: Observer) -> MoonPhase:
         else SYNODIC_MONTH_DAYS * (1.0 - fraction)
     )
 
-    name_en, name_zh = phase_name(age.age_days)
+    illuminated_percent = 100.0 * max(
+        illuminated_fraction(geo_angle),
+        illuminated_fraction(topo_angle),
+    )
+    name_en, name_zh = phase_name(age.age_days, illuminated_percent)
     return MoonPhase(
         phase_angle_geo_deg=geo_angle,
         phase_angle_topo_deg=topo_angle,

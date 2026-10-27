@@ -1514,8 +1514,8 @@ details.fold > .hint { margin: 0 0 6px; }
   border: 0;
   background: var(--viewport);
 }
-/* 实时特写：三个数并作一排，等分这一栏的宽度。它们是同一个选框的三个坐标，
-   分两排读就像两组设置；`.`grid2` 的 1fr 1fr 正是把第三个挤下去的那条规则。 */
+/* 选框坐标：三个数并作一排。全月面预览右下角的紧凑覆盖见下面
+   `.selection-inputs.disk-selection`。 */
 .selection-inputs {
   flex: 0 0 auto;
   display: flex;
@@ -1524,6 +1524,68 @@ details.fold > .hint { margin: 0 0 6px; }
   flex-wrap: nowrap;
   padding: 0 2px;
 }
+/* 全月面预览右下角的一行：选框坐标在左，实时经纬度在右。两者底边和右边
+   对齐，浮层格式与左上角「预览」那一行一致。 */
+.disk-bottom-hud {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  z-index: 4;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  max-width: calc(100% - 16px);
+}
+.selection-inputs.disk-selection {
+  position: static;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 2px 8px;
+  width: auto;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(15, 17, 22, .74);
+}
+/* The coordinate HUD is absolutely placed in the two close-up views; in the
+   full-disk bottom row it is the second item of the flex row. */
+#coord-hud-disk {
+  position: static;
+  flex: 0 1 auto;
+  max-width: none;
+}
+/* 名称、输入、名称、输入…压成一条：不再每个标签各占一列，输入框也缩到
+   足够放下五位数字/负号即可。 */
+.selection-inputs.disk-selection > label {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.selection-inputs.disk-selection .en { display: none; }
+.selection-inputs.disk-selection input[type="number"] {
+  width: 6.8em;
+  min-width: 0;
+  margin: 0;
+  padding: 0 3px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-align: right;
+}
+.selection-inputs.disk-selection .pick-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.selection-inputs.disk-selection .pick-row .icon { padding: 0 4px; }
 .selection-inputs > label {
   flex: 1 1 0;
   min-width: 0;
@@ -1546,6 +1608,13 @@ details.fold > .hint { margin: 0 0 6px; }
 .selection-inputs .pick-row { margin-top: 2px; gap: 3px; }
 .selection-inputs .pick-row input { flex: 1 1 0; width: auto; min-width: 0; }
 .selection-inputs .pick-row button { flex: 0 0 auto; padding: 2px 5px; }
+/* The generic .pick-row rules above come later in the file, so the compact
+   full-disk row has to restate the width for the rotation field as well. */
+.selection-inputs.disk-selection .pick-row { margin-top: 0; gap: 2px; }
+.selection-inputs.disk-selection .pick-row input {
+  flex: 0 0 6.8em;
+  width: 6.8em;
+}
 .info-body .row { margin-top: 0; }
 
 /* 同步选框到此视场 rides at the right-hand end of the result tabs, immediately

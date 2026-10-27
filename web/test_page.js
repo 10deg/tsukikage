@@ -919,7 +919,7 @@ async function fetchStub(url, options) {
     const info = {
       format: 'glb', units: 'm', scope: 'moon',
       diameter_mm: 200.0, diameter_km: 3474.8,
-      n_vertices: 462241, n_faces: 921600,
+      resolution: 1024, n_vertices: 462241, n_faces: 921600,
       has_texture: true, texture_size: [2048, 1024],
     };
     return {
@@ -930,13 +930,11 @@ async function fetchStub(url, options) {
     };
   }
   if (url === '/api/moon/blender') {
-    const light = (body.moon && body.moon.blend_light) || 'phase';
     const info = {
       format: 'blend', units: 'm', scope: 'moon',
       diameter_mm: 200.0, diameter_km: 3474.8,
-      has_texture: true, blend_light: light,
-      default_scene: light === 'low' ? 'Low angle' : 'Current phase',
-      scenes: ['Current phase', 'Low angle'],
+      resolution: 1024, has_texture: true,
+      scenes: ['Current phase'],
     };
     return {
       ok: true, status: 200, statusText: 'OK',
@@ -1714,11 +1712,15 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('mesh-export').disabled === false);
   set('mesh-size-mm', 1000);
   fire('mesh-size-mm', 'change');
-  check('the plan says how large the model must be to match the source at 768',
-    /模型 1000 ×/.test(document.getElementById('mesh-plan').textContent) &&
-    /采样 768/.test(document.getElementById('mesh-plan').textContent) &&
-    /长边尺寸 \d+ mm 时匹配当前最高分辨率/.test(document.getElementById('mesh-plan').textContent),
-    document.getElementById('mesh-plan').textContent);
+  {
+    const planText = document.getElementById('mesh-plan').textContent;
+    const match = planText.match(/长边尺寸 (\d+) mm 时匹配当前最高分辨率/);
+    check('the plan says how large the model must be to match the source at 768',
+      /模型 1000 ×/.test(planText) && /采样 768/.test(planText) &&
+      /1 mm = /.test(planText) &&
+      !!match && Number(match[1]) > 1000,
+      planText);
+  }
   set('mesh-size-mm', 100);
   fire('mesh-size-mm', 'change');
   fire('mesh-export', 'click');
@@ -1838,17 +1840,30 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('mesh-download').download);
   set('mesh-scope', 'moon');
   fire('mesh-scope', 'change');
-  check('the whole-Moon scope hides the selection-only controls and STL',
+  check('the whole-Moon scope shows its size/resolution controls and hides STL',
     document.getElementById('mesh-selection-controls').hidden === true &&
+    document.getElementById('mesh-moon-controls').hidden === false &&
+    document.getElementById('mesh-lighting-row').hidden === true &&
     document.getElementById('mesh-export').hidden === true &&
-    /全月面/.test(document.getElementById('mesh-plan').textContent),
+    /全月面/.test(document.getElementById('mesh-plan').textContent) &&
+    /直径 200 mm/.test(document.getElementById('mesh-plan').textContent) &&
+    /分辨率 1024/.test(document.getElementById('mesh-plan').textContent),
+    document.getElementById('mesh-plan').textContent);
+  set('mesh-moon-size-mm', 400);
+  set('mesh-moon-resolution', 512);
+  fire('mesh-moon-size-mm', 'change');
+  fire('mesh-moon-resolution', 'change');
+  check('the whole-Moon plan follows the diameter and resolution',
+    /直径 400 mm/.test(document.getElementById('mesh-plan').textContent) &&
+    /分辨率 512/.test(document.getElementById('mesh-plan').textContent),
     document.getElementById('mesh-plan').textContent);
   fire('mesh-export-glb', 'click');
   await tick();
   await tick();
   const moonGlbCall = fetchCalls.filter((call) => call.url === '/api/moon/glb').pop();
-  check('the whole-Moon GLB export uses its own endpoint',
-    !!moonGlbCall && moonGlbCall.body.moon.blend_light === 'phase',
+  check('the whole-Moon GLB export sends the chosen size and resolution',
+    !!moonGlbCall && moonGlbCall.body.moon.size_mm === 400 &&
+    moonGlbCall.body.moon.resolution === 512,
     moonGlbCall ? JSON.stringify(moonGlbCall.body) : 'no call');
   check('the whole-Moon GLB reports its texture and leaves a .glb link',
     /全月面/.test(document.getElementById('mesh-status').textContent) &&
@@ -1861,28 +1876,23 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   await tick();
   await tick();
   const moonBlendCall = fetchCalls.filter((call) => call.url === '/api/moon/blender').pop();
-  check('the whole-Moon Blender scene defaults to current phase',
-    !!moonBlendCall && moonBlendCall.body.moon.blend_light === 'phase',
+  check('the whole-Moon Blender scene uses the same size and resolution',
+    !!moonBlendCall && moonBlendCall.body.moon.size_mm === 400 &&
+    moonBlendCall.body.moon.resolution === 512 &&
+    !('blend_light' in moonBlendCall.body.moon),
     moonBlendCall ? JSON.stringify(moonBlendCall.body) : 'no call');
-  check('the whole-Moon Blender scene leaves a .blend link',
+  check('the whole-Moon Blender scene is current-phase only',
     /已生成/.test(document.getElementById('mesh-status').textContent) &&
-    /当前月相/.test(document.getElementById('mesh-status').textContent) &&
+    /当前月相光照/.test(document.getElementById('mesh-status').textContent) &&
     /\.blend$/.test(document.getElementById('mesh-download').download),
     document.getElementById('mesh-status').textContent + ' / ' +
     document.getElementById('mesh-download').download);
-  set('mesh-blend-light', 'low');
-  fire('mesh-export-blend', 'click');
-  await tick();
-  await tick();
-  const lowBlendCall = fetchCalls.filter((call) => call.url === '/api/moon/blender').pop();
-  check('the whole-Moon Blender scene can switch to low-angle light',
-    !!lowBlendCall && lowBlendCall.body.moon.blend_light === 'low' &&
-    /低角度光照/.test(document.getElementById('mesh-status').textContent),
-    lowBlendCall ? JSON.stringify(lowBlendCall.body) : 'no call');
   set('mesh-scope', 'selection');
   fire('mesh-scope', 'change');
-  check('returning to the selection restores its controls and STL',
+  check('returning to the selection restores its controls, lighting and STL',
     document.getElementById('mesh-selection-controls').hidden === false &&
+    document.getElementById('mesh-moon-controls').hidden === true &&
+    document.getElementById('mesh-lighting-row').hidden === false &&
     document.getElementById('mesh-export').hidden === false &&
     /模型/.test(document.getElementById('mesh-plan').textContent),
     document.getElementById('mesh-plan').textContent);
@@ -1992,7 +2002,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the classes start with the big families off and the rest on',
     boxes().length === T.LAND_CLASSES.length && boxes().length >= 20 &&
     offByDefault.join(',') ===
-      'basin,dome,imp,impact,lunar100,other,pit,pyroclastic,rima,statio',
+      'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic,rima,statio',
     `${boxes().length} classes, off: ${offByDefault.join(',')}`);
   /* The row is ordered by what is on to begin with: a switch that shows nothing
      until a close-up should not be the first thing in the row.  Read the order
@@ -2035,7 +2045,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const off = boxes().filter((box) => !box.checked)
       .map((box) => String(box.id).replace('class-', '')).sort();
     check('标注设置复位 brings back the default class set',
-      off.join(',') === 'basin,dome,imp,impact,lunar100,other,pit,pyroclastic,statio',
+      off.join(',') === 'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic,statio',
       off.join(','));
   }
   /* Touching a class or an overlay brings the label switch up with it: the
@@ -2271,10 +2281,11 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.renderEventWindowRows();
     const phaseHead = document.getElementById('event-window-head');
     const phaseLabels = [...phaseHead.children].map((cell) => cell.textContent);
-    check('a phase row gets the phase column set',
-      phaseHead.children.length === 13 &&
+    check('a phase row gets the phase column set plus the note column',
+      phaseHead.children.length === 14 &&
       phaseLabels.includes('月龄') && phaseLabels.includes('农历') &&
       phaseLabels.includes('亮度') && phaseLabels.includes('月面亮度') &&
+      phaseLabels.includes('备注') &&
       !phaseLabels.includes('地照亮度') && !phaseLabels.includes('最佳时刻'),
       phaseLabels.join(' / '));
     const phaseCells = [...body.children[0].children].map((cell) => cell.textContent);
@@ -2282,7 +2293,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       phaseCells[3] === '14.20 d' && phaseCells[4] === '八月十五' &&
       phaseCells[7] === '33.00′' && phaseCells[8] === '+40.2°' &&
       phaseCells[10] === '384,400 km' && phaseCells[11] === '-12.70 mag' &&
-      phaseCells[12] === '3.40 mag/″²',
+      phaseCells[12] === '3.40 mag/″²' &&
+      phaseCells[13] === '视直径 33′ 00.0″',
       phaseCells.join(' | '));
     T.state.eventTable = eventTable;
     T.renderEventWindowRows();

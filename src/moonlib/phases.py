@@ -301,9 +301,24 @@ def moon_age(et: float) -> MoonAge:
 # ---------------------------------------------------------------------------
 # naming
 # ---------------------------------------------------------------------------
-def phase_name(age_days: float) -> Tuple[str, str]:
-    """``(english, chinese)`` phase names for a lunar age in days."""
+def phase_name(
+    age_days: float, illuminated_percent: Optional[float] = None
+) -> Tuple[str, str]:
+    """``(english, chinese)`` phase names for a lunar age in days.
+
+    The age bands are the normal answer.  Near full and new moon, though, the
+    illuminated fraction is the quantity a reader actually sees: the Moon can
+    be 99.5 % illuminated a little outside the narrow age band and would
+    otherwise be labelled a gibbous moon.  When the caller knows the
+    illuminated percentage, use it for those two end states.
+    """
     days = age_days % SYNODIC_MONTH_DAYS
+    if illuminated_percent is not None:
+        percent = float(illuminated_percent)
+        if percent >= 99.0:
+            return "Full Moon", "满月"
+        if percent <= 1.0:
+            return "New Moon", "新月"
     for limit, name_en, name_zh in PHASE_NAME_BANDS:
         if days < limit:
             return name_en, name_zh

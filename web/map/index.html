@@ -45,6 +45,21 @@
 
     <h2>显示</h2>
     <label class="field">
+      <span>名称</span>
+      <select id="name-language">
+        <option value="zh" selected>中文</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>投影</span>
+      <select id="projection">
+        <option value="equirect" selected>等距圆柱</option>
+        <option value="mercator">墨卡托</option>
+        <option value="globe">球面 / 3D</option>
+      </select>
+    </label>
+    <label class="field">
       <span>底图亮度</span>
       <input id="base-brightness" type="range" min="0.35" max="1.6" step="0.05" value="1">
     </label>
@@ -56,6 +71,33 @@
       <input id="diameter-toggle" type="checkbox" checked>
       <span>真实直径</span>
     </label>
+
+    <h2>光照</h2>
+    <label class="field">
+      <span>UTC</span>
+      <input id="light-when" type="datetime-local" step="60">
+    </label>
+    <div class="field-pair">
+      <label class="field"><span>纬度</span>
+        <input id="light-lat" type="number" min="-90" max="90" step="0.1" value="30">
+      </label>
+      <label class="field"><span>经度</span>
+        <input id="light-lon" type="number" min="-180" max="180" step="0.1" value="120">
+      </label>
+    </div>
+    <label class="check">
+      <input id="light-on" type="checkbox" checked>
+      <span>月面光照</span>
+    </label>
+    <label class="check">
+      <input id="shadow-on" type="checkbox" checked>
+      <span>阴影带</span>
+    </label>
+    <div class="panel-actions">
+      <button id="light-apply">应用</button>
+      <button id="light-now">此刻</button>
+    </div>
+    <div class="hint" id="light-readout">—</div>
 
     <h2>工具</h2>
     <div class="panel-actions">

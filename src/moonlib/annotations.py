@@ -60,6 +60,7 @@ __all__ = [
     "load_nomenclature",
     "load_chinese_names",
     "load_lunar100",
+    "load_libration_targets",
     "marker_radius_px",
     "outline_exit_distance",
     "annotation_catalogue",
@@ -151,6 +152,7 @@ FEATURE_CLASSES: Tuple[str, ...] = (
     "impact",
     "albedo",
     "lunar100",
+    "libration",
     "other",
 )
 
@@ -180,6 +182,7 @@ CLASS_LABELS: Dict[str, Tuple[str, str]] = {
     "impact": ("撞击闪光", "NELIOTA impact"),
     "albedo": ("反射率特征点", "Albedo feature"),
     "lunar100": ("Lunar 100", "The Lunar 100"),
+    "libration": ("天平动目标", "Libration target"),
     "other": ("其他", "Other"),
 }
 
@@ -223,6 +226,7 @@ _CLASS_BY_KIND = {
     "Impact basin": "basin",
     "Historical site": "statio",
     "Lunar 100": "lunar100",
+    "Libration target": "libration",
 }
 
 #: The first word of an IAU name *is* the feature family -- ``Mare Imbrium``,
@@ -522,6 +526,43 @@ def _name_key(name: str) -> str:
     return "".join(folded.casefold().split())
 
 
+def load_libration_targets(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
+    """The packaged extreme-libration observing targets as map features.
+
+    The limb-target catalogue is an independent list, like the Lunar 100: a
+    target that also has an IAU name stays a separate row, because the list is
+    what the reader is working through.  A target with no published radius is a
+    point, using the same sentinel as a point-like Lunar 100 entry.
+    """
+    from .libration import load_targets
+
+    features: List[SurfaceFeature] = []
+    for index, target in enumerate(load_targets(path), start=1):
+        # Like the Lunar 100, this is a numbered observing list; the prefix is
+        # part of the name the reader sees and keeps a target distinct from the
+        # gazetteer row for the same crater.
+        prefix = f"LT{index}"
+        diameter = 2.0 * float(target.radius_km)
+        if diameter <= 0.0:
+            diameter = LUNAR100_POINT_DIAMETER_KM
+        note = " · ".join(
+            part for part in (target.region, target.feature_type) if part
+        )
+        features.append(
+            SurfaceFeature(
+                name_en=f"{prefix} {target.english_name}",
+                name_zh=f"{prefix} {target.name_zh or target.english_name}",
+                lat_deg=float(target.lat_deg),
+                lon_deg=float(target.lon_deg),
+                diameter_km=float(diameter),
+                kind="Libration target",
+                note=note,
+                diameter_source="libration",
+            )
+        )
+    return tuple(features)
+
+
 def annotation_catalogue(
     path: Optional[Any] = None,
     *,
@@ -586,6 +627,7 @@ def annotation_catalogue(
     # catalogue the reader follows item by item -- and it keeps the numbering
     # and the published name intact.
     features.extend(load_lunar100(lunar100_path))
+    features.extend(load_libration_targets())
     return tuple(features)
 
 
@@ -1380,13 +1422,19 @@ def _display_label(feature: SurfaceFeature, language: str,
     """
     chinese, english = feature.name_zh, feature.name_en
     number = int(feature.lunar100 or 0)
+    # The Lunar 100 is an English observing list; its numbers and names are the
+    # published table's, so it is never translated on the picture even when the
+    # rest of the catalogue is.
+    feature_kind = feature_class(feature.kind, feature.diameter_km)
+    if feature_kind == "lunar100":
+        chinese = ""
     # The Lunar 100 names already carry their list number.  In the "both" form
     # the number belongs to the caption once, not twice.
     if not number:
         letter = _satellite_letter(english)
         if satellite == "letter" and letter:
             return letter
-    if feature_class(feature.kind, feature.diameter_km) == "crater":
+    if feature_kind == "crater":
         chinese = _crater_caption(chinese)
     if language == "en" or not chinese:
         return english

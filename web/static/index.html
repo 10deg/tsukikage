@@ -329,9 +329,27 @@
           <canvas id="overlay"></canvas>
           <canvas id="labels-disk" class="labels"></canvas>
           <div class="busy" id="disk-busy">渲染中…</div>
-          <!-- 经纬度读数是画面上的独立浮层，不占信息栏：右下角、半透明、
-               不拦鼠标。鼠标一动就更新；选中标注时改成标记点坐标。 -->
-          <div class="coord-hud" id="coord-hud-disk" hidden></div>
+          <!-- 右下角一行：选框坐标 + 实时经纬度。选框坐标用与「预览」
+               相同的浮层格式，右边缘与经纬度读数对齐。 -->
+          <div class="disk-bottom-hud">
+            <div class="selection-inputs disk-selection">
+              <label>中心经度 <span class="en">Lon</span>
+                <input type="number" id="sel-lon" step="0.001" placeholder="—">
+              </label>
+              <label>中心纬度 <span class="en">Lat</span>
+                <input type="number" id="sel-lat" step="0.001" placeholder="—">
+              </label>
+              <label>旋转角 <span class="en">Rot</span>
+                <span class="pick-row">
+                  <input type="number" id="sel-rotation" value="0" step="0.5">
+                  <button class="ghost icon reset" id="sel-reset-rot"
+                          title="旋转角归零"></button>
+                </span>
+              </label>
+            </div>
+            <!-- 经纬度读数不拦鼠标；选中标注时改成标记点坐标。 -->
+            <div class="coord-hud" id="coord-hud-disk" hidden></div>
+          </div>
 
           <!-- 图窗左上角：预览用的渲染分辨率。既可从下拉里挑给定档位，也可
                直接键入任意像素数（上限由服务端给出）。 -->
@@ -494,24 +512,6 @@
           </figure>
           <!-- 三个数并作一排：它们是同一个选框的三个坐标，分两排读反而像两组设置。
                输入框短，是因为里面装的是经纬度与角度，不是自由文本。 -->
-          <div class="selection-inputs">
-            <label>中心经度 <span class="en">Lon</span>
-              <input type="number" id="sel-lon" step="0.001" placeholder="—">
-            </label>
-            <label>中心纬度 <span class="en">Lat</span>
-              <input type="number" id="sel-lat" step="0.001" placeholder="—">
-            </label>
-            <!-- 视场半径不在这里了：选框的大小由鼠标拖着画，或在下面「物理分辨率」里
-                 定，一个可以键入的半径只是同一件事的第三个说法。旋转角本来就该和
-                 经纬度并排，归零键跟着它自己那一格。 -->
-            <label>旋转角 <span class="en">Rot</span>
-              <span class="pick-row">
-                <input type="number" id="sel-rotation" value="0" step="0.5">
-                <button class="ghost icon reset" id="sel-reset-rot"
-                        title="旋转角归零"></button>
-              </span>
-            </label>
-          </div>
         </div>
       </figure>
 
@@ -1078,7 +1078,22 @@
               <span>使用带投影修正的选框</span>
             </label>
             </div>
-            <div class="param-row">
+            <div id="mesh-moon-controls" hidden>
+              <div class="param-row">
+                <span class="slider-label">直径</span>
+                <input type="number" id="mesh-moon-size-mm" value="200" min="5" max="2000" step="1">
+                <span class="unit">mm</span>
+              </div>
+              <div class="param-row" title="赤道方向的网格采样数；纹理宽度为其两倍，最大 2048">
+                <span class="slider-label">分辨率</span>
+                <select id="mesh-moon-resolution">
+                  <option value="512">512</option>
+                  <option value="1024" selected>1024</option>
+                  <option value="2048">2048</option>
+                </select>
+              </div>
+            </div>
+            <div class="param-row" id="mesh-lighting-row">
               <span class="slider-label">光照</span>
               <select id="mesh-blend-light" title="生成 Blender 预览场景时使用的默认光照">
                 <option value="low">低角度光照</option>

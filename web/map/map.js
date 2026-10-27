@@ -11,7 +11,7 @@
 
 const TILE = 256;
 const MIN_ZOOM = 0;
-const MAX_ZOOM = 6;
+const MAX_ZOOM = 8;
 const KM_PER_DEGREE = Math.PI / 180 * 1737.4;
 
 const LAYER_COLORS = {
@@ -36,12 +36,31 @@ const LAYER_COLORS = {
   impact: '#f0c0a0',
   albedo: '#c9c9dc',
   lunar100: '#d9b8f2',
+  libration: '#c7d8e6',
   other: '#b9bec9',
 };
 
-const POINT_CLASSES = new Set(['statio', 'lunar100', 'impact', 'albedo', 'imp', 'other']);
+const POINT_CLASSES = new Set(['statio', 'lunar100', 'libration', 'impact', 'albedo', 'imp', 'other']);
 
 const $ = (id) => document.getElementById(id);
+
+function featureName(feature) {
+  if (!feature) return '';
+  // The Lunar 100 is published in English; its number and name stay English in
+  // both language modes.
+  if (feature.class === 'lunar100') {
+    return feature.name_en || feature.name || '';
+  }
+  if (state.language === 'en') {
+    return feature.name_en || feature.name_zh || feature.name || '';
+  }
+  return feature.name_zh || feature.name_en || feature.name || '';
+}
+
+function layerLabel(layer) {
+  if (!layer) return '';
+  return state.language === 'en' ? (layer.label_en || layer.label) : layer.label;
+}
 
 const canvas = $('map-canvas');
 const stage = $('map-stage');
@@ -69,6 +88,18 @@ const state = {
   featureTimer: null,
   selected: null,
   hover: null,
+  language: 'zh',
+  density: {},
+  projection: 'equirect',
+  lighting: null,
+  lightingOn: true,
+  shadowOn: true,
+  lightingKey: '',
+  globe: { lon: 0, lat: 0, zoom: 1 },
+  sourceCanvas: null,
+  sourcePixels: null,
+  sourceKey: '',
+  sourceLoadingKey: '',
   drag: null,
   pointer: null,
   pointSeq: 0,
@@ -112,12 +143,93 @@ function worldToScreen(x, y) {
   };
 }
 
+function globeRadius() {
+  return Math.min(state.width, state.height) * 0.44 * state.globe.zoom;
+}
+
+function globeBasis() {
+  const lon = state.globe.lon * Math.PI / 180;
+  const lat = state.globe.lat * Math.PI / 180;
+  const up = [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
+  const east = [-Math.sin(lon), Math.cos(lon), 0];
+  const north = [
+    -Math.sin(lat) * Math.cos(lon),
+    -Math.sin(lat) * Math.sin(lon),
+    Math.cos(lat),
+  ];
+  return { up, east, north };
+}
+
+function mercatorY(lat) {
+  const clamped = clamp(lat, -85, 85) * Math.PI / 180;
+  return Math.log(Math.tan(Math.PI / 4 + clamped / 2));
+}
+
 function lonlatToScreen(lon, lat) {
+  if (state.projection === 'globe') {
+    const { up, east, north } = globeBasis();
+    const lo = lon * Math.PI / 180;
+    const la = lat * Math.PI / 180;
+    const v = [
+      Math.cos(la) * Math.cos(lo),
+      Math.cos(la) * Math.sin(lo),
+      Math.sin(la),
+    ];
+    const x = v[0] * east[0] + v[1] * east[1] + v[2] * east[2];
+    const y = v[0] * north[0] + v[1] * north[1] + v[2] * north[2];
+    const z = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
+    const radius = globeRadius();
+    if (z <= 0) return { x: -10000, y: -10000, visible: false };
+    return {
+      x: state.width / 2 + x * radius,
+      y: state.height / 2 - y * radius,
+      visible: true,
+    };
+  }
+  if (state.projection === 'mercator') {
+    const world = worldSize();
+    const pxPerDeg = (world.w / 360) * state.scale;
+    const pxPerRad = pxPerDeg * 180 / Math.PI;
+    return {
+      x: state.width / 2 + (lon - state.centerLon) * pxPerDeg,
+      y: state.height / 2 - (mercatorY(lat) - mercatorY(state.centerLat)) * pxPerRad,
+      visible: true,
+    };
+  }
   const point = lonlatToWorld(lon, lat);
   return worldToScreen(point.x, point.y);
 }
 
 function screenToLonLat(sx, sy) {
+  if (state.projection === 'globe') {
+    const radius = globeRadius();
+    if (!(radius > 0)) return null;
+    const nx = (sx - state.width / 2) / radius;
+    const ny = (state.height / 2 - sy) / radius;
+    const rho = Math.hypot(nx, ny);
+    if (rho > 1) return null;
+    const nz = Math.sqrt(Math.max(0, 1 - rho * rho));
+    const { up, east, north } = globeBasis();
+    const v = [
+      nx * east[0] + ny * north[0] + nz * up[0],
+      nx * east[1] + ny * north[1] + nz * up[1],
+      nx * east[2] + ny * north[2] + nz * up[2],
+    ];
+    return {
+      lon: Math.atan2(v[1], v[0]) * 180 / Math.PI,
+      lat: Math.asin(clamp(v[2], -1, 1)) * 180 / Math.PI,
+    };
+  }
+  if (state.projection === 'mercator') {
+    const world = worldSize();
+    const pxPerDeg = (world.w / 360) * state.scale;
+    const pxPerRad = pxPerDeg * 180 / Math.PI;
+    if (!(pxPerDeg > 0)) return null;
+    const lon = state.centerLon + (sx - state.width / 2) / pxPerDeg;
+    const m = mercatorY(state.centerLat) - (sy - state.height / 2) / pxPerRad;
+    const lat = (2 * Math.atan(Math.exp(m)) - Math.PI / 2) * 180 / Math.PI;
+    return { lon: clamp(lon, -180, 180), lat: clamp(lat, -85, 85) };
+  }
   const world = worldSize();
   const cam = camera();
   const x = cam.x + (sx - state.width / 2) / state.scale;
@@ -143,6 +255,15 @@ function clampCenter() {
 }
 
 function fitView() {
+  if (state.projection === 'globe') {
+    state.globe = { lon: 0, lat: 0, zoom: 1 };
+    state.centerLon = 0;
+    state.centerLat = 0;
+    render();
+    scheduleFeatures();
+    scheduleHash();
+    return;
+  }
   const small = Math.min(state.width / TILE, state.height / (TILE / 2));
   state.zoom = clamp(Math.round(Math.log2(Math.max(1, small / 2))), MIN_ZOOM, 2);
   const world = worldSize();
@@ -158,6 +279,13 @@ function fitView() {
 }
 
 function zoomTo(nextZoom, anchor) {
+  if (state.projection === 'globe') {
+    state.globe.zoom = clamp(state.globe.zoom * 2 ** (nextZoom - state.zoom), 0.45, 4.0);
+    state.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+    render();
+    scheduleFeatures();
+    return;
+  }
   const pivot = anchor || { x: state.width / 2, y: state.height / 2 };
   const geo = screenToLonLat(pivot.x, pivot.y);
   state.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
@@ -174,6 +302,12 @@ function zoomTo(nextZoom, anchor) {
 }
 
 function zoomBy(factor, anchor) {
+  if (state.projection === 'globe') {
+    state.globe.zoom = clamp(state.globe.zoom * factor, 0.45, 4.0);
+    render();
+    scheduleFeatures();
+    return;
+  }
   const pivot = anchor || { x: state.width / 2, y: state.height / 2 };
   const geo = screenToLonLat(pivot.x, pivot.y);
   let nextScale = state.scale * factor;
@@ -224,13 +358,25 @@ function render() {
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   ctx.clearRect(0, 0, state.width, state.height);
   drawBackground();
-  if (state.active.has('base')) drawTiles();
+  if (state.active.has('base')) {
+    if (state.projection === 'equirect') drawTiles();
+    else drawProjectedBase();
+  }
   if (state.active.has('graticule')) drawGraticule();
+  drawLightingOverlay();
   drawFeatures();
   drawSelectionRing();
   drawScaleBar();
   const zoomLabel = $('zoom-label');
-  if (zoomLabel) zoomLabel.textContent = `z${state.zoom} · ${state.scale.toFixed(1)}×`;
+  if (zoomLabel) {
+    // Magnification relative to the z0 tile grid: each zoom step doubles the
+    // number of map pixels on screen, so this is the factor a reader means by
+    // "how far in am I", not the raw tile-pixel scale.
+    const magnification = state.projection === 'globe'
+      ? state.globe.zoom
+      : state.scale * 2 ** (state.zoom + 1);
+    zoomLabel.textContent = `zoom${state.zoom} · ${magnification.toFixed(1)}x`;
+  }
 }
 
 function drawBackground() {
@@ -242,8 +388,12 @@ function tileKey(z, x, y) {
   return z + '/' + x + '/' + y;
 }
 
+function tileCacheKey(z, x, y) {
+  return tileKey(z, x, y) + '|' + (state.lightingKey || 'plain');
+}
+
 function tileEntry(z, x, y) {
-  const key = tileKey(z, x, y);
+  const key = tileCacheKey(z, x, y);
   let entry = state.tiles.get(key);
   if (entry) return entry;
   entry = { image: new Image(), ready: false, failed: false };
@@ -265,7 +415,9 @@ function tileEntry(z, x, y) {
     state.loading = Math.max(0, state.loading - 1);
     updateLoading();
   };
-  entry.image.src = `/api/map/tile/${z}/${x}/${y}.png`;
+  const light = state.lightingKey
+    ? `?light=${encodeURIComponent(state.lightingKey)}` : '';
+  entry.image.src = `/api/map/tile/${z}/${x}/${y}.png${light}`;
   return entry;
 }
 
@@ -305,7 +457,7 @@ function drawAncestor(x, y, screenX, screenY, size) {
     const span = 2 ** depth;
     const parentX = Math.floor(x / span);
     const parentY = Math.floor(y / span);
-    const entry = state.tiles.get(tileKey(z, parentX, parentY));
+    const entry = state.tiles.get(tileCacheKey(z, parentX, parentY));
     if (!entry || !entry.ready) continue;
     const sx = ((x - parentX * span) / span) * TILE;
     const sy = ((y - parentY * span) / span) * TILE;
@@ -316,9 +468,226 @@ function drawAncestor(x, y, screenX, screenY, size) {
   return false;
 }
 
+function utcNowLocalInput() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}T`
+    + `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}`;
+}
+
+function unitVector(lon, lat) {
+  const lo = lon * Math.PI / 180;
+  const la = lat * Math.PI / 180;
+  return [Math.cos(la) * Math.cos(lo), Math.cos(la) * Math.sin(lo), Math.sin(la)];
+}
+
+function terminatorLat(lon, subsolar) {
+  const sun = unitVector(subsolar.lon, subsolar.lat);
+  const lo = lon * Math.PI / 180;
+  const a = sun[0] * Math.cos(lo) + sun[1] * Math.sin(lo);
+  const b = sun[2];
+  if (Math.abs(a) < 1e-12 && Math.abs(b) < 1e-12) return null;
+  let lat = Math.atan2(-a, b) * 180 / Math.PI;
+  if (lat > 90) lat -= 180;
+  if (lat < -90) lat += 180;
+  return lat;
+}
+
+function drawLightPoint(lon, lat, colour, label) {
+  const p = lonlatToScreen(lon, lat);
+  if (p.visible === false) return;
+  if (p.x < -40 || p.y < -40 || p.x > state.width + 40 || p.y > state.height + 40) return;
+  ctx.save();
+  ctx.strokeStyle = colour;
+  ctx.fillStyle = colour;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(p.x - 7, p.y); ctx.lineTo(p.x + 7, p.y);
+  ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y + 7);
+  ctx.stroke();
+  ctx.font = '10px "PingFang SC", system-ui, sans-serif';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(label, p.x + 8, p.y - 6);
+  ctx.restore();
+}
+
+function drawLightingOverlay() {
+  const light = state.lighting;
+  if (!state.lightingOn || !light) return;
+  const subsolar = light.subsolar;
+  const points = [];
+  for (let lon = -180; lon <= 180; lon += 2) {
+    const lat = terminatorLat(lon, subsolar);
+    if (lat !== null) points.push({ lon, lat });
+  }
+  if (state.shadowOn && state.projection !== 'globe' && points.length > 2) {
+    const edge = subsolar.lat >= 0 ? -90 : 90;
+    const p0 = lonlatToScreen(points[0].lon, points[0].lat);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    for (const point of points.slice(1)) {
+      const p = lonlatToScreen(point.lon, point.lat);
+      ctx.lineTo(p.x, p.y);
+    }
+    const last = points[points.length - 1];
+    const bottom = lonlatToScreen(last.lon, edge);
+    ctx.lineTo(bottom.x, bottom.y);
+    const firstEdge = lonlatToScreen(points[0].lon, edge);
+    ctx.lineTo(firstEdge.x, firstEdge.y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0, 0, 0, .30)';
+    ctx.fill();
+    ctx.restore();
+  }
+  if (points.length > 2) {
+    ctx.save();
+    ctx.beginPath();
+    let started = false;
+    for (const point of points) {
+      const p = lonlatToScreen(point.lon, point.lat);
+      if (p.visible === false) { started = false; continue; }
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.strokeStyle = 'rgba(240, 196, 120, .9)';
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([5, 4]);
+    ctx.stroke();
+    ctx.restore();
+  }
+  drawLightPoint(0, 90, '#9ecbff', 'N');
+  drawLightPoint(0, -90, '#9ecbff', 'S');
+  drawLightPoint(subsolar.lon, subsolar.lat, '#ffd166', '日下点');
+  if (light.sub_earth) {
+    drawLightPoint(light.sub_earth.lon, light.sub_earth.lat, '#7ae0d0', '天平动点');
+  }
+}
+
+async function loadLighting() {
+  const params = new URLSearchParams();
+  const when = $('light-when').value;
+  if (when) params.set('when', when.length === 16 ? `${when}:00Z` : `${when}Z`);
+  params.set('lat', $('light-lat').value || '0');
+  params.set('lon', $('light-lon').value || '0');
+  const response = await fetch('/api/map/lighting?' + params.toString());
+  if (!response.ok) throw new Error(await response.text());
+  state.lighting = await response.json();
+  state.lightingOn = $('light-on').checked;
+  state.shadowOn = $('shadow-on').checked;
+  const subsolar = state.lighting.subsolar;
+  state.lightingKey = state.lightingOn
+    ? `${subsolar.lon.toFixed(3)},${subsolar.lat.toFixed(3)}` : '';
+  state.tiles.clear();
+  const readout = $('light-readout');
+  if (readout) {
+    const phase = state.lighting.phase || {};
+    const phaseName = state.language === 'en'
+      ? (phase.name_en || phase.name_zh || '')
+      : (phase.name_zh || phase.name_en || '');
+    readout.textContent = `${phaseName} ${Number(phase.illumination_percent || 0).toFixed(1)}%`
+      + ` · 日下点 ${Number(subsolar.lon).toFixed(1)}° / ${Number(subsolar.lat).toFixed(1)}°`;
+  }
+  render();
+}
+
+function ensureProjectionSource() {
+  const key = state.lightingKey || 'plain';
+  if (state.sourceCanvas && state.sourceKey === key) return;
+  if (state.sourceLoadingKey === key) return;
+  state.sourceLoadingKey = key;
+  state.sourceKey = key;
+  state.sourceCanvas = null;
+  state.sourcePixels = null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 2048;
+  canvas.height = 1024;
+  const source = canvas.getContext('2d');
+  source.fillStyle = '#05070b';
+  source.fillRect(0, 0, canvas.width, canvas.height);
+  const light = state.lightingKey
+    ? `?light=${encodeURIComponent(state.lightingKey)}` : '';
+  let done = 0;
+  const total = 8 * 4;
+  const finish = () => {
+    done += 1;
+    if (done < total) return;
+    if (state.sourceKey !== key) return;
+    state.sourceLoadingKey = null;
+    state.sourceCanvas = canvas;
+    try {
+      state.sourcePixels = source.getImageData(0, 0, canvas.width, canvas.height);
+    } catch (error) {
+      state.sourcePixels = null;
+    }
+    render();
+  };
+  for (let y = 0; y < 4; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const image = new Image();
+      image.onload = () => {
+        source.drawImage(image, x * TILE, y * TILE);
+        finish();
+      };
+      image.onerror = finish;
+      image.src = `/api/map/tile/2/${x}/${y}.png${light}`;
+    }
+  }
+}
+
+function drawProjectedBase() {
+  ensureProjectionSource();
+  if (!state.sourceCanvas || !state.sourcePixels) return;
+  const width = Math.max(1, Math.round(state.width));
+  const height = Math.max(1, Math.round(state.height));
+  const source = state.sourcePixels.data;
+  const sourceWidth = state.sourcePixels.width;
+  const sourceHeight = state.sourcePixels.height;
+  const image = ctx.createImageData(width, height);
+  const out = image.data;
+  const background = [5, 7, 11, 255];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const geo = screenToLonLat(x + 0.5, y + 0.5);
+      const offset = (y * width + x) * 4;
+      if (!geo) {
+        out[offset] = background[0];
+        out[offset + 1] = background[1];
+        out[offset + 2] = background[2];
+        out[offset + 3] = 255;
+        continue;
+      }
+      const u = Math.max(0, Math.min(1, (geo.lon + 180) / 360));
+      const v = Math.max(0, Math.min(1, (90 - geo.lat) / 180));
+      const sx = Math.min(sourceWidth - 1, Math.floor(u * sourceWidth));
+      const sy = Math.min(sourceHeight - 1, Math.floor(v * sourceHeight));
+      const sourceOffset = (sy * sourceWidth + sx) * 4;
+      out[offset] = source[sourceOffset];
+      out[offset + 1] = source[sourceOffset + 1];
+      out[offset + 2] = source[sourceOffset + 2];
+      out[offset + 3] = 255;
+    }
+  }
+  const off = document.createElement('canvas');
+  off.width = width;
+  off.height = height;
+  off.getContext('2d').putImageData(image, 0, 0);
+  ctx.drawImage(off, 0, 0);
+  if (state.projection === 'globe') {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(160, 190, 235, .28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(state.width / 2, state.height / 2, globeRadius(), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawGraticule() {
-  const world = worldSize();
-  const cam = camera();
   const step = state.zoom >= 5 ? 1 : state.zoom >= 4 ? 2 : state.zoom >= 3 ? 5
     : state.zoom >= 2 ? 10 : 30;
   ctx.save();
@@ -329,27 +698,36 @@ function drawGraticule() {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   for (let lon = -180; lon <= 180; lon += step) {
-    const point = lonlatToWorld(lon, 0);
-    const screen = worldToScreen(point.x, point.y);
-    if (screen.x < -20 || screen.x > state.width + 20) continue;
+    let started = false;
     ctx.beginPath();
-    ctx.moveTo(screen.x, 0);
-    ctx.lineTo(screen.x, state.height);
+    for (let lat = -90; lat <= 90; lat += 5) {
+      const p = lonlatToScreen(lon, lat);
+      if (p.visible === false) { started = false; continue; }
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+      else ctx.lineTo(p.x, p.y);
+    }
     ctx.stroke();
-    ctx.fillText(`${Math.abs(lon)}°${lon < 0 ? 'W' : lon > 0 ? 'E' : ''}`,
-                 screen.x + 3, 4);
+    const label = lonlatToScreen(lon, 0);
+    if (label.visible !== false && label.x > -20 && label.x < state.width + 20) {
+      ctx.fillText(`${Math.abs(lon)}°${lon < 0 ? 'W' : lon > 0 ? 'E' : ''}`,
+        label.x + 3, Math.max(4, label.y + 2));
+    }
   }
-  ctx.textAlign = 'left';
   for (let lat = -80; lat <= 80; lat += step) {
-    const point = lonlatToWorld(0, lat);
-    const screen = worldToScreen(point.x, point.y);
-    if (screen.y < -20 || screen.y > state.height + 20) continue;
+    let started = false;
     ctx.beginPath();
-    ctx.moveTo(0, screen.y);
-    ctx.lineTo(state.width, screen.y);
+    for (let lon = -180; lon <= 180; lon += 5) {
+      const p = lonlatToScreen(lon, lat);
+      if (p.visible === false) { started = false; continue; }
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+      else ctx.lineTo(p.x, p.y);
+    }
     ctx.stroke();
-    ctx.fillText(`${Math.abs(lat)}°${lat < 0 ? 'S' : lat > 0 ? 'N' : ''}`,
-                 5, screen.y + 2);
+    const label = lonlatToScreen(-178, lat);
+    if (label.visible !== false && label.y > -20 && label.y < state.height + 20) {
+      ctx.fillText(`${Math.abs(lat)}°${lat < 0 ? 'S' : lat > 0 ? 'N' : ''}`,
+        5, label.y + 2);
+    }
   }
   ctx.restore();
 }
@@ -359,6 +737,15 @@ function drawGraticule() {
 function activeFeatureClasses() {
   const known = new Set((state.layers && state.layers.feature_classes) || []);
   return [...state.active].filter((key) => known.has(key));
+}
+
+/** A deterministic per-class density gate, so a class does not flicker. */
+function densityPasses(feature) {
+  const density = state.density[feature.class] ?? 1;
+  if (density >= 1) return true;
+  if (density <= 0) return false;
+  const hash = ((Number(feature.id) + 1) * 2654435761) >>> 0;
+  return (hash % 1000) < density * 1000;
 }
 
 function scheduleFeatures() {
@@ -375,12 +762,25 @@ async function refreshFeatures() {
     render();
     return;
   }
-  const westPoint = screenToLonLat(0, 0);
-  const eastPoint = screenToLonLat(state.width, state.height);
-  const west = westPoint.lon;
-  const east = eastPoint.lon;
-  const north = westPoint.lat;
-  const south = eastPoint.lat;
+  let west;
+  let east;
+  let north;
+  let south;
+  if (state.projection === 'globe') {
+    // A corner of the canvas is outside the sphere, so there is no single
+    // lon/lat rectangle to ask for; the whole globe is the safe viewport.
+    west = -180;
+    east = 180;
+    south = -90;
+    north = 90;
+  } else {
+    const westPoint = screenToLonLat(0, 0);
+    const eastPoint = screenToLonLat(state.width, state.height);
+    west = westPoint ? westPoint.lon : -180;
+    east = eastPoint ? eastPoint.lon : 180;
+    north = westPoint ? westPoint.lat : 90;
+    south = eastPoint ? eastPoint.lat : -90;
+  }
   const query = new URLSearchParams({
     west: String(west), east: String(east),
     south: String(south), north: String(north),
@@ -410,11 +810,18 @@ function featurePixels(feature) {
   const kmPerPixel = (KM_PER_DEGREE * Math.cos(feature.lat * Math.PI / 180))
     / ((world.w / 360) * state.scale);
   const diameter = state.diameters ? Math.max(0, Number(feature.diameter_km) || 0) : 0;
-  const apparent = kmPerPixel > 0 ? diameter / kmPerPixel : 0;
+  let radius;
+  if (state.projection === 'globe') {
+    radius = Math.max(2.2, Math.min(48,
+      (diameter / 3474.8) * globeRadius() * 2));
+  } else {
+    const apparent = kmPerPixel > 0 ? diameter / kmPerPixel : 0;
+    radius = Math.max(2.2, Math.min(48, apparent / 2));
+  }
   return {
     screen,
-    radius: Math.max(2.2, Math.min(48, apparent / 2)),
-    apparent,
+    radius,
+    apparent: radius,
     kmPerPixel,
   };
 }
@@ -431,6 +838,7 @@ function drawFeatures() {
   const items = [];
   for (const feature of state.features) {
     if (!classes.has(feature.class)) continue;
+    if (!densityPasses(feature)) continue;
     const pixels = featurePixels(feature);
     if (!insideScreen(pixels.screen, 30)) continue;
     items.push({ feature, ...pixels });
@@ -451,8 +859,9 @@ function drawFeatureMarker(item) {
   const { feature, screen, radius, apparent } = item;
   const colour = LAYER_COLORS[feature.class] || '#c9d4e6';
   ctx.save();
-  if (feature.class === 'statio' || feature.class === 'lunar100'
-      || feature.class === 'impact') {
+  if (feature.class === 'statio' || feature.class === 'impact'
+      || ((feature.class === 'lunar100' || feature.class === 'libration')
+          && !state.diameters)) {
     ctx.translate(screen.x, screen.y);
     ctx.rotate(Math.PI / 4);
     ctx.strokeStyle = colour;
@@ -487,7 +896,7 @@ function drawFeatureMarker(item) {
 function placeFeatureLabel(item, occupied) {
   const { feature, screen, radius } = item;
   const colour = LAYER_COLORS[feature.class] || '#c9d4e6';
-  const text = feature.name || feature.name_en;
+  const text = featureName(feature);
   if (!text) return null;
   const pointVisible = POINT_CLASSES.has(feature.class) && state.zoom >= 2;
   const visible = state.zoom >= 3 || feature.diameter_km >= 90 || pointVisible;
@@ -548,7 +957,9 @@ function featureAt(sx, sy) {
   let bestDistance = Infinity;
   for (const feature of state.features) {
     if (!classes.has(feature.class)) continue;
+    if (!densityPasses(feature)) continue;
     const pixels = featurePixels(feature);
+    if (pixels.screen.visible === false) continue;
     const distance = Math.hypot(pixels.screen.x - sx, pixels.screen.y - sy);
     const grab = Math.max(8, Math.min(18, pixels.radius + 4));
     if (distance <= grab && distance < bestDistance) {
@@ -584,15 +995,18 @@ function selectFeature(feature) {
     panel.className = 'selection-info';
     panel.innerHTML = '';
     const title = document.createElement('h3');
-    title.textContent = feature.name || feature.name_en;
+    title.textContent = featureName(feature);
     const cls = document.createElement('div');
     cls.className = 'class';
     const layer = (state.layers && state.layers.layers || [])
       .find((item) => item.id === feature.class);
-    cls.textContent = layer ? layer.label : feature.class;
+    cls.textContent = layer ? layerLabel(layer) : feature.class;
     const facts = document.createElement('dl');
+    const nameFacts = feature.class === 'lunar100'
+      ? [['英文', feature.name_en || '—']]
+      : [['中文', feature.name_zh || '—'], ['英文', feature.name_en || '—']];
     for (const [key, value] of [
-      ['英文', feature.name_en || '—'],
+      ...nameFacts,
       ['坐标', formatCoord(feature.lon, feature.lat)],
       ['直径', formatKm(feature.diameter_km)],
       ['类型', feature.kind || '—'],
@@ -622,6 +1036,11 @@ function focusFeature(feature) {
   state.scale = 1.2;
   state.centerLon = feature.lon;
   state.centerLat = feature.lat;
+  if (state.projection === 'globe') {
+    state.globe.lon = feature.lon;
+    state.globe.lat = feature.lat;
+    state.globe.zoom = Math.max(1.4, state.globe.zoom);
+  }
   clampCenter();
   selectFeature(feature);
   render();
@@ -731,7 +1150,7 @@ function buildLayerList(payload) {
     swatch.style.background = layerColour(layer);
     const text = document.createElement('span');
     text.className = 'layer-label';
-    text.textContent = layer.label;
+    text.textContent = layerLabel(layer);
     label.appendChild(input);
     label.appendChild(swatch);
     label.appendChild(text);
@@ -748,6 +1167,25 @@ function buildLayerList(payload) {
       else render();
       updateLayerHint();
     });
+    if (layer.type === 'features') {
+      if (!(layer.id in state.density)) state.density[layer.id] = 1;
+      const density = document.createElement('input');
+      density.type = 'range';
+      density.className = 'layer-density';
+      density.min = '0';
+      density.max = '1';
+      density.step = '0.05';
+      density.value = String(state.density[layer.id]);
+      density.title = `${layerLabel(layer)} 密度`;
+      density.setAttribute('aria-label', `${layerLabel(layer)} 密度`);
+      density.addEventListener('click', (event) => event.stopPropagation());
+      density.addEventListener('pointerdown', (event) => event.stopPropagation());
+      density.addEventListener('input', () => {
+        state.density[layer.id] = Number(density.value);
+        render();
+      });
+      label.appendChild(density);
+    }
     list.appendChild(label);
   }
   updateLayerHint();
@@ -759,6 +1197,26 @@ function updateLayerHint() {
   const count = activeFeatureClasses().length;
   const el = $('layer-count');
   if (el) el.textContent = count ? `${count} 层` : '';
+}
+
+function refreshLayerLanguage() {
+  for (const input of document.querySelectorAll('#layer-list input[data-layer]')) {
+    const layer = (state.layers && state.layers.layers || [])
+      .find((item) => item.id === input.dataset.layer);
+    if (!layer) continue;
+    const item = input.closest('.layer-item');
+    if (!item) continue;
+    const text = item.querySelector('.layer-label');
+    if (text) text.textContent = layerLabel(layer);
+    const density = item.querySelector('.layer-density');
+    if (density) {
+      const title = `${layerLabel(layer)} 密度`;
+      density.title = title;
+      density.setAttribute('aria-label', title);
+    }
+  }
+  if (state.selected) selectFeature(state.selected);
+  else render();
 }
 
 function setAllLayers(on) {
@@ -815,17 +1273,17 @@ function renderSearchResults(results) {
     item.className = 'search-result';
     item.tabIndex = 0;
     const left = document.createElement('b');
-    left.textContent = row.name || row.name_en;
+    left.textContent = featureName(row);
     const right = document.createElement('small');
     const rowLayer = (state.layers && state.layers.layers || [])
       .find((item) => item.id === row.class);
-    right.textContent = `${rowLayer ? rowLayer.label : row.class} · `
+    right.textContent = `${rowLayer ? layerLabel(rowLayer) : row.class} · `
       + formatCoord(row.lon, row.lat);
     item.appendChild(left);
     item.appendChild(right);
     const choose = () => {
       box.hidden = true;
-      $('search-input').value = row.name || row.name_en;
+      $('search-input').value = featureName(row);
       focusFeature(row);
     };
     item.addEventListener('click', choose);
@@ -868,9 +1326,13 @@ stage.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
+  const dragGeo = screenToLonLat(point.x, point.y);
   state.drag = {
     x: event.clientX, y: event.clientY,
     lon: state.centerLon, lat: state.centerLat,
+    geo: dragGeo,
+    globeLon: state.globe.lon,
+    globeLat: state.globe.lat,
   };
   stage.classList.add('dragging');
   stage.setPointerCapture(event.pointerId);
@@ -880,14 +1342,27 @@ stage.addEventListener('pointerdown', (event) => {
 stage.addEventListener('pointermove', (event) => {
   const point = stagePoint(event);
   const geo = screenToLonLat(point.x, point.y);
-  updatePositionReadout(geo.lon, geo.lat, point);
+  if (geo) updatePositionReadout(geo.lon, geo.lat, point);
   if (state.drag) {
-    const world = worldSize();
     const dx = event.clientX - state.drag.x;
     const dy = event.clientY - state.drag.y;
-    state.centerLon = state.drag.lon - dx / state.scale / world.w * 360;
-    state.centerLat = state.drag.lat + dy / state.scale / world.h * 180;
-    clampCenter();
+    if (state.projection === 'globe') {
+      const radius = Math.max(1, globeRadius());
+      state.globe.lon = ((state.drag.globeLon - dx / radius * 90 + 180) % 360) - 180;
+      state.globe.lat = clamp(state.drag.globeLat + dy / radius * 90, -89, 89);
+    } else if (state.projection === 'mercator') {
+      if (geo && state.drag.geo) {
+        state.centerLon = clamp(
+          state.drag.lon - (geo.lon - state.drag.geo.lon), -180, 180);
+        state.centerLat = clamp(
+          state.drag.lat - (geo.lat - state.drag.geo.lat), -85, 85);
+      }
+    } else {
+      const world = worldSize();
+      state.centerLon = state.drag.lon - dx / state.scale / world.w * 360;
+      state.centerLat = state.drag.lat + dy / state.scale / world.h * 180;
+      clampCenter();
+    }
     render();
     scheduleFeatures();
     scheduleHash();
@@ -932,7 +1407,7 @@ function showTooltip(feature, point) {
   if (!box) return;
   box.innerHTML = '';
   const title = document.createElement('b');
-  title.textContent = feature.name || feature.name_en;
+  title.textContent = featureName(feature);
   const detail = document.createElement('small');
   detail.textContent = `${feature.class} · ${formatKm(feature.diameter_km)} · `
     + formatCoord(feature.lon, feature.lat);
@@ -996,6 +1471,43 @@ function wire() {
     state.labels = event.target.checked;
     render();
   });
+  $('name-language').addEventListener('change', (event) => {
+    state.language = event.target.value === 'en' ? 'en' : 'zh';
+    refreshLayerLanguage();
+  });
+  $('projection').addEventListener('change', (event) => {
+    state.projection = ['mercator', 'globe'].includes(event.target.value)
+      ? event.target.value : 'equirect';
+    state.tiles.clear();
+    render();
+    scheduleFeatures();
+  });
+  $('light-apply').addEventListener('click', () => {
+    loadLighting().catch((error) => {
+      const readout = $('light-readout');
+      if (readout) readout.textContent = String(error.message || error);
+    });
+  });
+  $('light-now').addEventListener('click', () => {
+    $('light-when').value = utcNowLocalInput();
+    $('light-apply').click();
+  });
+  $('light-on').addEventListener('change', () => {
+    if ($('light-on').checked) {
+      loadLighting().catch(() => {});
+    } else {
+      state.lightingOn = false;
+      state.lightingKey = '';
+      state.tiles.clear();
+      render();
+    }
+  });
+  $('shadow-on').addEventListener('change', () => {
+    state.shadowOn = $('shadow-on').checked;
+    render();
+  });
+  $('light-when').value = utcNowLocalInput();
+  loadLighting().catch(() => {});
   $('diameter-toggle').addEventListener('change', (event) => {
     state.diameters = event.target.checked;
     render();

@@ -126,10 +126,18 @@ button.primary { background: var(--accent-soft); border-color: #6d5832; }
 .layer-group { margin: 10px 0 2px; color: var(--faint); font-size: 10px; letter-spacing: .1em; }
 .layer-item {
   display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
   padding: 5px 6px;
   border-radius: 5px;
   cursor: pointer;
   color: #dbe4f1;
+}
+.layer-item .layer-density {
+  flex: 0 0 100%;
+  width: 100%;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 .layer-item:hover { background: #151c28; }
 .layer-item input { accent-color: var(--accent); }
@@ -143,6 +151,9 @@ button.primary { background: var(--accent-soft); border-color: #6d5832; }
 .field { display: block; margin: 8px 0; color: var(--muted); }
 .field span { display: block; margin-bottom: 4px; font-size: 12px; }
 .field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.field-pair { display: flex; gap: 8px; }
+.field-pair .field { flex: 1 1 0; min-width: 0; }
+.field-pair input { width: 100%; }
 .check { display: flex; align-items: center; gap: 8px; margin: 7px 0; color: #dbe4f1; }
 .check input { accent-color: var(--accent); }
 

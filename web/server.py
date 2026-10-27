@@ -1112,7 +1112,6 @@ SUB_OBSERVER_LON = __SUB_OBSERVER_LON__
 SUB_OBSERVER_LAT = __SUB_OBSERVER_LAT__
 SUBSOLAR_LON = __SUBSOLAR_LON__
 SUBSOLAR_LAT = __SUBSOLAR_LAT__
-DEFAULT_SCENE = __DEFAULT_SCENE__
 NOTE = __NOTE__
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -1239,26 +1238,12 @@ set_render(phase)
 phase.view_settings.exposure = 0.25
 phase.render.filepath = "//moon_globe_phase.png"
 
-# Low-angle lighting: the same globe and camera, a fixed low Sun.
-low = bpy.data.scenes.new("Low angle")
-for obj in (model, cam, top):
-    if obj.name not in low.collection.objects:
-        low.collection.objects.link(obj)
-low.camera = cam
-low.world = make_world("Deep space low", (0.006, 0.008, 0.014, 1.0), 0.18)
-low_sun = direction(250.0, 10.0)
-make_sun("Low Sun (infinite)", low_sun, 9.0, low)
-set_render(low)
-low.view_settings.exposure = 0.0
-low.render.filepath = "//moon_globe_low.png"
-
 text = bpy.data.texts.new("场景说明")
 text.write(NOTE)
 
-target_scene = bpy.data.scenes.get(DEFAULT_SCENE) or phase
-bpy.context.window.scene = target_scene
+bpy.context.window.scene = phase
 bpy.ops.wm.save_as_mainfile(filepath=OUT, compress=True)
-print("SAVED", OUT, [s.name for s in bpy.data.scenes], "DEFAULT", target_scene.name)
+print("SAVED", OUT, [s.name for s in bpy.data.scenes])
 '''
 
 
@@ -1270,7 +1255,6 @@ def _blender_globe_script(
     sub_observer_lat: float,
     subsolar_lon: float,
     subsolar_lat: float,
-    default_scene: str,
 ) -> str:
     return (
         _BLENDER_GLOBE_TEMPLATE
@@ -1280,7 +1264,6 @@ def _blender_globe_script(
         .replace("__SUB_OBSERVER_LAT__", repr(float(sub_observer_lat)))
         .replace("__SUBSOLAR_LON__", repr(float(subsolar_lon)))
         .replace("__SUBSOLAR_LAT__", repr(float(subsolar_lat)))
-        .replace("__DEFAULT_SCENE__", repr(str(default_scene)))
         .replace("__NOTE__", repr(str(note)))
     )
 
@@ -2557,11 +2540,12 @@ class MoonService:
             })
             return data, info, "application/x-blender"
 
-    def _whole_moon_texture(self, terrain: Any) -> Optional[np.ndarray]:
+    def _whole_moon_texture(self, terrain: Any, width: int) -> Optional[np.ndarray]:
         """The albedo mosaic as an equirectangular RGB texture, north at row 0."""
         if getattr(terrain, "albedo", None) is None:
             return None
-        width, height = 2048, 1024
+        width = max(512, min(2048, int(width)))
+        height = max(256, width // 2)
         lon = -180.0 + (np.arange(width) + 0.5) / width * 360.0
         lat = 90.0 - (np.arange(height) + 0.5) / height * 180.0
         lon_grid, lat_grid = np.meshgrid(lon, lat)
@@ -2570,23 +2554,30 @@ class MoonService:
             return None
         return np.asarray(colors[..., :3], dtype=np.float32)
 
-    def _moon_globe(self):
+    def _moon_globe(self, size_mm: float = 200.0, resolution: int = 1024):
         """Build (and cache) the whole-Moon textured GLB.
 
-        The globe is a display model: its radius is 0.1 m, so the finished
-        diameter is 200 mm.  The terrain displacement is preserved relative to
-        the mean radius, but kilometres are deliberately not used as Blender
-        units for a body 3,474 km across.
+        ``resolution`` is the number of mesh samples around the equator; the
+        texture width is twice that (capped at 2048).  The globe is a display
+        model: its radius is ``size_mm / 2000`` metres.
         """
+        size_mm = max(5.0, min(2000.0, float(size_mm)))
+        resolution = max(256, min(2048, int(resolution)))
         with self._globe_lock:
             terrain = self.terrain()
-            key = id(terrain)
+            key = (id(terrain), round(size_mm, 3), resolution)
             if self._globe_cache and self._globe_cache[0] == key:
                 data, info = self._globe_cache[1], self._globe_cache[2]
                 return data, dict(info)
-            mesh = terrain.build_mesh(level=2, step=None, with_albedo=False)
-            texture = self._whole_moon_texture(terrain)
-            data = mesh.glb_bytes(texture, radius_m=0.1, name="Moon")
+            try:
+                width = int(terrain.dem.grid_shape(2)[1])
+            except Exception:
+                width = 11520
+            step = max(1, int(round(width / float(resolution))))
+            mesh = terrain.build_mesh(level=2, step=step, with_albedo=False)
+            texture = self._whole_moon_texture(terrain, resolution * 2)
+            radius_m = size_mm / 2000.0
+            data = mesh.glb_bytes(texture, radius_m=radius_m, name="Moon")
             sources = getattr(terrain, "sources", None)
             source = ""
             if sources is not None and getattr(sources, "dem_path", None):
@@ -2595,14 +2586,18 @@ class MoonService:
                 "format": "glb",
                 "units": "m",
                 "scope": "moon",
-                "diameter_m": 0.2,
-                "diameter_mm": 200.0,
+                "diameter_m": size_mm / 1000.0,
+                "diameter_mm": size_mm,
                 "diameter_km": 3474.8,
-                "radius_m": 0.1,
+                "radius_m": radius_m,
+                "resolution": resolution,
                 "n_vertices": int(mesh.n_vertices),
                 "n_faces": int(mesh.n_faces),
                 "has_texture": texture is not None,
-                "texture_size": [2048, 1024] if texture is not None else [2, 2],
+                "texture_size": (
+                    [int(texture.shape[1]), int(texture.shape[0])]
+                    if texture is not None else [2, 2]
+                ),
                 "glb_bytes": len(data),
                 "terrain_source": source,
             }
@@ -2610,11 +2605,15 @@ class MoonService:
             return data, dict(info)
 
     def whole_moon_glb(self, request: Dict[str, Any]):
-        data, info = self._moon_globe()
+        moon = request.get("moon") or {}
+        data, info = self._moon_globe(
+            _f(moon, "size_mm", 200.0),
+            int(_f(moon, "resolution", 1024.0)),
+        )
         return data, info, "model/gltf-binary"
 
     def whole_moon_blender(self, request: Dict[str, Any]):
-        """A textured globe .blend with current-phase and low-angle scenes."""
+        """A textured globe .blend with the current-phase scene."""
         with self._blender_lock:
             blender = _find_blender()
             if blender is None:
@@ -2622,7 +2621,10 @@ class MoonService:
                     "未找到 Blender。安装 Blender，或用 MOONLIB_BLENDER "
                     "环境变量指定可执行文件。"
                 )
-            data, base_info = self._moon_globe()
+            moon_options = request.get("moon") or {}
+            size_mm = _f(moon_options, "size_mm", 200.0)
+            resolution = int(_f(moon_options, "resolution", 1024.0))
+            data, base_info = self._moon_globe(size_mm, resolution)
             when = request.get("when") or {}
             at = when.get("at") or None
             site = parse_observer(when)
@@ -2640,19 +2642,12 @@ class MoonService:
                 solar_ok = True
             except Exception:
                 solar_ok = False
-            moon_options = request.get("moon") or {}
-            blend_light = str(
-                moon_options.get("blend_light") or "phase"
-            ).strip().lower()
-            if blend_light not in ("low", "phase"):
-                blend_light = "phase"
-            default_scene = "Low angle" if blend_light == "low" else "Current phase"
             note = (
-                "全月面：直径 200.0 mm（显示比例，实际 3,474.8 km）\n"
+                f"全月面：直径 {size_mm:.1f} mm（显示比例，实际 3,474.8 km）\n"
+                f"分辨率：{resolution}（赤道采样数）\n"
                 f"太阳下点：{subsolar_lon:.2f}°，{subsolar_lat:.2f}°\n"
                 f"相机下点：{sub_observer_lon:.2f}°，{sub_observer_lat:.2f}°\n"
-                f"默认场景：{default_scene}\n"
-                "场景：Current phase / Low angle\n"
+                "场景：Current phase\n"
                 f"纹理：{'已打包' if base_info.get('has_texture') else '无'}\n"
             )
             with tempfile.TemporaryDirectory(prefix="moonlib-globe-") as directory:
@@ -2666,7 +2661,6 @@ class MoonService:
                         glb_path, blend_path, note,
                         sub_observer_lon, sub_observer_lat,
                         subsolar_lon, subsolar_lat,
-                        default_scene,
                     ),
                     encoding="utf-8",
                 )
@@ -2678,9 +2672,7 @@ class MoonService:
                 "units": "m",
                 "scope": "moon",
                 "blender": True,
-                "blend_light": blend_light,
-                "default_scene": default_scene,
-                "scenes": ["Current phase", "Low angle"],
+                "scenes": ["Current phase"],
                 "subsolar_lon_deg": subsolar_lon,
                 "subsolar_lat_deg": subsolar_lat,
                 "sub_observer_lon_deg": sub_observer_lon,
@@ -3532,12 +3524,24 @@ class MoonService:
             with self._lock:
                 terrain = self._linear_terrain or terrain
         options["terrain"] = terrain
+        # The planner only needs the classes it may draw.  Filtering the 10 581
+        # feature catalogue here, where the class is already known, keeps a
+        # single-family refresh from projecting the other 10 000 names.
+        catalogue = self.catalogue()
+        if classes is not None:
+            wanted = set(classes)
+            include_lunar100 = bool(options["lunar100"])
+            catalogue = tuple(
+                feature for feature in catalogue
+                if feature_class(feature.kind, feature.diameter_km) in wanted
+                or (include_lunar100 and bool(getattr(feature, "lunar100", 0)))
+            )
         # A crater near the limb is a circle standing on the height field; its
         # catalogue centre and the middle of the shape the reader sees are not
         # the same pixel.  The page wants the marker in the middle of the
         # crater, so it takes the projected rim's centroid.
         options["center_on_rim"] = True
-        payload = moonlib.annotate_frame(frame, self.catalogue(), **options).to_dict()
+        payload = moonlib.annotate_frame(frame, catalogue, **options).to_dict()
         payload["seconds"] = time.time() - started
         # Echo the request in the words the wire uses, so the page can quote the
         # density it actually got rather than the one it meant to ask for.
@@ -4141,17 +4145,19 @@ def feature_index(catalogue: Sequence[Any]) -> Dict[str, Any]:
     listed with their counts and labels in the same payload, which is also how
     the page learns the taxonomy instead of hard-coding it.
     """
-    rows = [
-        {
+    rows = []
+    for feature in catalogue:
+        kind_class = feature_class(feature.kind, feature.diameter_km)
+        rows.append({
             "en": feature.name_en,
-            "zh": feature.name_zh or "",
+            # The Lunar 100 search row is English-only for the same reason the
+            # annotation caption is: the list's own names are the English ones.
+            "zh": "" if kind_class == "lunar100" else (feature.name_zh or ""),
             "lat": round(float(feature.lat_deg), 4),
             "lon": round(float(feature.lon_deg), 4),
             "km": round(float(feature.diameter_km), 2),
-            "class": feature_class(feature.kind, feature.diameter_km),
-        }
-        for feature in catalogue
-    ]
+            "class": kind_class,
+        })
     counts: Dict[str, int] = {}
     for row in rows:
         counts[row["class"]] = counts.get(row["class"], 0) + 1
