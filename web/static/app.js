@@ -27,6 +27,14 @@ const DISK_MIN_ZOOM = 0.1;
 const state = {
   geometry: null,      // last /api/disk response geometry
   diskImage: null,     // the full-disk preview
+  view3d: false,       // the full disk is shown as a rotatable globe
+  globe3d: { lon: 0, lat: 0, zoom: 1 },
+  globe3dInit: false,
+  globeTexture: null,
+  globeTexturePixels: null,
+  globeTextureKey: '',
+  globeTextureLoading: false,
+  globeDrag: null,
   rawImage: null,      // geometry only, no post-processing
   resultImage: null,   // after post-processing
   selection: null,     // {lon, lat, radiusFraction, rotationDeg}
@@ -447,6 +455,7 @@ function processingPayload() {
 }
 
 function selectionPayload() {
+  clampSelectionInPlace();
   const s = state.selection;
   if (!s) return null;
   return {
@@ -461,6 +470,11 @@ function selectionPayload() {
     // The irregular preimage of a ground rectangle.  The server rebuilds the
     // exact same shape from the same numbers; this flag is what tells it to.
     corrected: selectionCorrected(),
+    // A round model from an elliptical patch.  The ground radius is carried
+    // explicitly: the server must not infer it from the *sky* angle, which
+    // near the limb describes a much larger patch.
+    ellipse: selectionEllipse(),
+    radius_fraction: s.radiusFraction,
   };
 }
 
@@ -660,7 +674,7 @@ const PROC_FIELDS = [
 /** The announce annotations panel's own controls. */
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
-  'label-lock', 'label-overlap', 'label-satellites',
+  'label-lock', 'label-overlap', 'label-region', 'label-satellites',
   'text-bold', 'text-color', 'text-stroke', 'text-stroke-width',
   'marker-stroke', 'marker-stroke-width',
   'outline-style', 'outline-width', 'outline-color',
@@ -904,6 +918,8 @@ function describeEarthshine(block, context) {
     : '地照亮度：月面夜侧（被地球照亮的那一部分）在地球天空里的星等。';
 }
 
+let ellipseModeWasOn = false;
+
 /* ── drawing the disk ────────────────────────────────────────────── */
 
 /* Orthographic projection, the same one the renderer uses.
@@ -951,8 +967,14 @@ function selectionCorrected() {
   return !!(box && box.checked);
 }
 
+/** 3D model selection shape: ellipse (round model) or the ordinary rectangle. */
+function selectionEllipse() {
+  const box = $('mesh-ellipse');
+  return !!(box && box.checked);
+}
+
 /** The close-up camera aimed at the selection centre, in MOON_ME km. */
-function selectionCameraGeometry() {
+function selectionCameraGeometry(rotationDeg) {
   const g = state.geometry;
   const s = state.selection;
   if (!g || !s) return null;
@@ -978,7 +1000,8 @@ function selectionCameraGeometry() {
   const up0cam = unit3([-dotPole * forward[0], -dotPole * forward[1],
                         1 - dotPole * forward[2]]);
   const right0 = unit3(cross3(forward, up0cam));
-  const roll = (Number(s.rotationDeg) || 0) * Math.PI / 180;
+  const roll = (Number(
+    rotationDeg === undefined ? s.rotationDeg : rotationDeg) || 0) * Math.PI / 180;
   const cos = Math.cos(roll);
   const sin = Math.sin(roll);
   const right = [
@@ -1058,6 +1081,38 @@ function selectionGroundBox() {
   const camera = selectionCameraGeometry();
   const half = selectionSkyHalfAngles();
   if (!camera || !half) return null;
+  if (selectionEllipse() && selectionCorrected()) {
+    // The corrected ellipse is already a ground patch.  Its box is the
+    // patch's own tangent-plane box, not the footprint of the sky ellipse
+    // (which ballooned near the limb and was the source of "out of bounds").
+    const ellipse = selectionGroundEllipse();
+    if (!ellipse) return null;
+    return {
+      camera, half,
+      x0: -ellipse.halfW, x1: ellipse.halfW,
+      y0: -ellipse.halfH, y1: ellipse.halfH,
+    };
+  }
+  if (selectionEllipse()) {
+    // Classic ellipse: measure the *ellipse*, not its bounding rectangle, so
+    // the model's centre and ground box agree with the drawn marquee.
+    let ex0 = Infinity, ex1 = -Infinity, ey0 = Infinity, ey1 = -Infinity;
+    let valid = 0;
+    const tu = Math.tan(half.w);
+    const tv = Math.tan(half.h);
+    for (let index = 0; index < 128; index += 1) {
+      const angle = Math.PI * 2 * index / 128;
+      const point = skyGroundPoint(
+        camera, Math.cos(angle) * tu, Math.sin(angle) * tv,
+      );
+      if (!point) continue;
+      valid += 1;
+      ex0 = Math.min(ex0, point.x); ex1 = Math.max(ex1, point.x);
+      ey0 = Math.min(ey0, point.y); ey1 = Math.max(ey1, point.y);
+    }
+    if (valid < 8 || !(ex1 > ex0 && ey1 > ey0)) return null;
+    return { camera, half, x0: ex0, x1: ex1, y0: ey0, y1: ey1 };
+  }
   const tu = Math.tan(half.w);
   const tv = Math.tan(half.h);
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
@@ -1142,6 +1197,14 @@ function correctedSkyBounds() {
 /** Arcseconds across the *effective* selection (the corrected bounding box). */
 function effectiveSelectionArcsec() {
   if (!state.selection) return null;
+  clampSelectionInPlace();
+  if (selectionEllipse()) {
+    if (!selectionCorrected()) return selectionArcsec();
+    const bounds = selectionEllipseSkyBounds();
+    return bounds
+      ? Math.atan(Math.min(bounds.halfU, bounds.halfV)) * 206264.806
+      : selectionArcsec();
+  }
   if (!selectionCorrected()) return selectionArcsec();
   const bounds = correctedSkyBounds();
   if (!bounds) return selectionArcsec();
@@ -1151,6 +1214,12 @@ function effectiveSelectionArcsec() {
 /** Effective height / width of the selection. */
 function effectiveSelectionAspect() {
   if (!state.selection) return 1;
+  clampSelectionInPlace();
+  if (selectionEllipse()) {
+    if (!selectionCorrected()) return shapeAspect();
+    const bounds = selectionEllipseSkyBounds();
+    return bounds ? bounds.halfV / bounds.halfU : shapeAspect();
+  }
   if (!selectionCorrected()) return shapeAspect();
   const bounds = correctedSkyBounds();
   if (!bounds) return shapeAspect();
@@ -1208,6 +1277,350 @@ function correctedBoundarySegments() {
     segments,
     closed: breaks === 0 && segments.length === 1 && segments[0].length >= 3,
   };
+}
+
+/** A point on the Moon, in the disk frame, without the far-side mirror.
+ *
+ * ``projectSelenographic`` reflects a far-side point through the disk plane and
+ * says so with ``far``.  A boundary that runs exactly along the limb is neither
+ * side: its ``depth`` is zero to the last bit, so the reflection is the point
+ * itself -- what matters is not dropping it for being classified "far".
+ */
+function projectMoonPoint(point) {
+  const g = diskGeom();
+  const { k, s } = cameraScale(g);
+  const { forward, right, up } = cameraBasis(g);
+  const length = Math.hypot(point[0], point[1], point[2]) || 1;
+  const n = [point[0] / length, point[1] / length, point[2] / length];
+  const depth = dot3(n, forward);
+  const shown = depth >= 0
+    ? [n[0] - 2 * depth * forward[0],
+       n[1] - 2 * depth * forward[1],
+       n[2] - 2 * depth * forward[2]]
+    : n;
+  const divisor = 1 + k * dot3(shown, forward);
+  return {
+    x: g.cx + g.radius * s * dot3(shown, right) / divisor,
+    y: g.cy - g.radius * s * dot3(shown, up) / divisor,
+    depth,
+  };
+}
+
+/** The elliptical selector as a patch of ground, not a patch of sky.
+ *
+ * ``radiusFraction`` is measured on the Moon (*fraction of the lunar radius*),
+ * so moving the selector towards the limb foreshortens it on screen instead of
+ * making it cover more and more ground.  The patch is kept inside the visible
+ * hemisphere: its far edge is allowed to touch the limb but never to cross it.
+ * A patch of this size simply cannot be centred any closer than the cap below;
+ * the alternative -- letting it run over the edge -- is what produced the
+ * "cut off by the outer circle" picture.
+ */
+function selectionGroundEllipse(rotationDeg) {
+  if (!selectionCorrected()) return null;
+  const camera = selectionCameraGeometry(rotationDeg);
+  const s = state.selection;
+  const g = state.geometry;
+  if (!camera || !s || !g) return null;
+  const aspect = shapeAspect();
+  const shortKm = (Number(s.radiusFraction) || 0) * camera.radiusKm;
+  if (!(shortKm > 0)) return null;
+  const fullW = aspect >= 1 ? shortKm : shortKm / Math.max(aspect, 1e-9);
+  const fullH = aspect >= 1 ? shortKm * aspect : shortKm;
+  // The projection of a tangent-plane ellipse is defined only while its
+  // points are on the sphere; cap the size just inside the radius.
+  const cap = camera.radiusKm * (1 - 1e-9);
+  let far = Math.min(Math.max(fullW, fullH), cap);
+  const scale = far / Math.max(fullW, fullH, 1e-9);
+  let halfW = fullW * scale;
+  let halfH = fullH * scale;
+  const sub = moonVector(
+    Number(g.libration_lon_deg) || 0,
+    Number(g.libration_lat_deg) || 0,
+  );
+  const cosDelta = Math.max(-1, Math.min(1, dot3(camera.up0, sub)));
+  const delta = Math.acos(cosDelta);
+  // The farthest point of the patch must satisfy cos(delta + asin(r/R)) >= 0.
+  let maxDelta = Math.acos(Math.min(1, Math.max(0, far / camera.radiusKm)));
+  // Safety net for a selection loaded or typed without going through the
+  // centre clamp: shrink the patch to the visible cap rather than let part of
+  // it cross the limb.  Normal dragging never reaches this branch because
+  // clampSelectionCentre() has already kept the centre inside.
+  let shrink = 1;
+  if (delta > maxDelta + 1e-12 && far > 0) {
+    const limit = camera.radiusKm * Math.max(0, cosDelta) * (1 - 1e-9);
+    shrink = Math.min(1, limit / far);
+    halfW *= shrink;
+    halfH *= shrink;
+    far *= shrink;
+    maxDelta = Math.acos(Math.min(1, Math.max(0, far / camera.radiusKm)));
+  }
+  return {
+    camera,
+    halfW,
+    halfH,
+    far,
+    delta,
+    maxDelta,
+    sub,
+    shrink,
+    visible: delta <= maxDelta + 1e-12,
+  };
+}
+
+/** Screen angle of the projected ellipse's major axis at a given roll. */
+function projectedEllipseMajorAngle(rotationDeg) {
+  const ellipse = selectionGroundEllipse(rotationDeg);
+  if (!ellipse) return null;
+  const { camera, halfW, halfH } = ellipse;
+  const radiusKm = camera.radiusKm;
+  let sx = 0;
+  let sy = 0;
+  const points = [];
+  const count = 180;
+  for (let index = 0; index < count; index += 1) {
+    const angle = 2 * Math.PI * index / count;
+    const x = Math.cos(angle) * halfW;
+    const y = Math.sin(angle) * halfH;
+    const height = Math.sqrt(Math.max(0, radiusKm * radiusKm - x * x - y * y));
+    const projected = projectMoonPoint([
+      height * camera.up0[0] + x * camera.u[0] + y * camera.v[0],
+      height * camera.up0[1] + x * camera.u[1] + y * camera.v[1],
+      height * camera.up0[2] + x * camera.u[2] + y * camera.v[2],
+    ]);
+    points.push(projected);
+    sx += projected.x;
+    sy += projected.y;
+  }
+  const mx = sx / count;
+  const my = sy / count;
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  for (const p of points) {
+    const dx = p.x - mx;
+    const dy = p.y - my;
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  }
+  return 0.5 * Math.atan2(2 * xy, xx - yy);
+}
+
+/** When a rectangular box becomes an ellipse, keep the long side pointing the
+ *  way it already pointed.  A correction-projected ground ellipse has its axes
+ *  on the sphere, not in the window; near the limb that turns its screen shape
+ *  relative to the old box.  Add that angle difference to the selection's roll
+ *  once, at the moment the shape is switched on. */
+function alignEllipseToBox() {
+  if (!selectionCorrected()) return false;
+  const aspect = shapeAspect();
+  if (Math.abs(aspect - 1) < 0.02) return false;
+  const r = (state.selection.rotationDeg || 0) * Math.PI / 180;
+  const boxAngle = aspect >= 1 ? Math.PI / 2 - r : -r;
+  const axisAngle = projectedEllipseMajorAngle(state.selection.rotationDeg);
+  if (axisAngle === null) return false;
+  let delta = boxAngle - axisAngle;
+  delta = ((delta + Math.PI / 2) % Math.PI + Math.PI) % Math.PI - Math.PI / 2;
+  if (Math.abs(delta) < 1e-6) return false;
+  state.selection = {
+    ...state.selection,
+    rotationDeg: (state.selection.rotationDeg || 0) + delta * 180 / Math.PI,
+  };
+  return true;
+}
+
+/** The centre the selector is allowed to occupy for its current size.
+ *
+ * Returns ``{lon, lat}`` clamped to the cap on which the whole patch is
+ * visible.  The caller applies it to the selection before drawing or sending
+ * it anywhere; this is what removes the "out of bounds" case rather than
+ * papering over it with a clipped picture.
+ */
+function clampSelectionCentre(lon, lat) {
+  const s = state.selection;
+  if (!s || !selectionEllipse()) return { lon, lat, clamped: false };
+  const ellipse = selectionGroundEllipse();
+  if (!ellipse) return { lon, lat, clamped: false };
+  const centre = moonVector(lon, lat);
+  const angle = Math.acos(Math.max(-1, Math.min(1, dot3(centre, ellipse.sub))));
+  if (angle <= ellipse.maxDelta + 1e-12) return { lon, lat, clamped: false };
+  if (ellipse.maxDelta <= 1e-12) {
+    const sub = lonLatFromVector(ellipse.sub);
+    return { lon: sub[0], lat: sub[1], clamped: true };
+  }
+  // Slerp from the requested centre towards the sub-observer point by just
+  // enough that the patch's far edge lands on the limb.
+  const t = (angle - ellipse.maxDelta) / angle;
+  const sinAngle = Math.sin(angle);
+  if (!(Math.abs(sinAngle) > 1e-12)) {
+    return { lon, lat, clamped: false };
+  }
+  const a = Math.sin((1 - t) * angle) / sinAngle;
+  const b = Math.sin(t * angle) / sinAngle;
+  const moved = unit3([
+    a * centre[0] + b * ellipse.sub[0],
+    a * centre[1] + b * ellipse.sub[1],
+    a * centre[2] + b * ellipse.sub[2],
+  ]);
+  const spherical = lonLatFromVector(moved);
+  return { lon: spherical[0], lat: spherical[1], clamped: true };
+}
+
+/** Apply the centre cap to the live selection, if it is an ellipse. */
+function clampSelectionInPlace() {
+  const s = state.selection;
+  if (!s || !selectionEllipse() || !selectionCorrected()) return false;
+  const clamped = clampSelectionCentre(s.lon, s.lat);
+  if (!clamped.clamped) return false;
+  state.selection = { ...s, lon: clamped.lon, lat: clamped.lat };
+  return true;
+}
+
+/** Angular bounds of the ground patch in the selector's own camera frame.
+ *
+ * The close-up renders this rectangle, not the old sky ellipse: near the limb
+ * the ground patch is foreshortened and its sky box is much smaller than the
+ * nominal radius.
+ */
+function selectionEllipseSkyBounds() {
+  const ellipse = selectionGroundEllipse();
+  if (!ellipse) return null;
+  const { camera, halfW, halfH } = ellipse;
+  const radiusKm = camera.radiusKm;
+  let halfU = 0;
+  let halfV = 0;
+  const count = 240;
+  for (let index = 0; index < count; index += 1) {
+    const angle = 2 * Math.PI * index / count;
+    const x = Math.cos(angle) * halfW;
+    const y = Math.sin(angle) * halfH;
+    const height = Math.sqrt(Math.max(0, radiusKm * radiusKm - x * x - y * y));
+    const point = [
+      height * camera.up0[0] + x * camera.u[0] + y * camera.v[0],
+      height * camera.up0[1] + x * camera.u[1] + y * camera.v[1],
+      height * camera.up0[2] + x * camera.u[2] + y * camera.v[2],
+    ];
+    const direction = [
+      point[0] - camera.origin[0],
+      point[1] - camera.origin[1],
+      point[2] - camera.origin[2],
+    ];
+    const depth = dot3(direction, camera.forward);
+    if (!(depth > 0)) continue;
+    halfU = Math.max(halfU, Math.abs(dot3(direction, camera.right) / depth));
+    halfV = Math.max(halfV, Math.abs(dot3(direction, camera.up) / depth));
+  }
+  if (!(halfU > 0 && halfV > 0)) return null;
+  return { halfU, halfV, ellipse };
+}
+
+/** The classic, uncorrected ellipse: a plain sky-plane shape.
+ *
+ * This is what "no projection correction" means here.  It is allowed to run
+ * past the limb exactly like an uncorrected square box; where its rays miss the
+ * Moon the boundary follows the limb, and the picture is clipped by the outer
+ * circle.  No deformation, no centre cap.
+ */
+function classicEllipseBoundarySegments() {
+  const camera = selectionCameraGeometry();
+  const half = selectionSkyHalfAngles();
+  if (!camera || !half) return null;
+  const tu = Math.tan(half.w);
+  const tv = Math.tan(half.h);
+  const radiusKm = camera.radiusKm;
+  const originDistance = Math.hypot(
+    camera.origin[0], camera.origin[1], camera.origin[2]);
+  const uOrigin = camera.origin.map((value) => value / originDistance);
+  const segments = [];
+  let current = [];
+  let breaks = 0;
+  const finish = () => {
+    if (current.length >= 2) segments.push(current);
+    current = [];
+  };
+  const count = 480;
+  for (let index = 0; index <= count; index += 1) {
+    const angle = (index % count) / count * Math.PI * 2;
+    const direction = unit3([
+      camera.forward[0] + Math.cos(angle) * tu * camera.right[0]
+        + Math.sin(angle) * tv * camera.up[0],
+      camera.forward[1] + Math.cos(angle) * tu * camera.right[1]
+        + Math.sin(angle) * tv * camera.up[1],
+      camera.forward[2] + Math.cos(angle) * tu * camera.right[2]
+        + Math.sin(angle) * tv * camera.up[2],
+    ]);
+    let point = moonSphereHit(camera.origin, direction, radiusKm);
+    if (!point) {
+      // Fold the missed ray onto the visible limb so the outline continues
+      // along the edge instead of vanishing.
+      const along = dot3(direction, uOrigin);
+      const perpRaw = [
+        direction[0] - along * uOrigin[0],
+        direction[1] - along * uOrigin[1],
+        direction[2] - along * uOrigin[2],
+      ];
+      const perp = Math.hypot(perpRaw[0], perpRaw[1], perpRaw[2]);
+      if (!(perp > 1e-12)) { breaks += 1; finish(); continue; }
+      const sinT = radiusKm / originDistance;
+      const cosT = Math.sqrt(Math.max(0, 1 - sinT * sinT));
+      const tangent = [
+        perpRaw[0] / perp * sinT - uOrigin[0] * cosT,
+        perpRaw[1] / perp * sinT - uOrigin[1] * cosT,
+        perpRaw[2] / perp * sinT - uOrigin[2] * cosT,
+      ];
+      const travel = -dot3(camera.origin, tangent);
+      point = camera.origin.map((value, i) => value + travel * tangent[i]);
+    }
+    const projected = projectMoonPoint(point);
+    if (projected.depth > 1e-6) { breaks += 1; finish(); continue; }
+    current.push({ x: projected.x, y: projected.y });
+  }
+  finish();
+  if (!segments.length) return null;
+  return {
+    segments,
+    closed: breaks === 0 && segments.length === 1 && segments[0].length >= 3,
+  };
+}
+
+/** The elliptical selector's boundary, as a curve on the Moon.
+ *
+ * With "使用带投影修正的选框" on, every sample is a point of the ground patch
+ * in its tangent plane, lifted to the sphere and projected into the disk.
+ * Because the patch is clamped to the visible hemisphere the loop is always
+ * closed and entirely on the Moon; there is no limb-crossing branch and
+ * therefore no "clipped by the outer circle".
+ */
+function ellipseBoundarySegments() {
+  if (!selectionEllipse()) return null;
+  if (!selectionCorrected()) return classicEllipseBoundarySegments();
+  clampSelectionInPlace();
+  const ellipse = selectionGroundEllipse();
+  if (!ellipse) return null;
+  const geom = diskGeom();
+  const radiusKm = ellipse.camera.radiusKm;
+  const points = [];
+  const count = 480;
+  for (let index = 0; index <= count; index += 1) {
+    const angle = (index % count) / count * Math.PI * 2;
+    const x = Math.cos(angle) * ellipse.halfW;
+    const y = Math.sin(angle) * ellipse.halfH;
+    const radial = Math.hypot(x, y);
+    const scale = radial > radiusKm * (1 - 1e-9)
+      ? radiusKm * (1 - 1e-9) / radial : 1;
+    const gx = x * scale;
+    const gy = y * scale;
+    const height = Math.sqrt(Math.max(0, radiusKm * radiusKm - gx * gx - gy * gy));
+    const point = [
+      height * ellipse.camera.up0[0] + gx * ellipse.camera.u[0] + gy * ellipse.camera.v[0],
+      height * ellipse.camera.up0[1] + gx * ellipse.camera.u[1] + gy * ellipse.camera.v[1],
+      height * ellipse.camera.up0[2] + gx * ellipse.camera.u[2] + gy * ellipse.camera.v[2],
+    ];
+    const projected = projectMoonPoint(point);
+    points.push({ x: projected.x, y: projected.y });
+  }
+  return { segments: [points], closed: true };
 }
 
 /** One closed boundary, or null when the loop is not fully visible. */
@@ -1588,7 +2001,212 @@ function clearCoordReadout(viewName) {
   paintCoordReadout('proc');
 }
 
+/* ── the low-zoom 3D globe ─────────────────────────────────────────────────
+ *
+ * The full-disk preview normally draws the renderer's photograph.  In 3D mode
+ * it draws a small equirectangular texture on a rotatable sphere instead: a
+ * low-zoom orientation aid, not a second renderer.  The texture is generated
+ * lazily by the server at 1024x512 and cached by Sun direction; rotating the
+ * globe is pure client-side pixel work.
+ */
+function globe3dBasis(lonDeg, latDeg) {
+  const lon = lonDeg * Math.PI / 180;
+  const lat = latDeg * Math.PI / 180;
+  return {
+    up: [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)],
+    east: [-Math.sin(lon), Math.cos(lon), 0],
+    north: [
+      -Math.sin(lat) * Math.cos(lon),
+      -Math.sin(lat) * Math.sin(lon),
+      Math.cos(lat),
+    ],
+  };
+}
+
+function globe3dRadius() {
+  return Math.min(DISK.width, DISK.height) * 0.43 * state.globe3d.zoom;
+}
+
+let globeDrawFrame = null;
+/** Coalesce a drag to one globe raster per animation frame. */
+function scheduleGlobeDraw() {
+  if (typeof requestAnimationFrame !== 'function') {
+    drawDisk();
+    return;
+  }
+  if (globeDrawFrame !== null) return;
+  globeDrawFrame = requestAnimationFrame(() => {
+    globeDrawFrame = null;
+    drawDisk();
+  });
+}
+
+function globeTextureKey() {
+  const when = whenPayload();
+  return `${when.at || ''}|${when.tz_offset_hours}|` +
+    `${when.observer.lat}|${when.observer.lon}`;
+}
+
+async function syncGlobeTexture() {
+  if (!state.view3d || state.globeTextureLoading) return;
+  const key = globeTextureKey();
+  if (state.globeTexture && state.globeTextureKey === key) return;
+  state.globeTextureLoading = true;
+  state.globeTextureKey = key;
+  const when = whenPayload();
+  const query = new URLSearchParams({
+    width: '1024',
+    at: when.at || '',
+    tz: String(when.tz_offset_hours),
+    lat: String(when.observer.lat),
+    lon: String(when.observer.lon),
+  });
+  try {
+    const response = await fetch('/api/globe-texture?' + query.toString());
+    if (!response.ok) throw new Error(await response.text());
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      if (URL.revokeObjectURL) URL.revokeObjectURL(url);
+      if (state.globeTextureKey === key) {
+        state.globeTexture = image;
+        state.globeTexturePixels = null;
+        state.globeTextureLoading = false;
+        drawDisk();
+      }
+    };
+    image.onerror = () => {
+      if (URL.revokeObjectURL) URL.revokeObjectURL(url);
+      state.globeTextureLoading = false;
+    };
+    image.src = url;
+  } catch (error) {
+    state.globeTextureLoading = false;
+    setStatus('3D 纹理载入失败：' + String(error.message || error), 'error');
+  }
+}
+
+function drawGlobe3d() {
+  const ctx = DISK.getContext('2d');
+  const width = DISK.width;
+  const height = DISK.height;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#07090d';
+  ctx.fillRect(0, 0, width, height);
+  if (!state.globe3dInit && state.geometry) {
+    state.globe3d.lon = Number(state.geometry.libration_lon_deg) || 0;
+    state.globe3d.lat = Number(state.geometry.libration_lat_deg) || 0;
+    state.globe3dInit = true;
+  }
+  const radius = globe3dRadius();
+  const cx = width / 2;
+  const cy = height / 2;
+  const texture = state.globeTexture;
+  if (texture && state.globeTextureKey !== globeTextureKey()) {
+    syncGlobeTexture();
+  }
+  if (!texture) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = '#0c1119';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(140, 160, 190, .25)';
+    ctx.stroke();
+    syncGlobeTexture();
+    return;
+  }
+  let pixels = state.globeTexturePixels;
+  if (!pixels) {
+    try {
+      const buffer = document.createElement('canvas');
+      buffer.width = texture.width;
+      buffer.height = texture.height;
+      const bctx = buffer.getContext('2d');
+      bctx.drawImage(texture, 0, 0);
+      pixels = bctx.getImageData(0, 0, texture.width, texture.height).data;
+      state.globeTexturePixels = pixels;
+    } catch (error) {
+      pixels = null;
+    }
+  }
+  if (!pixels) {
+    syncGlobeTexture();
+    return;
+  }
+  const image = ctx.createImageData(width, height);
+  const data = image.data;
+  const { up, east, north } = globe3dBasis(state.globe3d.lon, state.globe3d.lat);
+  const texW = texture.width;
+  const texH = texture.height;
+  const x0 = Math.max(0, Math.floor(cx - radius));
+  const x1 = Math.min(width, Math.ceil(cx + radius));
+  const y0 = Math.max(0, Math.floor(cy - radius));
+  const y1 = Math.min(height, Math.ceil(cy + radius));
+  for (let y = y0; y < y1; y += 1) {
+    const ny = (cy - (y + 0.5)) / radius;
+    for (let x = x0; x < x1; x += 1) {
+      const nx = ((x + 0.5) - cx) / radius;
+      const offset = (y * width + x) * 4;
+      data[offset + 3] = 255;
+      const rho2 = nx * nx + ny * ny;
+      if (rho2 > 1) continue;
+      const nz = Math.sqrt(Math.max(0, 1 - rho2));
+      const vx = nx * east[0] + ny * north[0] + nz * up[0];
+      const vy = nx * east[1] + ny * north[1] + nz * up[1];
+      const vz = nx * east[2] + ny * north[2] + nz * up[2];
+      const lon = Math.atan2(vy, vx) * 180 / Math.PI;
+      const lat = Math.asin(Math.max(-1, Math.min(1, vz))) * 180 / Math.PI;
+      const tx = Math.min(texW - 1, Math.max(0,
+        Math.floor((lon + 180) / 360 * texW)));
+      const ty = Math.min(texH - 1, Math.max(0,
+        Math.floor((90 - lat) / 180 * texH)));
+      const source = (ty * texW + tx) * 4;
+      data[offset] = pixels[source];
+      data[offset + 1] = pixels[source + 1];
+      data[offset + 2] = pixels[source + 2];
+    }
+  }
+  const off = document.createElement('canvas');
+  off.width = width;
+  off.height = height;
+  off.getContext('2d').putImageData(image, 0, 0);
+  ctx.drawImage(off, 0, 0);
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(140, 160, 190, .28)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function setView3d(on) {
+  state.view3d = !!on;
+  const button = $('view-3d');
+  if (button) button.setAttribute('aria-pressed', String(state.view3d));
+  const overlay = $('overlay');
+  const labels = $('labels-disk');
+  const coord = $('coord-hud-disk');
+  for (const element of [overlay, labels, coord]) {
+    if (element) element.hidden = state.view3d;
+  }
+  if (state.view3d) {
+    state.globe3dInit = false;
+    if (state.geometry) {
+      state.globe3d.lon = Number(state.geometry.libration_lon_deg) || 0;
+      state.globe3d.lat = Number(state.geometry.libration_lat_deg) || 0;
+      state.globe3dInit = true;
+    }
+    syncGlobeTexture();
+  }
+  drawDisk();
+}
+
 function drawDisk() {
+  clampSelectionInPlace();
+  if (state.view3d) {
+    drawGlobe3d();
+    return;
+  }
   const ctx = DISK.getContext('2d');
   ctx.clearRect(0, 0, DISK.width, DISK.height);
   if (state.diskImage) {
@@ -1742,11 +2360,14 @@ function boxGeometry() {
   const { radius } = diskGeom();
   const centre = lonLatToPixel(s.lon, s.lat);
   if (!centre) return null;
-  // The effective short half-side is the ordinary selection, or -- with the
-  // corrected box on -- the smallest sky box around its irregular preimage.
-  const aspect = effectiveSelectionAspect();
+  // The handles stay on the ordinary sky box even while the corrected
+  // preimage is being drawn.  Using the corrected effective extent here made a
+  // rotation or an edge drag feed its own output back into the next frame, so
+  // the box jumped away from the pointer.  The corrected shape is still drawn
+  // separately; only its handles are anchored to the box the reader drags.
+  const aspect = shapeAspect();
   const full = (state.geometry.angular_diameter_deg / 2) * 3600;
-  const shortArcsec = effectiveSelectionArcsec();
+  const shortArcsec = s.radiusFraction * full;
   const shortHalf = Math.max(
     6,
     Number.isFinite(shortArcsec) && full > 0
@@ -2344,7 +2965,10 @@ function drawSelection() {
   const halfW = imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x;
   const halfH = imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y;
   const corrected = selectionCorrected();
-  const boundary = corrected ? correctedBoundarySegments() : null;
+  const ellipse = selectionEllipse();
+  const boundary = ellipse
+    ? ellipseBoundarySegments()
+    : (corrected ? correctedBoundarySegments() : null);
 
   if (boundary) {
     // The corrected selection is the irregular preimage of the ground
@@ -2371,7 +2995,7 @@ function drawSelection() {
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  } else if (!corrected) {
+  } else if ((!corrected || ellipse) && (!ellipse || boundary)) {
     ctx.save();
     ctx.translate(centre.x, centre.y);
     ctx.rotate(-box.rotation);
@@ -2382,7 +3006,13 @@ function drawSelection() {
       ctx.lineWidth = pass.width;
       ctx.strokeStyle = pass.color;
       ctx.setLineDash([7 * px, 5 * px]);
-      ctx.strokeRect(-halfW, -halfH, halfW * 2, halfH * 2);
+      ctx.beginPath();
+      if (ellipse) {
+        ctx.ellipse(0, 0, halfW, halfH, 0, 0, Math.PI * 2);
+      } else {
+        ctx.rect(-halfW, -halfH, halfW * 2, halfH * 2);
+      }
+      ctx.stroke();
       ctx.setLineDash([]);
     }
     ctx.restore();
@@ -2790,6 +3420,73 @@ function syncLabelLayer(viewName) {
  * a recording context.  *style* is passed in rather than read from the page so
  * the painter stays a function of its arguments.
  */
+/** How one landform's locator is drawn, in the plan's own pixels.
+ *
+ * The proportions are MoonLabeler's, which is where this layout comes from:
+ * the dot is a small locator -- about 6 % of the type, never under two pixels
+ * -- and whatever rim it carries is a hairline, not a ring.  Two consequences
+ * the reference tool
+ * also draws: a feature whose rim is already on the picture gets *no* dot (the
+ * circle is the marker, and a second dot inside it only competes with the
+ * name), and a landing site is a crosshair instead of a dot, because its
+ * position is what matters, not its size.
+ *
+ * A region name set across its own formation is its own locator; one that had
+ * to step aside keeps its dot.  A highlighted family member keeps its dot even
+ * when it has a rim, so the selection ring still has something to sit around.
+ * *rimDrawn* is the line-style switch: with the rims off, the dot is the only
+ * thing locating the feature and must come back.
+ */
+function markerShape(item, fontPx, rimDrawn = true) {
+  if (item.region && item.labelled && !item.leader) return { kind: 'none' };
+  if (rimDrawn && item.outline && item.outline.length && !item.highlight) {
+    return { kind: 'none' };
+  }
+  if (item.class === 'statio') {
+    return {
+      kind: 'cross',
+      radius: Math.max(3, fontPx * 0.22),
+      width: Math.max(1, fontPx * 0.045),
+    };
+  }
+  return { kind: 'dot', radius: Math.max(2, fontPx * 0.06) };
+}
+
+/** Where a leader leaves its feature: the rim, not the centre.
+ *
+ * A crater with its rim drawn already shows where it is, so a line from the
+ * centre would cross the circle and read as if the name were attached to the
+ * middle of the feature rather than to its edge.  The ray is the same one the
+ * layout uses; the start is the last place it crosses the contour, nudged
+ * clear of the line by a hair.  Returns ``null`` when the caption sits inside
+ * the rim -- there is nothing outside to point at -- and the centre when the
+ * contour is open (a rim crossing the limb), which is the honest fallback.
+ */
+function leaderStart(item) {
+  const x = item.x, y = item.y;
+  if (!item.outline || item.outline.length < 2) return { x, y };
+  const cx = Math.min(Math.max(x, item.label_x), item.label_x + item.label_w);
+  const cy = Math.min(Math.max(y, item.label_y), item.label_y + item.label_h);
+  const dx = cx - x, dy = cy - y;
+  const length = Math.hypot(dx, dy);
+  if (!(length > 0)) return { x, y };
+  let furthest = 0;
+  for (let index = 0; index < item.outline.length; index += 1) {
+    const [x1, y1] = item.outline[index];
+    const [x2, y2] = item.outline[(index + 1) % item.outline.length];
+    const ex = x2 - x1, ey = y2 - y1;
+    const denominator = dx * ey - dy * ex;
+    if (Math.abs(denominator) < 1e-9) continue;
+    const t = ((x1 - x) * ey - (y1 - y) * ex) / denominator;
+    const u = ((x1 - x) * dy - (y1 - y) * dx) / denominator;
+    if (t >= 0 && u >= -1e-6 && u <= 1 + 1e-6) furthest = Math.max(furthest, t);
+  }
+  if (furthest > 1) return null;              // the name sits inside the rim
+  if (furthest <= 0) return { x, y };         // open contour: keep the centre
+  const start = Math.min(1, furthest + 1.5 / length);
+  return { x: x + dx * start, y: y + dy * start };
+}
+
 function paintLabels(ctx, plan, style) {
   if (!ctx || !plan || !plan.items || !plan.items.length) return;
   // The plan carries the size its boxes were laid out for; a *locked* layout is
@@ -2808,14 +3505,17 @@ function paintLabels(ctx, plan, style) {
   const textColor = ink.textColor || '#eef2ff';
   const highlightColor = ink.highlightColor || '#ffd166';
   const strokeColor = ink.strokeColor || 'rgba(12, 14, 20, .92)';
-  const strokeWidth = ink.strokeWidth === undefined ? fontPx * 0.28 : ink.strokeWidth;
-  // A marker's rim has its own colour and width.  The fallbacks are the old
-  // fixed rims, so a caller that paints without a style still draws what it
-  // always did.
+  // The halo is a sixth of the type in MoonLabeler, with a two-pixel floor:
+  // enough to separate a name from the ground, not enough to thicken the
+  // letterforms.  A caller with no style gets the same proportion.
+  const strokeWidth = ink.strokeWidth === undefined ? fontPx * 0.10 : ink.strokeWidth;
+  // A marker's rim is its own line and its own colour.  The fallback is a
+  // hairline: MoonLabeler's locators carry no ring at all, and the page's
+  // default is a thin one only because a pale class colour can land on a
+  // bright highland.
   const markerStrokeColor = ink.markerStrokeColor || strokeColor;
   const markerStrokeWidth = ink.markerStrokeWidth === undefined
-    ? Math.max(1, fontPx * 0.1) : ink.markerStrokeWidth;
-  const marker = Math.max(1.4, fontPx * 0.16);
+    ? Math.max(0.6, fontPx * 0.03) : ink.markerStrokeWidth;
   // A feature on the night side is not really observable -- it is drawn because
   // it was asked for, and half-faded so it cannot be mistaken for a lit one.
   const alphaFor = (item) => (item.illuminated === false ? 0.5 : 1);
@@ -2833,6 +3533,12 @@ function paintLabels(ctx, plan, style) {
     `"Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
+  // Round joins and caps on every stroke here.  The halo is a stroke around a
+  // glyph, and the canvas default is a miter join, which puts little spikes on
+  // the sharp corners of a CJK stroke; the reference tool draws its halo with a
+  // round pen for the same reason.
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   // Rims first, so a marker or a name is never hidden under an outline.  The
   // outline is the one thing here that claims a *size*, so it is drawn twice: a
   // dark pass for contrast on bright terrain, a coloured one on top to read
@@ -2865,21 +3571,34 @@ function paintLabels(ctx, plan, style) {
     ctx.setLineDash([]);
   }
   for (const item of plan.items) {
+    const shape = markerShape(item, fontPx, rim.style !== 'none');
+    if (shape.kind === 'none') continue;
     ctx.globalAlpha = alphaFor(item);
     const colour = item.highlight ? highlightColor
       : item.manual ? MANUAL_COLOUR : itemColor(item, ink);
     if (item.highlight) {
-      // A halo outside the dot, so a related crater is visible even when its
+      // A halo outside the locator, so a related crater is visible even when its
       // caption was lost to the budget or its rim is too small to draw.
       ctx.beginPath();
-      ctx.arc(item.x, item.y, marker * 2.15 + Math.max(1.6, fontPx * 0.12),
+      ctx.arc(item.x, item.y, shape.radius * 2.15 + Math.max(1.6, fontPx * 0.12),
         0, Math.PI * 2);
       ctx.strokeStyle = highlightColor;
       ctx.lineWidth = Math.max(1.1, fontPx * 0.13);
       ctx.stroke();
     }
+    if (shape.kind === 'cross') {
+      ctx.beginPath();
+      ctx.moveTo(item.x - shape.radius, item.y);
+      ctx.lineTo(item.x + shape.radius, item.y);
+      ctx.moveTo(item.x, item.y - shape.radius);
+      ctx.lineTo(item.x, item.y + shape.radius);
+      ctx.strokeStyle = colour;
+      ctx.lineWidth = shape.width;
+      ctx.stroke();
+      continue;
+    }
     ctx.beginPath();
-    ctx.arc(item.x, item.y, marker, 0, Math.PI * 2);
+    ctx.arc(item.x, item.y, shape.radius, 0, Math.PI * 2);
     ctx.fillStyle = colour;
     ctx.fill();
     if (markerStrokeWidth > 0) {
@@ -2903,13 +3622,16 @@ function paintLabels(ctx, plan, style) {
     const bottom = top + item.label_h;
     const midY = 0.5 * (top + bottom);
     if (item.leader) {
-      ctx.beginPath();
-      ctx.moveTo(item.x, item.y);
-      ctx.lineTo(Math.min(Math.max(item.x, left), right),
-                 Math.min(Math.max(item.y, top), bottom));
-      ctx.strokeStyle = colour;
-      ctx.lineWidth = Math.max(1, fontPx * 0.09);
-      ctx.stroke();
+      const start = leaderStart(item);
+      if (start) {
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(Math.min(Math.max(item.x, left), right),
+                   Math.min(Math.max(item.y, top), bottom));
+        ctx.strokeStyle = colour;
+        ctx.lineWidth = Math.max(1.1, fontPx * 0.04);
+        ctx.stroke();
+      }
     }
     if (strokeWidth > 0) {
       ctx.lineWidth = strokeWidth;
@@ -3608,6 +4330,11 @@ function drawViewLabels(viewName) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // A corrected close-up has been resampled out of the camera frame; the
+  // annotation plan still describes the old perspective pixels, so drawing it
+  // would put every name in the wrong place.
+  if (viewName !== 'disk' && state.regionInfo
+      && state.regionInfo.orthorectified) return;
   const plan = regionLabelsWanted(viewName) ? planFor(viewName) : null;
   // The geometric overlays are their own layer: each mark is a switch, and a
   // reader who only wants the terminator or the limb must not have to turn on
@@ -4203,6 +4930,8 @@ function hideBadgeTarget(kind, badge) {
     drawAllLabels();
     paintCoordReadout('disk');
     setStatus('标尺已隐藏');
+    // The box it used to reserve is free again.
+    if (state.labelsOn) refreshLabelPlans();
     return;
   }
   if (kind === 'manual') {
@@ -4301,6 +5030,9 @@ function overlayUp() {
   overlay.drag = null;
   if (drag.kind === 'ruler') {
     setStatus(`标尺：${rulerText(ruler.km)}（拖动可改位置与长度）`);
+    // The bar moved, so the box the names had to clear moved with it: lay them
+    // out again around the new one.
+    if (state.labelsOn) refreshLabelPlans();
   } else if (drag.kind === 'manual') {
     const mark = state.manualMarks.find((item) => item.id === drag.id);
     setStatus(mark
@@ -4850,16 +5582,149 @@ function magnifierView(availW, availH) {
   const width = 2 * halfW * margin;
   const height = 2 * halfH * margin;
   const scale = Math.max(0.02, Math.min((availW - 2) / width, (availH - 2) / height));
+  let frameWidth = Math.max(24, Math.round(width * scale));
+  let frameHeight = Math.max(24, Math.round(height * scale));
+  // A corrected ellipse's render frame is the *sky footprint* of the ground
+  // patch, not the selection box.  The high-resolution frame has always used
+  // that aspect; the live window used the box, so the two showed different
+  // fields of view around the same ellipse.
+  if (selectionGroundEllipse()) {
+    const frameAspect = selectionAspect();   // height / width
+    if (Number.isFinite(frameAspect) && frameAspect > 0) {
+      let w = Math.max(24, availW - 2);
+      let h = w * frameAspect;
+      if (h > availH - 2) {
+        h = Math.max(24, availH - 2);
+        w = h / frameAspect;
+      }
+      frameWidth = Math.round(w);
+      frameHeight = Math.round(h);
+    }
+  }
   return {
     fit: true, box, centreX, centreY, halfW, halfH, ratio,
     rotation: box ? box.rotation : 0,
     scale,                                   // screen pixels per image pixel
-    width: Math.max(24, Math.round(width * scale)),
-    height: Math.max(24, Math.round(height * scale)),
+    width: frameWidth,
+    height: frameHeight,
   };
 }
 
+/** Pixels of the full-disk preview, cached for the warp. */
+function diskSourcePixels(source) {
+  if (!source || !source.width || !source.height) return null;
+  if (state.magnifySource === source && state.magnifyPixels) {
+    return state.magnifyPixels;
+  }
+  try {
+    const buffer = document.createElement('canvas');
+    buffer.width = source.width;
+    buffer.height = source.height;
+    const bctx = buffer.getContext('2d');
+    bctx.drawImage(source, 0, 0);
+    const data = bctx.getImageData(0, 0, source.width, source.height).data;
+    // A canvas that was read before the image decoded comes back all zero.
+    // Do not cache that as if it were the picture: the caller will use the
+    // ordinary crop and try again on the next redraw.
+    let any = false;
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] !== 0) { any = true; break; }
+    }
+    if (!any) return null;
+    state.magnifySource = source;
+    state.magnifyPixels = { width: source.width, height: source.height, data };
+    return state.magnifyPixels;
+  } catch (error) {
+    return null;
+  }
+}
+
+/** Draw the corrected ground patch as a standard ellipse.
+ *
+ * The ordinary close-up is a crop of the photograph, so near the limb it shows
+ * the ground foreshortened.  A projection-corrected selection is a patch of
+ * ground: here it is resampled through the tangent plane, which turns the
+ * deformed footprint back into the ellipse the reader selected.  The mask is a
+ * plain screen ellipse; the picture inside turns with the selection.
+ */
+function drawCorrectedMagnifier(ctx, canvas, view, source, ellipse) {
+  const pixels = diskSourcePixels(source);
+  if (!pixels) return false;
+  // Use the whole window, as the high-resolution frame does, and fit the
+  // ground ellipse inside it.  Filling the window with the ellipse instead
+  // made the live close-up a different field of view from the render.
+  const outW = Math.max(8, canvas.width);
+  const outH = Math.max(8, canvas.height);
+  const aspect = ellipse.halfW / Math.max(ellipse.halfH, 1e-9);
+  let ellipseW = outW;
+  let ellipseH = outW / Math.max(aspect, 1e-9);
+  if (ellipseH > outH) {
+    ellipseH = outH;
+    ellipseW = outH * aspect;
+  }
+  const halfW = Math.max(ellipseW / 2, 1e-9);
+  const halfH = Math.max(ellipseH / 2, 1e-9);
+  const graphic = ctx.createImageData(outW, outH);
+  const data = graphic.data;
+  const geom = diskGeom();
+  const { k, s } = cameraScale(geom);
+  const { forward, right, up } = cameraBasis(geom);
+  const camera = ellipse.camera;
+  const radiusKm = camera.radiusKm;
+  const ratio = source && DISK.width ? source.width / DISK.width : 1;
+  let written = 0;
+  let luminance = 0;
+  for (let py = 0; py < outH; py += 1) {
+    const v = (outH / 2 - (py + 0.5)) / halfH;
+    for (let px = 0; px < outW; px += 1) {
+      const u = ((px + 0.5) - outW / 2) / halfW;
+      if (u * u + v * v > 1.0) continue;
+      const gx = u * ellipse.halfW;
+      const gy = v * ellipse.halfH;
+      const height = Math.sqrt(Math.max(0, radiusKm * radiusKm - gx * gx - gy * gy));
+      const point = [
+        height * camera.up0[0] + gx * camera.u[0] + gy * camera.v[0],
+        height * camera.up0[1] + gx * camera.u[1] + gy * camera.v[1],
+        height * camera.up0[2] + gx * camera.u[2] + gy * camera.v[2],
+      ];
+      const divisor = 1 + k * dot3(point, forward);
+      if (!(divisor > 1e-9)) continue;
+      const sx = (geom.cx + geom.radius * s * dot3(point, right) / divisor) * ratio;
+      const sy = (geom.cy - geom.radius * s * dot3(point, up) / divisor) * ratio;
+      const x0 = Math.floor(sx);
+      const y0 = Math.floor(sy);
+      if (x0 < 0 || y0 < 0 || x0 >= pixels.width - 1 || y0 >= pixels.height - 1) continue;
+      const fx = sx - x0;
+      const fy = sy - y0;
+      const base = (y0 * pixels.width + x0) * 4;
+      const next = base + 4;
+      const below = base + pixels.width * 4;
+      const belowNext = below + 4;
+      const index = (py * outW + px) * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const top = pixels.data[base + channel] * (1 - fx)
+          + pixels.data[next + channel] * fx;
+        const bottom = pixels.data[below + channel] * (1 - fx)
+          + pixels.data[belowNext + channel] * fx;
+        const value = top * (1 - fy) + bottom * fy;
+        data[index + channel] = value;
+        luminance += value;
+      }
+      data[index + 3] = 255;
+      written += 1;
+    }
+  }
+  if (!written || luminance / written < 0.5) return false;
+  const buffer = document.createElement('canvas');
+  buffer.width = outW;
+  buffer.height = outH;
+  buffer.getContext('2d').putImageData(graphic, 0, 0);
+  ctx.drawImage(buffer, 0, 0);
+  return true;
+}
+
 function drawMagnifier() {
+  clampSelectionInPlace();
   const panel = $('magnifier');
   if (!panel) return;
   const source = state.diskImage;
@@ -4884,37 +5749,67 @@ function drawMagnifier() {
     if (info) info.textContent = '等全月面渲染出来…';
     return;
   }
-  // The frame the render will produce, drawn upright: image pixels -> box
-  // axes, scaled to the window.
-  ctx.save();
-  ctx.imageSmoothingEnabled = view.scale < 1;
-  ctx.translate(canvas.width / 2, canvas.height / 2);
-  ctx.scale(view.scale * dpr, view.scale * dpr);
-  // Canvas y runs down, so mapping the box's own axes onto the screen takes
-  // the same sign the selection box is drawn with, the other way round.
-  ctx.rotate(view.rotation);
-  ctx.translate(-view.centreX, -view.centreY);
-  ctx.drawImage(source, 0, 0);
-  ctx.restore();
-  if (selectionCorrected()) {
-    // Only the irregular selection is processed.  The window still covers the
-    // smallest box around it, and everything outside is black -- the same rule
-    // the high-resolution render applies on the server.
-    const outline = correctedBoundaryPixels();
-    if (outline) {
+  const correctedEllipse = selectionEllipse() && selectionCorrected();
+  let warped = false;
+  if (correctedEllipse) {
+    // A corrected ellipse is a patch of ground: resample it through its own
+    // tangent plane so the window shows a standard ellipse, not the
+    // foreshortened footprint of the photograph.  If the pixel cache cannot
+    // be read (a tainted or not-yet-decoded source), fall through to the
+    // ordinary crop instead of leaving a black panel.
+    const ellipse = selectionGroundEllipse();
+    if (ellipse) warped = drawCorrectedMagnifier(ctx, canvas, view, source, ellipse);
+  }
+  if (!warped) {
+    // The frame the render will produce, drawn upright: image pixels -> box
+    // axes, scaled to the window.
+    ctx.save();
+    ctx.imageSmoothingEnabled = view.scale < 1;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.scale(view.scale * dpr, view.scale * dpr);
+    // Canvas y runs down, so mapping the box's own axes onto the screen takes
+    // the same sign the selection box is drawn with, the other way round.
+    ctx.rotate(view.rotation);
+    ctx.translate(-view.centreX, -view.centreY);
+    ctx.drawImage(source, 0, 0);
+    ctx.restore();
+    if (selectionCorrected() && !selectionEllipse()) {
+      // Only the irregular rectangle is processed.  The window still covers
+      // the smallest box around it, and everything outside is black -- the
+      // same rule the high-resolution render applies on the server.
+      const outline = correctedBoundaryPixels();
+      if (outline) {
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.scale(view.scale * dpr, view.scale * dpr);
+        ctx.rotate(view.rotation);
+        ctx.translate(-view.centreX, -view.centreY);
+        ctx.beginPath();
+        ctx.rect(-1e7, -1e7, 2e7, 2e7);
+        ctx.moveTo(outline[0].x * view.ratio, outline[0].y * view.ratio);
+        for (let index = 1; index < outline.length; index += 1) {
+          ctx.lineTo(outline[index].x * view.ratio,
+                     outline[index].y * view.ratio);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#07090d';
+        ctx.fill('evenodd');
+        ctx.restore();
+      }
+    }
+    if (selectionEllipse()) {
+      // A classic ellipse is a sky-plane shape, so the mask is simply the
+      // inscribed ellipse in the window; it may run past the limb with the
+      // picture, exactly like an uncorrected square box.
       ctx.save();
       ctx.translate(canvas.width / 2, canvas.height / 2);
       ctx.scale(view.scale * dpr, view.scale * dpr);
-      ctx.rotate(view.rotation);
-      ctx.translate(-view.centreX, -view.centreY);
       ctx.beginPath();
       ctx.rect(-1e7, -1e7, 2e7, 2e7);
-      ctx.moveTo(outline[0].x * view.ratio, outline[0].y * view.ratio);
-      for (let index = 1; index < outline.length; index += 1) {
-        ctx.lineTo(outline[index].x * view.ratio,
-                   outline[index].y * view.ratio);
-      }
-      ctx.closePath();
+      // The transform has already moved the origin to the window centre and
+      // scaled it; using the source centre here put the ellipse off-canvas and
+      // filled the whole window with the outer rect.
+      ctx.ellipse(0, 0, view.halfW, view.halfH, 0, 0, Math.PI * 2);
       ctx.fillStyle = '#07090d';
       ctx.fill('evenodd');
       ctx.restore();
@@ -5362,6 +6257,12 @@ function skyOptions() {
     labelStep: Number.isFinite(step) && step > 0 ? step : 30,
     elongation: $('sky-elongation').checked,
     closeup: $('sky-closeup').checked,
+    // The three tracks/frames can each be put away: a reader measuring the
+    // Moon's own arc does not always want the Sun's, and a phase disc without
+    // its circle is a cleaner mark on a busy sky.
+    moonTrack: $('sky-moon-track') ? $('sky-moon-track').checked : true,
+    sunTrack: $('sky-sun-track') ? $('sky-sun-track').checked : true,
+    phaseFrame: $('sky-phase-frame') ? $('sky-phase-frame').checked : true,
   };
 }
 
@@ -5706,7 +6607,7 @@ function skyPlaceLabels(ctx, items, plot, obstacles) {
   return placed;
 }
 
-function skyPaintMoon(ctx, x, y, radius, fraction, angle) {
+function skyPaintMoon(ctx, x, y, radius, fraction, angle, frame = true) {
   ctx.save();
   ctx.translate(x, y);
   ctx.beginPath();
@@ -5722,11 +6623,13 @@ function skyPaintMoon(ctx, x, y, radius, fraction, angle) {
     ctx.fillStyle = '#e8ecf5';
     ctx.fill();
   }
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(230,232,238,.38)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  if (frame) {
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(230,232,238,.38)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -5928,7 +6831,7 @@ function paintSkyChart(ctx, area, data, view, options) {
 
   // Sun's track.  It is a dashed line because it is context, not the subject.
   const sunRelevant = skySunRelevant(data, closeup);
-  if (sunRelevant && series.length > 1) {
+  if (sunRelevant && series.length > 1 && options.sunTrack !== false) {
     ctx.beginPath();
     series.forEach((sample, index) => {
       const x = projection.x(sample.sunAz);
@@ -5943,7 +6846,7 @@ function paintSkyChart(ctx, area, data, view, options) {
   }
 
   // Moon's track: a wide, faint halo under a thin bright line.
-  if (series.length > 1) {
+  if (series.length > 1 && options.moonTrack !== false) {
     for (const pass of [{ width: 7, colour: 'rgba(223,228,238,.12)' },
                         { width: 2, colour: '#dfe4ee' }]) {
       ctx.beginPath();
@@ -6032,7 +6935,7 @@ function paintSkyChart(ctx, area, data, view, options) {
                           eclipse, sunPoint);
     } else {
       skyPaintMoon(ctx, moonPoint.x, moonPoint.y, moonMarkerRadius,
-                   fraction, sunAngle);
+                   fraction, sunAngle, options.phaseFrame !== false);
     }
   }
 
@@ -10452,6 +11355,16 @@ function satellitesWanted() {
   return !box || box.checked;
 }
 
+/** Whether the named *tracts* get their name written across them.
+ *
+ *  A mare is a region, not a point: the planner can centre its caption on the
+ *  patch it names instead of pushing the name outside and pointing at it.  The
+ *  server owns the class list; this is only the switch. */
+function regionWanted() {
+  const box = $('label-region');
+  return !!(box && box.checked);
+}
+
 /** The current box, in the terms the annotation planner understands. */
 function focusPayload() {
   const button = $('label-focus');
@@ -10485,9 +11398,51 @@ function relatedNameFor(viewName) {
   return item.name_en || null;
 }
 
+/** Width of a name in the geometric marks' own typeface.
+ *
+ *  The ruler's caption is drawn with :func:`markText`, which sets its font from
+ *  :func:`markFont`; measuring with anything else would make the cleared box
+ *  either too small to cover the text or bigger than the text needs. */
+let markMeasureCanvas = null;
+function markedTextWidth(text, fontPx) {
+  if (!markMeasureCanvas) markMeasureCanvas = document.createElement('canvas');
+  const ctx = markMeasureCanvas.getContext('2d');
+  markFont(ctx, fontPx);
+  return ctx.measureText(String(text)).width;
+}
+
+/** Rectangles on the disk that a landform name may not be set on.
+ *
+ *  The ruler is the one object on the picture that is drawn by hand in frame
+ *  pixels and can be dragged anywhere, so its box -- bar, ticks and the length
+ *  it writes -- travels with the label request and the layout keeps clear of
+ *  it.  Frame pixels, because that is the space the plan is laid out in.
+ */
+function labelObstacles(viewName) {
+  if (viewName !== 'disk' || !rulerOn() || !state.geometry || !(ruler.km > 0)) {
+    return [];
+  }
+  const width = DISK.width, height = DISK.height;
+  const geom = diskGeomFor(width, height);
+  const bar = geom ? rulerGeometry(geom, width, height) : null;
+  if (!bar) return [];
+  const plan = state.labels.disk;
+  const font = Math.max(8, (plan && plan.font_px) || labelFrameFontPx('disk'));
+  const tick = font * 0.5;
+  const textY = bar.top - tick - font * 0.8;
+  const textWidth = markedTextWidth(rulerText(ruler.km), font * 0.92);
+  const pad = font * 0.2;
+  const left = Math.min(bar.left, bar.right) - pad;
+  const right = Math.max(bar.right, bar.left + textWidth) + pad;
+  const top = Math.min(bar.top - tick, textY - font * 0.6) - pad;
+  const bottom = bar.top + tick + pad;
+  return [[left, top, right - left, bottom - top]];
+}
+
 function labelRequestBase(viewName) {
   const density = densitySettings();
   const overlap = $('label-overlap');
+  const obstacles = labelObstacles(viewName || 'disk');
   return {
     labels: density.labels,
     min_radius_px: density.min_radius_px,
@@ -10501,6 +11456,8 @@ function labelRequestBase(viewName) {
     focus: focusPayload(),
     related: relatedNameFor(viewName || 'disk'),
     lunar100: lunar100Wanted(),
+    region: regionWanted(),
+    obstacles,
   };
 }
 
@@ -10657,6 +11614,9 @@ async function diskLabelsAt(width, when) {
     min_radius_px: base.min_radius_px * scale,
     outline_min_radius_px: base.outline_min_radius_px * scale,
     font_px: labelFrameFontPx('disk') * scale,
+    // The ruler is drawn at the export's own size too, so the box it reserves
+    // has to be the exported one; the page's box is in preview pixels.
+    obstacles: (base.obstacles || []).map((rect) => rect.map((value) => value * scale)),
   });
 }
 
@@ -10805,6 +11765,25 @@ function toggleLabels() {
 
 /* Cursor -> preview-image pixels.  The stack and the Moon canvas share a box,
    so one rect serves for both. */
+/** The selection whose centre has moved by a *pixel* offset.
+ *
+ * This is what makes a dragged box follow the cursor: the offset is applied in
+ * the picture's own pixels and inverted once.  Adding a lon/lat delta measured
+ * at the pointer to the start centre is not the same thing -- the projection is
+ * not linear, so at high zoom, and anywhere away from the sub-observer point,
+ * the box would travel a different distance from the cursor.
+ */
+function movedSelection(start, dx, dy) {
+  const centre = lonLatToPixel(start.lon, start.lat);
+  const moved = centre ? pixelToLonLat(centre.x + dx, centre.y + dy) : null;
+  if (!moved) return null;
+  return {
+    ...start,
+    lon: wrap180(moved.lon),
+    lat: Math.max(-89.9, Math.min(89.9, moved.lat)),
+  };
+}
+
 function canvasPoint(event) {
   const body = $('body-disk').getBoundingClientRect();
   const f = stageFrame();
@@ -10829,7 +11808,17 @@ $('body-disk').addEventListener('pointerdown', (event) => {
   // on one of them is a press on a control, not the start of a selection box.
   const target = event.target;
   if (target && target.closest
-      && target.closest('.view-tools, .zoom, .disk-bottom-hud, .selection-inputs')) return;
+      && target.closest('.view-toolbar, .view-3d, .zoom, .disk-bottom-hud, .selection-inputs')) return;
+  if (state.view3d) {
+    if (event.button !== 0) return;
+    state.globeDrag = {
+      x: event.clientX, y: event.clientY,
+      lon: state.globe3d.lon, lat: state.globe3d.lat,
+    };
+    $('body-disk').setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
   // Ctrl / ⌘ + click drops a manual anchor instead of starting a box.
   if ((event.ctrlKey || event.metaKey) && addManualMark('disk', event)) {
     event.preventDefault();
@@ -10909,6 +11898,16 @@ $('body-disk').addEventListener('pointerdown', (event) => {
 });
 
 $('body-disk').addEventListener('pointermove', (event) => {
+  if (state.globeDrag) {
+    const drag = state.globeDrag;
+    const radius = Math.max(20, globe3dRadius());
+    state.globe3d.lon = ((drag.lon - (event.clientX - drag.x) / radius * 90 + 180) % 360) - 180;
+    state.globe3d.lat = Math.max(-89, Math.min(89,
+      drag.lat + (event.clientY - drag.y) / radius * 90));
+    scheduleGlobeDraw();
+    event.preventDefault();
+    return;
+  }
   if (state.panning) {
     panBy('disk', event.clientX - state.panning.x, event.clientY - state.panning.y);
     state.panning = { x: event.clientX, y: event.clientY };
@@ -10985,15 +11984,8 @@ $('body-disk').addEventListener('pointermove', (event) => {
       };
     }
   } else {
-    const target = pixelToLonLat(p.x, p.y);
-    const origin = pixelToLonLat(drag.origin.x, drag.origin.y);
-    if (target && origin) {
-      state.selection = {
-        ...start,
-        lon: wrap180(start.lon + (target.lon - origin.lon)),
-        lat: Math.max(-89.9, Math.min(89.9, start.lat + (target.lat - origin.lat))),
-      };
-    }
+    const moved = movedSelection(start, p.x - drag.origin.x, p.y - drag.origin.y);
+    if (moved) state.selection = moved;
   }
   syncSelectionInputs();
   drawDisk();
@@ -11002,6 +11994,11 @@ $('body-disk').addEventListener('pointermove', (event) => {
 });
 
 function endDrag(event) {
+  if (state.globeDrag) {
+    state.globeDrag = null;
+    $('body-disk').style.cursor = '';
+    return;
+  }
   if (state.panning) {
     state.panning = null;
     $('body-disk').style.cursor = '';
@@ -11141,6 +12138,7 @@ function wrap180(x) {
 }
 
 function syncSelectionInputs() {
+  clampSelectionInPlace();
   const s = state.selection;
   if (!s) {
     $('sel-lon').value = ''; $('sel-lat').value = '';
@@ -11959,8 +12957,9 @@ function sizeCanvas(canvas, img) {
  * place to keep in step. */
 const SETTING_FIELDS = [
   'when', 'tz', 'lat', 'lon', 'auto-refresh',
-  'mesh-size-mm', 'mesh-base-km', 'mesh-vertical', 'mesh-resolution',
-  'mesh-projection', 'mesh-corrected',
+  'mesh-scope', 'mesh-size-mm', 'mesh-base-km', 'mesh-vertical', 'mesh-resolution',
+  'mesh-corrected', 'mesh-ellipse',
+  'mesh-moon-size-mm', 'mesh-moon-resolution', 'mesh-blend-light',
   'sel-lon', 'sel-lat', 'sel-rotation', 'sel-locked',
   'manual-train', 'aperture', 'focal-ratio', 'focal-length', 'barlow',
   'back-focus', 'obstruction',
@@ -11974,6 +12973,7 @@ const SETTING_FIELDS = [
   'out-px', 'out-ref', 'out-kmpx', 'out-samples', 'surface-texture',
   'terrain-denoise', 'parallel',
   'sky-span', 'sky-label-step', 'sky-labels', 'sky-elongation', 'sky-closeup',
+  'sky-moon-track', 'sky-sun-track', 'sky-phase-frame',
   'sky-save-ref', 'sky-save-px',
   'seeing', 'seeing-num',
   'blur-strength', 'diffraction', 'sharpen-radius', 'sharpen-radius-num',
@@ -11983,6 +12983,7 @@ const SETTING_FIELDS = [
   'noise-poisson', 'noise-gaussian',
   'annotate', 'label-language', 'label-density', 'label-font',
   'label-shadow', 'label-colour', 'label-lock', 'label-satellites',
+  'label-overlap', 'label-region',
   'text-color', 'text-stroke', 'text-stroke-width', 'text-bold',
   'marker-stroke', 'marker-stroke-width',
   'outline-color', 'outline-width', 'outline-style',
@@ -12091,6 +13092,14 @@ function collectSettings() {
   values['viewpoint'] = viewpointValue();
   // The columns are not form fields, so they travel in their own block.
   values['layout'] = layoutSettings();
+  // The selection is more than the three visible centre/rotation fields: its
+  // radius and aspect decide the exact mesh, and ellipse mode is part of the
+  // shape.  Save the whole thing so a later load can reproduce the model.
+  values['selection'] = state.selection ? {
+    ...state.selection,
+    aspect: Number.isFinite(Number(state.selection.aspect))
+      ? Number(state.selection.aspect) : 1,
+  } : null;
   return values;
 }
 
@@ -12110,7 +13119,7 @@ function applySettings(values) {
   }
   // A stored file can ask for the corrected box and leave the export's
   // projection switch in any state; the corrected box owns that switch.
-  syncMeshCorrection();
+  syncMeshEllipse();
   // 视角 is a latch on the full-disk title bar, not an input whose value can be
   // written straight back; put its pressed state and count it as applied.
   if (values['viewpoint'] !== undefined) {
@@ -12127,7 +13136,26 @@ function applySettings(values) {
   // written there, and syncing the other way would overwrite them with whatever
   // the page happened to have selected.
   selectionFromInputs();
-  syncSelectionInputs();
+  if (values['selection'] && typeof values['selection'] === 'object') {
+    const saved = values['selection'];
+    const lon = Number(saved.lon);
+    const lat = Number(saved.lat);
+    const radius = Number(saved.radiusFraction);
+    const aspect = Number(saved.aspect);
+    const rotation = Number(saved.rotationDeg);
+    if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      state.selection = {
+        lon,
+        lat,
+        radiusFraction: Number.isFinite(radius) && radius > 0 ? radius
+          : (state.selection ? state.selection.radiusFraction : 0.08),
+        rotationDeg: Number.isFinite(rotation) ? rotation : 0,
+        aspect: Number.isFinite(aspect) && aspect > 0 ? aspect
+          : (state.selection ? state.selection.aspect : 1),
+      };
+      syncSelectionInputs();
+    }
+  }
   updateSamplesInfo();
   updateSharpenMethod();
   syncOutputScale('pixels');
@@ -12370,11 +13398,14 @@ function fitCanvas(view) {
   const scale = Math.min(availableW / canvas.width, availableH / canvas.height);
   const w = Math.max(1, Math.round(canvas.width * scale));
   const h = Math.max(1, Math.round(canvas.height * scale));
+  view.fitW = w;
+  view.fitH = h;
   target.style.width = w + 'px';
   target.style.height = h + 'px';
   target.style.left = Math.round((rect.width - w) / 2) + 'px';
   target.style.top = Math.round((rect.height - h) / 2) + 'px';
   if (view.zoom <= 1) { view.panX = 0; view.panY = 0; }
+  if (view.zoom !== 1) applyZoom(view);
 }
 
 function clampPan(view) {
@@ -12402,7 +13433,22 @@ function applyZoom(view) {
   // For the Moon, only the image canvas is transformed: the overlay must stay
   // at a constant scale so the selection keeps its line width and handle size.
   const target = view.name === 'disk' ? view.canvas : (view.stage || view.canvas);
-  if (target) {
+  if (target && view.name !== 'disk' && target === view.canvas) {
+    // The close-up canvas is its own stage.  Scaling it with a CSS transform
+    // makes the compositor enlarge the already-rasterised element; a small
+    // window then pixels out while a wide one keeps detail.  Change its CSS
+    // size instead, so the browser samples the full canvas bitmap at every
+    // zoom level.
+    const body = view.body;
+    const rect = body ? body.getBoundingClientRect() : null;
+    const width = Math.max(1, Math.round((view.fitW || view.canvas.width) * view.zoom));
+    const height = Math.max(1, Math.round((view.fitH || view.canvas.height) * view.zoom));
+    target.style.transform = 'none';
+    target.style.width = width + 'px';
+    target.style.height = height + 'px';
+    target.style.left = Math.round(((rect ? rect.width : width) - width) / 2 + view.panX) + 'px';
+    target.style.top = Math.round(((rect ? rect.height : height) - height) / 2 + view.panY) + 'px';
+  } else if (target) {
     target.style.transform =
       `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`;
   }
@@ -13163,31 +14209,35 @@ function meshPayload(format = 'stl') {
       vertical_exaggeration: num('mesh-vertical') ?? 1,
       resolution,
       resolution_mode: auto ? 'auto' : 'manual',
-      projection: $('mesh-projection') ? $('mesh-projection').checked : true,
+      projection: true,
       format: format === 'glb' ? 'glb' : 'stl',
       blend_light: meshLighting(),
     },
   };
 }
 
-/** Keep the export's projection switch consistent with the corrected box.
- *
- *  A corrected box only means anything if the tile is built in ground
- *  coordinates, so selecting it forces 投影修正 on and locks it. */
-function syncMeshCorrection() {
-  const corrected = $('mesh-corrected');
-  const projection = $('mesh-projection');
-  if (!corrected || !projection) return;
-  if (corrected.checked) {
-    projection.checked = true;
-    projection.disabled = true;
-  } else {
-    projection.disabled = false;
-  }
+/** The ellipse/corrected flags live side by side now: there is no separate
+ *  "projection" switch to keep in step.  This function is still the one place
+ *  the 3D pane looks at the shape flags, so a future invariant has a home. */
+function syncMeshEllipse() {
+  return;
+}
+
+function meshEllipseChanged() {
+  const on = selectionEllipse();
+  if (on && !ellipseModeWasOn) alignEllipseToBox();
+  ellipseModeWasOn = on;
+  syncMeshEllipse();
+  syncSelectionInputs();
+  syncOutputScale('pixels');
+  updateSaveInfo();
+  drawDisk();
+  drawMagnifier();
+  updateMeshPlan();
+  if (state.renderId) setStatus('选框形状已改，请点「更新模拟」');
 }
 
 function meshCorrectionChanged() {
-  syncMeshCorrection();
   drawDisk();
   drawMagnifier();
   updateMeshPlan();
@@ -13201,14 +14251,17 @@ function meshCorrectionChanged() {
 
 /** The model's own two dimensions, from the effective selection. */
 function meshModelSize() {
+  clampSelectionInPlace();
   const longMm = Number(num('mesh-size-mm') ?? 100) || 100;
-  const projectionOn = $('mesh-projection') ? $('mesh-projection').checked : true;
-  const ground = projectionOn ? selectionGroundBox() : null;
+  const ground = selectionGroundBox();
   const ratio = ground
     ? (ground.y1 - ground.y0) / Math.max(1e-9, ground.x1 - ground.x0)
     : effectiveSelectionAspect();
   const safe = Math.max(1e-6, Number(ratio) || 1);
   const shortMm = longMm * Math.min(1, safe) / Math.max(1, safe);
+  if (selectionEllipse()) {
+    return { longMm, shortMm: longMm, ratio: 1, ground, round: true };
+  }
   return { longMm, shortMm, ratio: safe, ground };
 }
 
@@ -13292,6 +14345,20 @@ function updateMeshPlan() {
     return;
   }
   const { longMm, shortMm, ground } = meshModelSize();
+  const round = selectionEllipse();
+  const groundX = ground ? Math.abs(ground.x1 - ground.x0) : 0;
+  const groundY = ground ? Math.abs(ground.y1 - ground.y0) : 0;
+  const longKm = Math.max(groundX, groundY);
+  const shortKm = Math.min(groundX, groundY);
+  const roundKm = Math.min(longKm, shortKm);
+  const spanText = (km) => km >= 1
+    ? `${fmt(km, 1)} km` : `${fmt(km * 1000, 0)} m`;
+  const physical = ground && longKm > 0 && shortKm > 0
+    ? (round
+      ? `　长轴/短轴 ${fmt(longMm, 0)} mm = ${spanText(roundKm)}`
+      : `　长边 ${fmt(longMm, 0)} mm = ${spanText(longKm)}`
+        + `　短边 ${fmt(shortMm, 1)} mm = ${spanText(shortKm)}`)
+    : '';
   const auto = $('mesh-resolution').value === 'auto';
   let samples = '';
   let match = '';
@@ -13299,26 +14366,60 @@ function updateMeshPlan() {
     const samplesCount = autoMeshSamples();
     samples = `　采样 ${samplesCount}`;
     const native = Number(LIMITS.terrain_km_per_px);
-    const longKm = ground
-      ? Math.max(ground.x1 - ground.x0, ground.y1 - ground.y0)
+    const nativeLongKm = ground
+      ? (round
+        ? Math.min(ground.x1 - ground.x0, ground.y1 - ground.y0)
+        : Math.max(ground.x1 - ground.x0, ground.y1 - ground.y0))
       : 0;
-    if (native > 0 && longKm > 0) {
-      // At the current samples-per-mm density, how long the model would need
-      // to be to hold every native DEM pixel across the selection.  This grows
-      // with the selection; the old expression inverted it and collapsed to a
-      // few tens of millimetres for large boxes.
-      const nativePixels = longKm / native;
-      const matchMm = longMm * nativePixels / Math.max(1, samplesCount - 1);
-      const kmPerMm = longKm / longMm;
+    if (native > 0 && nativeLongKm > 0) {
+      // The reference is deliberately independent of the model size the
+      // reader typed: one native pixel is one millimetre.  Changing 长边尺寸
+      // therefore changes the physical scale below, not this recommendation.
+      const nativePixels = nativeLongKm / native;
+      const matchMm = nativePixels;
       if (Number.isFinite(matchMm) && matchMm > 0) {
         match = `　长边尺寸 ${fmt(matchMm, 0)} mm 时匹配当前最高分辨率` +
-          `　1 mm = ${groundScaleText(kmPerMm)}`;
+          `（1 原始像素 = 1 mm）`;
       }
     }
   }
   plan.hidden = false;
-  plan.textContent = `模型 ${longMm} × ${shortMm.toFixed(1)} mm${samples}${match}`;
+  plan.textContent = (round
+    ? `圆形模型　直径 ${fmt(longMm, 0)} mm${samples}${match}`
+    : `模型 ${longMm} × ${shortMm.toFixed(1)} mm${samples}${match}`) + physical;
   buttons.forEach((button) => { button.disabled = false; });
+  updateSampleHint(longMm, longKm);
+}
+
+/** 采样's hover text: what each number means on the printed model.
+ *
+ * "More samples, more detail" is true of every control on the page and helps
+ * nobody choose one.  This says what the choice is: the spacing on the model
+ * (long edge divided into that many points) and the triangle count it implies,
+ * plus the count that 匹配当前数据源 would use for the box on screen.
+ */
+function updateSampleHint(longMm, longKm) {
+  const select = $('mesh-resolution');
+  if (!select) return;
+  const rows = [];
+  for (const count of [128, 256, 384, 512, 768]) {
+    if (select.options && ![...select.options].some((option) => option.value === String(count))) {
+      continue;
+    }
+    const spacing = longMm / Math.max(1, count - 1);
+    const triangles = 2 * count * count;
+    rows.push(`${count} → 长边 ${count} 点，每点 ${fmt(spacing, spacing < 1 ? 2 : 1)} mm`
+      + `（${fmt(longMm, 0)} mm 模型），约 ${fmt(triangles / 1e4, 0)} 万三角面`);
+  }
+  const native = Number(LIMITS.terrain_km_per_px);
+  const auto = autoMeshSamples();
+  const matched = native > 0 && longKm > 0
+    ? `「匹配当前数据源」→ 长边 ${auto} 点（当前选框长边 ${fmt(longKm, 1)} km，`
+      + `数据源 ${native} km/px）`
+    : `「匹配当前数据源」→ 长边 ${auto} 点（按 DEM 原生分辨率）`;
+  select.title = '采样：模型长边上的 DEM 网格点数，短边按选框长宽比取整。'
+    + '数字越大，地形越细、文件越大。'
+    + `\n${rows.join('\n')}\n${matched}`;
 }
 
 function meshFileName(info, format = 'stl') {
@@ -13400,13 +14501,24 @@ async function exportMesh(format = 'stl') {
       const corrected = info.corrected ? '，投影修正选框'
         : (info.projection === false ? '，未投影修正' : '');
       const form = format === 'glb' ? '，GLB（米）' : '';
-      const scale = Number(info.scale_mm_per_km);
-      const physical = scale > 0
-        ? `，1 mm = ${groundScaleText(1 / scale)}` : '';
+      const groundLongKm = Math.max(Number(info.width_km) || 0, Number(info.height_km) || 0);
+      const groundShortKm = Math.min(Number(info.width_km) || 0, Number(info.height_km) || 0);
+      const diameterKm = info.round_base ? groundShortKm : groundLongKm;
+      const spanText = (km) => km >= 1
+        ? `${fmt(km, 1)} km` : `${fmt(km * 1000, 0)} m`;
+      const physical = info.round_base
+        ? (diameterKm > 0
+          ? `，长轴/短轴 ${fmt(info.long_side_mm, 0)} mm = ${spanText(diameterKm)}` : '')
+        : (groundLongKm > 0 && groundShortKm > 0
+          ? `，长边 ${fmt(info.long_side_mm, 0)} mm = ${spanText(groundLongKm)}`
+            + `，短边 ${fmt(info.short_side_mm, 1)} mm = ${spanText(groundShortKm)}`
+          : '');
+      const modelSize = info.round_base
+        ? `圆形模型，直径 ${fmt(info.long_side_mm, 0)} mm`
+        : `模型 ${fmt(info.long_side_mm, 0)}×${fmt(info.short_side_mm, 1)} mm`;
       status.textContent =
         `已导出 ${name}：地面 ${fmt(info.width_km, 1)}×${fmt(info.height_km, 1)} km，` +
-        `起伏 ${fmt(info.relief_km, 2)} km，模型 ${fmt(info.long_side_mm, 0)}×` +
-        `${fmt(info.short_side_mm, 1)} mm，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
+        `起伏 ${fmt(info.relief_km, 2)} km，${modelSize}，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
         `${mb.toFixed(1)} MB${grid}${cell}${source}${corrected}${form}${physical}` +
         (info.resolution_capped ? '；采样已到上限' : '') +
         (info.terrain_limited ? '；采样细于 DEM，模型含插值' : '');
@@ -13464,7 +14576,7 @@ async function exportMoonGlb() {
     const mb = Number(blob.size || 0) / (1024 * 1024);
     if (status) {
       const physical = Number(info.diameter_mm) > 0
-        ? `，1 mm = ${groundScaleText(3474.8 / Number(info.diameter_mm))}` : '';
+        ? `，φ ${fmt(info.diameter_mm, 0)} mm = 3474.8 km` : '';
       status.textContent =
         `已导出 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，` +
         `分辨率 ${info.resolution || '—'}，${(info.n_faces || 0).toLocaleString()} 个三角面，` +
@@ -13518,7 +14630,7 @@ async function exportMoonBlender() {
     const mb = Number(blob.size || 0) / (1024 * 1024);
     if (status) {
       const physical = Number(info.diameter_mm) > 0
-        ? `，1 mm = ${groundScaleText(3474.8 / Number(info.diameter_mm))}` : '';
+        ? `，φ ${fmt(info.diameter_mm, 0)} mm = 3474.8 km` : '';
       status.textContent =
         `已生成 ${name}：全月面 φ ${fmt(info.diameter_mm, 0)} mm，` +
         `分辨率 ${info.resolution || '—'}，${mb.toFixed(1)} MB${physical}，` +
@@ -13584,9 +14696,17 @@ async function exportBlenderPreview() {
         : '';
       const texture = info.has_texture === false ? '无纹理' : '纹理已打包';
       const light = info.blend_light === 'low' ? '低角度光照' : '当前月相光照';
-      const scale = Number(info.scale_mm_per_km);
-      const physical = scale > 0
-        ? `，1 mm = ${groundScaleText(1 / scale)}` : '';
+      const spanText = (km) => km >= 1
+        ? `${fmt(km, 1)} km` : `${fmt(km * 1000, 0)} m`;
+      const groundLongKm = Math.max(Number(info.width_km) || 0, Number(info.height_km) || 0);
+      const groundShortKm = Math.min(Number(info.width_km) || 0, Number(info.height_km) || 0);
+      const physical = info.round_base
+        ? (groundShortKm > 0
+          ? `，长轴/短轴 ${fmt(info.long_side_mm, 0)} mm = ${spanText(groundShortKm)}` : '')
+        : (groundLongKm > 0 && groundShortKm > 0
+          ? `，长边 ${fmt(info.long_side_mm, 0)} mm = ${spanText(groundLongKm)}`
+            + `，短边 ${fmt(info.short_side_mm, 1)} mm = ${spanText(groundShortKm)}`
+          : '');
       status.textContent =
         `已生成 ${name}：模型 ${fmt(info.long_side_mm, 0)}×` +
         `${fmt(info.short_side_mm, 1)} mm，${mb.toFixed(1)} MB，${texture}` +
@@ -14768,6 +15888,7 @@ function animationAnnotationsPayload() {
     satellites: satellitesWanted(),
     avoid_overlap: !$('label-overlap').checked,
     lunar100: lunar100Wanted(),
+    region: regionWanted(),
     labels: density.labels,
     min_radius_px: density.min_radius_px * scale,
     outline_min_radius_px: (Number(LIMITS.label_outline_px) || 9) * scale,
@@ -14823,8 +15944,12 @@ function animationRequest() {
   // `output`, and a corrected mask is a still/3D feature.
   const region = $('anim-scope').value === 'region' ? selectionPayload() : null;
   if (region) {
+    // The animation renderer takes the older region schema.  `aspect` and the
+    // still/3D-only keys are not part of it.
     delete region.aspect;
     delete region.corrected;
+    delete region.ellipse;
+    delete region.projection;
   }
   return {
     when: whenPayload(),
@@ -15399,6 +16524,8 @@ function setGenerateLabel(text) {
 
 /** Redraw everything that follows the selection, magnifier included. */
 function afterSelectionChange() {
+  clampSelectionInPlace();
+  syncSelectionInputs();
   syncOutputScale('pixels');
   updateSaveInfo();
   updateSelectionSyncButton();
@@ -15790,6 +16917,9 @@ function init() {
     setStatus(px > 0 ? `圆盘边缘平滑 ${px} px（预览与保存的文件同一个值）`
       : '边缘平滑已关闭');
   });
+  if ($('view-3d')) {
+    $('view-3d').addEventListener('click', () => setView3d(!state.view3d));
+  }
   wireResolutionPicker('disk-px', 'disk-preset');
   wireResolutionPicker('out-px', 'out-preset');
   // The animation's menu is the full disk's own table of steps, copied before
@@ -15881,6 +17011,13 @@ function init() {
     body.addEventListener('wheel', (event) => {
       if (event.target && event.target.closest
           && event.target.closest('.disk-bottom-hud, .selection-inputs')) {
+        return;
+      }
+      if (state.view3d && name === 'disk') {
+        event.preventDefault();
+        state.globe3d.zoom = Math.max(0.45,
+          Math.min(3.2, state.globe3d.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
+        scheduleGlobeDraw();
         return;
       }
       event.preventDefault();
@@ -16004,11 +17141,25 @@ function init() {
   if ($('mesh-corrected')) {
     $('mesh-corrected').addEventListener('change', meshCorrectionChanged);
   }
-  if ($('mesh-projection')) {
-    $('mesh-projection').addEventListener('change', updateMeshPlan);
+  if ($('mesh-ellipse')) {
+    $('mesh-ellipse').addEventListener('change', meshEllipseChanged);
   }
-  syncMeshCorrection();
+  if ($('mesh-reset')) {
+    $('mesh-reset').addEventListener('click', () => {
+      if (!state.selection) return;
+      const next = { ...state.selection, rotationDeg: 0 };
+      if (selectionEllipse()) next.aspect = 1;
+      state.selection = next;
+      syncSelectionInputs();
+      afterSelectionChange();
+      updateMeshPlan();
+      setStatus(selectionEllipse()
+        ? '椭圆选框已复位为正圆，旋转角归零'
+        : '选框旋转角已归零');
+    });
+  }
   updateMeshPlan();
+  ellipseModeWasOn = !!($('mesh-ellipse') && $('mesh-ellipse').checked);
   setProcImageTab('imaging');
   buildEventKinds();
   for (const id of ['events-start', 'events-end']) {
@@ -16423,6 +17574,15 @@ function init() {
       ? '避让已停用：标注允许重叠，极高密度下可以看到全部名字'
       : '避让已启用：文字互不相压');
   });
+  // 月海居中 is the same kind of input: the centred slot is a different
+  // candidate, not a different typeface, so the plan has to be laid out again.
+  $('label-region').addEventListener('change', () => {
+    ensureLabelsOn();
+    refreshLabelPlans();
+    setStatus($('label-region').checked
+      ? '月海、月湖、月湾、月沼的名称写在区域中央'
+      : '区域名恢复为区域外侧的标注');
+  });
   // 针对选框标注: the box gets its own density and its own second budget.
   $('label-focus').addEventListener('click', () => {
     const button = $('label-focus');
@@ -16480,6 +17640,10 @@ function init() {
           ruler.km = defaultRulerKm(diskGeom(), DISK.width);
         }
         drawViewLabels('disk');
+        // The bar is a layout obstacle -- showing or hiding it changes the box
+        // the names have to keep clear of -- so it is a fresh plan, not just a
+        // repaint.
+        if (state.labelsOn) refreshLabelPlans();
       }
       setStatus(`${box.checked ? '已标注' : '已取消'}${names[id] || '几何标注'}`);
     });
@@ -16771,7 +17935,8 @@ function init() {
   for (const button of document.querySelectorAll('[data-range="sky"]')) {
     button.addEventListener('click', () => nudgeSky(button.dataset.nudge));
   }
-  for (const id of ['sky-label-step', 'sky-labels', 'sky-elongation']) {
+  for (const id of ['sky-label-step', 'sky-labels', 'sky-elongation',
+                    'sky-moon-track', 'sky-sun-track', 'sky-phase-frame']) {
     $(id).addEventListener('change', drawSky);
   }
   $('sky-closeup').addEventListener('change', () => {

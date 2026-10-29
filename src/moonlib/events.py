@@ -574,9 +574,6 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
             altitude_deg=moon_altitude,
             title=title,
             detail=(
-                f"太阳高度 {XVL_SUN_ALTITUDE_MIN_DEG:g}–"
-                f"{XVL_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
-                f"{XVL_SUN_ALTITUDE_BEST_DEG:g}°　"
                 f"持续 {minutes:.0f} min　"
                 f"锚点 {XVL_ANCHOR_LON_DEG:g}° / {XVL_ANCHOR_LAT_DEG:g}°　"
                 f"余经度 {metrics['colongitude_deg']:.1f}°　"
@@ -619,9 +616,6 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
             altitude_deg=moon_altitude,
             title="the jewelled handle",
             detail=(
-                f"太阳高度 {JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG:g}–"
-                f"{JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG:g}°，最佳 "
-                f"{JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG:g}°　"
                 f"持续 {minutes:.0f} min　"
                 f"锚点 {abs(JEWELLED_HANDLE_ANCHOR_LON_DEG):g}°W / "
                 f"{JEWELLED_HANDLE_ANCHOR_LAT_DEG:g}°N　"

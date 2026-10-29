@@ -31,10 +31,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .annotations import AnnotationPlan, marker_radius_px
+from .annotations import AnnotationPlan
 from .errors import MoonlibError
 
-__all__ = ["find_label_font", "paint_annotation_plan"]
+__all__ = ["find_label_font", "paint_annotation_plan",
+           "marker_shape", "leader_start"]
 
 #: Fonts that carry both CJK and Latin, in the order the page's CSS names them.
 #: The ``index`` is the face inside a ``.ttc`` collection; Pillow needs it, and
@@ -265,6 +266,65 @@ def _item_colour(style: Dict[str, Any], item: Any) -> Tuple[int, int, int, int]:
                  fallback[:3] + (255,))
 
 
+def marker_shape(item: Any, font_px: float, rim_drawn: bool = True
+                 ) -> Optional[Tuple[str, float, float]]:
+    """The locator a feature gets, in the reference tool's proportions.
+
+    MoonLabeler draws a small dot -- about 6 % of the type, never under two
+    pixels -- with a hairline rim at most; a landing site is a crosshair; and a
+    feature whose rim is already on the picture gets no locator at all, because
+    the circle is the marker.  ``("dot" | "cross", radius, line width)`` or
+    ``None`` for no locator.  This mirrors ``markerShape()`` in ``app.js``; an
+    animation that drew a different locator from the page would be a different
+    map from the one on screen.
+    """
+    if rim_drawn and getattr(item, "outline", None) and not getattr(item, "highlight", False):
+        return None
+    if getattr(item, "feature_class", "") == "statio":
+        return "cross", max(3.0, font_px * 0.22), max(1.0, font_px * 0.045)
+    return "dot", max(2.0, font_px * 0.06), 0.0
+
+
+def leader_start(item: Any) -> Optional[Tuple[float, float]]:
+    """Where a leader leaves a rimmed feature: at its rim, not its centre.
+
+    The same rule the page applies (``leaderStart()`` in ``app.js``): a ray from
+    the feature's centre towards the caption ends at the last contour crossing,
+    so the line never runs across the circle.  ``None`` when the caption sits
+    inside the rim -- there is nothing outside to point at.
+    """
+    x, y = float(item.x), float(item.y)
+    outline = getattr(item, "outline", None)
+    if not outline or len(outline) < 2:
+        return x, y
+    left, top = float(item.label_x), float(item.label_y)
+    right, bottom = left + float(item.label_w), top + float(item.label_h)
+    cx = min(max(x, left), right)
+    cy = min(max(y, top), bottom)
+    dx, dy = cx - x, cy - y
+    length = math.hypot(dx, dy)
+    if not length > 0.0:
+        return x, y
+    furthest = 0.0
+    points = [(float(px), float(py)) for px, py in outline]
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[(index + 1) % len(points)]
+        ex, ey = x2 - x1, y2 - y1
+        denominator = dx * ey - dy * ex
+        if abs(denominator) < 1e-9:
+            continue
+        t = ((x1 - x) * ey - (y1 - y) * ex) / denominator
+        u = ((x1 - x) * dy - (y1 - y) * dx) / denominator
+        if t >= 0.0 and -1e-6 <= u <= 1.0 + 1e-6:
+            furthest = max(furthest, t)
+    if furthest > 1.0:
+        return None
+    if furthest <= 0.0:
+        return x, y
+    start = min(1.0, furthest + 1.5 / length)
+    return x + dx * start, y + dy * start
+
+
 # ---------------------------------------------------------------------------
 # the painter
 # ---------------------------------------------------------------------------
@@ -298,8 +358,8 @@ def paint_annotation_plan(
     item_colour = _item_colour
     text_stroke = _rgba(ink.get("text_stroke"), (12, 14, 20, 235))
     marker_stroke = _rgba(ink.get("marker_stroke"), text_stroke)
-    text_stroke_px = int(round(_scaled_width(ink.get("text_stroke_width", 2), font_px)))
-    marker_stroke_px = _scaled_width(ink.get("marker_stroke_width", 1.0), font_px)
+    text_stroke_px = int(round(_scaled_width(ink.get("text_stroke_width", 1.2), font_px)))
+    marker_stroke_px = _scaled_width(ink.get("marker_stroke_width", 0.6), font_px)
     rim_width = _scaled_width(ink.get("outline_width", 1.0), font_px)
     rim_colour = _rgba(ink.get("outline_color"), (180, 214, 255, 240))
     rim_style = str(ink.get("outline_style") or "solid")
@@ -317,7 +377,8 @@ def paint_annotation_plan(
 
     # Rims first, so a marker or a name is never hidden by its own outline --
     # the same order paintLabels() uses on the page.
-    if rim_style != "none" and rim_width > 0.0:
+    rim_drawn = rim_style != "none" and rim_width > 0.0
+    if rim_drawn:
         for item in plan.items:
             outline = getattr(item, "outline", None)
             if not outline:
@@ -339,10 +400,25 @@ def paint_annotation_plan(
 
     # Markers.
     for item in plan.items:
+        # A region name set across its own formation is its own locator: the dot
+        # would sit in the middle of the text.  One that had to step aside -- or
+        # that lost its caption to the budget -- keeps the dot.
+        if getattr(item, "region", False) and item.labelled and not item.leader:
+            continue
+        shape = marker_shape(item, font_px, rim_drawn)
+        if shape is None:
+            continue
         lit = bool(getattr(item, "illuminated", True))
         draw = draws[lit]
         colour = item_colour(ink, item)
-        radius = max(1.4, float(marker_radius_px(item.radius_px, font_px)))
+        kind, radius, line_width = shape
+        if kind == "cross":
+            width = max(1, int(round(line_width)))
+            draw.line([(item.x - radius, item.y), (item.x + radius, item.y)],
+                      fill=colour, width=width)
+            draw.line([(item.x, item.y - radius), (item.x, item.y + radius)],
+                      fill=colour, width=width)
+            continue
         box = [item.x - radius, item.y - radius, item.x + radius, item.y + radius]
         draw.ellipse(box, fill=colour)
         if marker_stroke_px >= 0.6:
@@ -362,10 +438,12 @@ def paint_annotation_plan(
         bottom = top + float(item.label_h)
         mid_y = 0.5 * (top + bottom)
         if getattr(item, "leader", False):
-            end_x = min(max(float(item.x), left), right)
-            end_y = min(max(float(item.y), top), bottom)
-            draw.line([(float(item.x), float(item.y)), (end_x, end_y)],
-                      fill=colour, width=max(1, int(round(font_px * 0.09))))
+            start = leader_start(item)
+            if start is not None:
+                end_x = min(max(float(item.x), left), right)
+                end_y = min(max(float(item.y), top), bottom)
+                draw.line([start, (end_x, end_y)],
+                          fill=colour, width=max(1, int(round(font_px * 0.04))))
         text_x = left + 3.0
         if bold:
             # Pillow draws the character's own outlines; a face without a bold

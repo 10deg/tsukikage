@@ -28,7 +28,7 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'mirroredPlan', 'buildClassToggles', 'loadFeatureIndex', 'matchFeatures',
   'updateNoiseInfo', 'LIMITS', 'SETTING_FIELDS', 'afterSelectionChange',
   'lonLatToPixel', 'cameraFieldRadiusArcsec', 'LAND_CLASSES',
-  'collectSettings', 'drawMagnifier', 'magnifierView', 'splitterStart',
+  'collectSettings', 'drawMagnifier', 'magnifierView', 'selectionAspect', 'splitterStart',
   'splitterCeiling', 'SPLITTERS', 'setLeftHidden', 'leftIsHidden',
   'syncKmPxPresets', 'terrainLimitLabel', 'clearActivePatch', 'setActivePatch',
   'syncTerrainSourceFromRegion', 'selectionInsidePatch',
@@ -44,10 +44,12 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
   'selectionCorrected', 'effectiveSelectionArcsec', 'effectiveSelectionAspect',
-  'correctedBoundaryPixels',
+  'correctedBoundaryPixels', 'ellipseBoundarySegments', 'selectionEllipse',
+  'diskGeom', 'projectSelenographic', 'lonLatFromVector', 'skyGroundPoint',
+  'selectionCameraGeometry', 'selectionSkyHalfAngles',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'imageToScreen',
-  'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries',
+  'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries', 'skyOptions',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
@@ -128,7 +130,7 @@ const CTX_METHODS = [
   'createImageData', 'clip', 'rect', 'ellipse', 'bezierCurveTo', 'quadraticCurveTo',
 ];
 function context2d() {
-  const drawn = { fills: [], strokes: [], texts: [], images: [], paths: 0, transforms: [] };
+  const drawn = { fills: [], strokes: [], texts: [], images: [], ellipses: [], paths: 0, transforms: [] };
   const noop = () => {};
   const ctx = { canvas: null, drawn, fillStyle: '', strokeStyle: '', lineWidth: 1,
                 font: '', textAlign: '', textBaseline: '', globalAlpha: 1,
@@ -139,6 +141,7 @@ function context2d() {
   ctx.beginPath = () => { drawn.paths += 1; };
   ctx.fill = () => drawn.fills.push(ctx.fillStyle);
   ctx.stroke = () => drawn.strokes.push(ctx.strokeStyle);
+  ctx.ellipse = (...args) => drawn.ellipses.push(args);
   ctx.fillText = (text, x, y) => drawn.texts.push({ text, x, y, colour: ctx.fillStyle });
   ctx.drawImage = (img, ...rest) => drawn.images.push({ img, rest });
   ctx.setTransform = (...args) => drawn.transforms.push(args);
@@ -978,6 +981,13 @@ async function fetchStub(url, options) {
       blob: async () => ({ size: 123456, type: 'model/gltf-binary' }),
     };
   }
+  if (url.startsWith('/api/globe-texture')) {
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      blob: async () => ({ size: 64, type: 'image/png' }),
+      text: async () => '',
+    };
+  }
   const payload = respond(url, body);
   return {
     ok: !payload.error,
@@ -1030,13 +1040,14 @@ const sandbox = {
   setTimeout, clearTimeout, setInterval, clearInterval,
   fetch: fetchStub,
   Image: FakeImage,
+  URLSearchParams,
   Event: class { constructor(type) { this.type = type; } },
   AbortController: class {
     constructor() { this.signal = { aborted: false }; }
     abort() { this.signal.aborted = true; }
   },
   Blob: class { constructor(parts, options) { this.parts = parts; this.type = options && options.type; } },
-  URL: { createObjectURL: () => 'blob:stub' },
+  URL: { createObjectURL: () => 'blob:stub', revokeObjectURL() {} },
   atob: (text) => Buffer.from(text, 'base64').toString('binary'),
   btoa: (text) => Buffer.from(text, 'binary').toString('base64'),
   Uint8ClampedArray, ArrayBuffer, DataView, Uint8Array,
@@ -1123,6 +1134,38 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
 
   check('every class switch is a settings field too',
     T.SETTING_FIELDS.includes('class-mare') && T.SETTING_FIELDS.includes('class-rima'));
+  /* The selection is more than the three visible fields: its radius and aspect
+     are what make the model.  A settings file has to carry the whole thing, or
+     "load it again" exports a different solid. */
+  {
+    const saved = T.state.selection;
+    T.state.selection = { lon: 27.3, lat: -11.2, radiusFraction: 0.123,
+                          rotationDeg: 33, aspect: 0.6 };
+    const values = evalIn(sandbox, 'collectSettings()');
+    check('the settings file carries the whole selection',
+      values.selection &&
+      Math.abs(values.selection.radiusFraction - 0.123) < 1e-9 &&
+      Math.abs(values.selection.aspect - 0.6) < 1e-9 &&
+      Math.abs(values.selection.rotationDeg - 33) < 1e-9,
+      JSON.stringify(values.selection));
+    check('and the mesh options that decide the exported model',
+      ['mesh-scope', 'mesh-resolution', 'mesh-corrected',
+       'mesh-ellipse', 'mesh-size-mm', 'mesh-base-km', 'mesh-vertical',
+       'mesh-moon-size-mm', 'mesh-moon-resolution', 'mesh-blend-light',
+       'label-region', 'label-overlap']
+        .every((id) => values[id] !== undefined),
+      JSON.stringify(['mesh-scope', 'mesh-moon-size-mm', 'label-region']
+        .filter((id) => values[id] === undefined)));
+    T.state.selection = null;
+    T.applySettings(values);
+    check('a load rebuilds the same selection',
+      T.state.selection && Math.abs(T.state.selection.lon - 27.3) < 1e-9 &&
+      Math.abs(T.state.selection.lat + 11.2) < 1e-9 &&
+      Math.abs(T.state.selection.radiusFraction - 0.123) < 1e-9 &&
+      Math.abs(T.state.selection.aspect - 0.6) < 1e-9,
+      JSON.stringify(T.state.selection));
+    T.state.selection = saved;
+  }
   /* The date field is filled from the time zone field beside it, not from the
      browser's own idea of local time (which read as UTC+0 at UTC+8). */
   {
@@ -1587,6 +1630,21 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   set('label-satellites', true);
   fire('label-satellites', 'change');
   await tick();
+  /* 月海居中 is a layout input, not a style: the centred slot is another
+     candidate, so the server has to lay the names out again.  It is on by
+     default -- a sea's name belongs on the sea -- and either flip is a plan. */
+  check('月海居中 starts switched on',
+    document.getElementById('label-region').checked === true);
+  set('label-region', false);
+  fire('label-region', 'change');
+  await tick();
+  check('turning 月海居中 off is sent to the server',
+    fetchCalls.filter((c) => c.url === '/api/annotations').pop().body.region === false);
+  set('label-region', true);
+  fire('label-region', 'change');
+  await tick();
+  check('and back on asks for the centred layout again',
+    fetchCalls.filter((c) => c.url === '/api/annotations').pop().body.region === true);
   // 彩色 is the switch that used to be 统一配色 (one colour), with the sense
   // turned round: ticked = every class keeps its colour, unticked = one colour.
   check('彩色 on gives each class its own colour',
@@ -1626,6 +1684,44 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   set('marker-stroke', '#0c0e14');
   set('marker-stroke-width', 1);
   fire('marker-stroke', 'change');
+
+  console.log('');
+  console.log('locators and leaders follow the reference formatting');
+  /* MoonLabeler, which the layout comes from: the locator is a small dot, a
+     landing site is a crosshair, a feature with its rim drawn gets no dot, and
+     a leader leaves at the rim instead of crossing it. */
+  {
+    const shape = (source) => evalIn(sandbox, `(() => { ${source} })()`);
+    const dot = shape("return markerShape({x: 0, y: 0, class: 'crater', labelled: true}, 22);");
+    check('an ordinary feature gets a small dot, not a bubble',
+      dot.kind === 'dot' && dot.radius > 0 && dot.radius <= Math.max(2, 22 * 0.06),
+      JSON.stringify(dot));
+    const cross = shape("return markerShape({x: 0, y: 0, class: 'statio', labelled: true}, 22);");
+    check('a landing site is a crosshair',
+      cross.kind === 'cross' && cross.radius > dot.radius && cross.width > 0,
+      JSON.stringify(cross));
+    const rimmed = shape("return markerShape({x: 0, y: 0, class: 'crater', labelled: true, "
+      + "outline: [[0, 0], [10, 0], [10, 10]]}, 22);");
+    check('a feature with its rim drawn gets no dot',
+      rimmed.kind === 'none', JSON.stringify(rimmed));
+    const region = shape("return markerShape({x: 0, y: 0, class: 'mare', labelled: true, region: true, "
+      + "leader: false}, 22);");
+    check('a centred region name gets no dot', region.kind === 'none', JSON.stringify(region));
+    const pointed = shape(
+      "return leaderStart({x: 100, y: 100, label_x: 160, label_y: 96, label_w: 40, "
+      + "label_h: 12, outline: [[60, 100], [140, 100], [140, 140], [60, 140]]});");
+    check('a leader leaves a rimmed feature at the rim',
+      pointed && Math.abs(pointed.x - 140) < 2 && Math.abs(pointed.y - 100) < 1,
+      JSON.stringify(pointed));
+    const inside = shape(
+      "return leaderStart({x: 100, y: 100, label_x: 62, label_y: 96, label_w: 20, "
+      + "label_h: 12, outline: [[60, 100], [140, 100], [140, 140], [60, 140]]});");
+    check('and a name inside the rim gets no leader at all', inside === null, String(inside));
+    const plain = shape(
+      "return leaderStart({x: 100, y: 100, label_x: 160, label_y: 96, label_w: 40, label_h: 12});");
+    check('an unrimmed feature keeps a leader from its dot',
+      plain && plain.x === 100 && plain.y === 100, JSON.stringify(plain));
+  }
 
   console.log('');
   console.log('the geometric overlays need no server');
@@ -1717,9 +1813,18 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const match = planText.match(/长边尺寸 (\d+) mm 时匹配当前最高分辨率/);
     check('the plan says how large the model must be to match the source at 768',
       /模型 1000 ×/.test(planText) && /采样 768/.test(planText) &&
-      /1 mm = /.test(planText) &&
+      /长边 1000 mm = /.test(planText) &&
       !!match && Number(match[1]) > 1000,
       planText);
+  }
+  {
+    /* 采样's hover text has to say what the number *is*: the spacing on the
+       printed model and the triangle count, not "more is more detail". */
+    const title = document.getElementById('mesh-resolution').title;
+    check('采样 spells out what each choice means',
+      /128 → 长边 128 点/.test(title) && /每点 [\d.]+ mm/.test(title) &&
+      /万三角面/.test(title) && /匹配当前数据源/.test(title),
+      title.split('\n').slice(0, 2).join(' | '));
   }
   set('mesh-size-mm', 100);
   fire('mesh-size-mm', 'change');
@@ -1746,10 +1851,6 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('mesh-status').textContent);
   set('mesh-corrected', true);
   fire('mesh-corrected', 'change');
-  check('the corrected box locks the projection switch on',
-    document.getElementById('mesh-corrected').checked === true &&
-    document.getElementById('mesh-projection').checked === true &&
-    document.getElementById('mesh-projection').disabled === true);
   check('the page knows the box is the corrected one',
     T.selectionCorrected() === true);
   const correctedOutline = T.correctedBoundaryPixels();
@@ -1795,19 +1896,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     correctedCall ? JSON.stringify(correctedCall.body.selection) : 'no call');
   set('mesh-corrected', false);
   fire('mesh-corrected', 'change');
-  check('switching it off unlocks the projection switch again',
-    document.getElementById('mesh-projection').disabled === false);
-  set('mesh-projection', false);
-  fire('mesh-projection', 'change');
   fire('mesh-export', 'click');
   await tick();
   await tick();
   const plainCall = fetchCalls.filter((call) => call.url === '/api/mesh').pop();
-  check('turning projection off is sent to the server',
-    !!plainCall && plainCall.body.mesh.projection === false,
-    plainCall ? JSON.stringify(plainCall.body.mesh) : 'no call');
-  set('mesh-projection', true);
-  fire('mesh-projection', 'change');
+  check('an uncorrected box is still sent as a ground-plane model',
+    !!plainCall && plainCall.body.mesh.projection === true &&
+    plainCall.body.selection.corrected === false,
+    plainCall ? JSON.stringify(plainCall.body) : 'no call');
   fire('mesh-export-glb', 'click');
   await tick();
   await tick();
@@ -1838,6 +1934,47 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     /\.blend$/.test(document.getElementById('mesh-download').download),
     document.getElementById('mesh-status').textContent + ' / ' +
     document.getElementById('mesh-download').download);
+  console.log('');
+  console.log('the 3D reset and the ellipse orientation');
+  {
+    const saved = T.state.selection;
+    set('mesh-ellipse', false);
+    set('mesh-corrected', false);
+    fire('mesh-ellipse', 'change');
+    T.state.selection = { ...saved, rotationDeg: 42 };
+    fire('mesh-reset', 'click');
+    check('复位 clears a square box rotation',
+      T.state.selection.rotationDeg === 0,
+      String(T.state.selection.rotationDeg));
+
+    set('mesh-ellipse', true);
+    set('mesh-corrected', true);
+    fire('mesh-ellipse', 'change');
+    T.state.selection = { ...T.state.selection, aspect: 0.6, rotationDeg: 33 };
+    fire('mesh-reset', 'click');
+    check('on an ellipse 复位 also restores the circle',
+      Math.abs(T.state.selection.aspect - 1) < 1e-9 &&
+      T.state.selection.rotationDeg === 0,
+      `${T.state.selection.aspect} / ${T.state.selection.rotationDeg}`);
+
+    // Switching from a rotated, non-square box to a corrected ellipse keeps
+    // the long side's screen direction by adding a roll.
+    set('mesh-ellipse', false);
+    fire('mesh-ellipse', 'change');
+    set('mesh-corrected', true);
+    T.state.selection = { lon: 40, lat: 70, radiusFraction: 0.06,
+                          rotationDeg: 0, aspect: 2 };
+    set('mesh-ellipse', true);
+    fire('mesh-ellipse', 'change');
+    check('a corrected ellipse inherits the box long-side direction',
+      Math.abs(T.state.selection.rotationDeg) > 0.01,
+      String(T.state.selection.rotationDeg));
+    set('mesh-ellipse', false);
+    set('mesh-corrected', false);
+    fire('mesh-ellipse', 'change');
+    T.state.selection = saved;
+  }
+
   set('mesh-scope', 'moon');
   fire('mesh-scope', 'change');
   check('the whole-Moon scope shows its size/resolution controls and hides STL',
@@ -2371,7 +2508,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('地貌 sends a complete annotation block',
       ann.on === true && (ann.classes === null || Array.isArray(ann.classes)) &&
       ann.font_px > 0 && ann.class_colors && 'crater' in ann.class_colors &&
-      ann.marker_stroke === '#0c0e14' && ann.marker_stroke_width === 1,
+      ann.marker_stroke === '#0c0e14' && ann.marker_stroke_width === 0.6,
       JSON.stringify(ann));
     check('and it is the same block the run will post',
       T.animationRequest().annotations.on === true);
@@ -2646,6 +2783,30 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('result-info').textContent);
 
   console.log('');
+  console.log('the full disk can be shown as a 3D globe');
+  {
+    const button = document.getElementById('view-3d');
+    button.fire('click');
+    check('the 3D button is an independent latch',
+      T.state.view3d === true && button.getAttribute('aria-pressed') === 'true');
+    check('the 2D selection and name layers are hidden',
+      document.getElementById('overlay').hidden === true &&
+      document.getElementById('labels-disk').hidden === true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    check('the low-resolution globe texture is loaded once',
+      Boolean(T.state.globeTexture) &&
+      fetchCalls.filter((call) => call.url.startsWith('/api/globe-texture')).length === 1,
+      JSON.stringify({ texture: Boolean(T.state.globeTexture),
+        loading: T.state.globeTextureLoading, key: T.state.globeTextureKey,
+        calls: fetchCalls.filter((call) => call.url.startsWith('/api/globe-texture')).map((call) => call.url) }));
+    button.fire('click');
+    check('turning 3D off returns the ordinary preview',
+      T.state.view3d === false &&
+      document.getElementById('overlay').hidden === false &&
+      document.getElementById('labels-disk').hidden === false);
+  }
+
+  console.log('');
   console.log('the live close-up is locked to the box');
   /* The regression: it used to follow the pointer, and the pointer was mapped
      to image pixels as if the picture filled its box corner to corner -- so its
@@ -2667,6 +2828,32 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('moving the pointer does not change it',
     document.getElementById('magnify-info').textContent === captionBefore,
     document.getElementById('magnify-info').textContent);
+  /* A corrected ellipse whose pixel cache cannot be read must fall back to the
+     ordinary crop, and the ellipse mask must be centred on the window -- not
+     on the source-pixel centre, which filled the whole window black. */
+  {
+    const saved = T.state.selection;
+    const ellipseBefore = document.getElementById('mesh-ellipse').checked;
+    const correctedBefore = document.getElementById('mesh-corrected').checked;
+    set('mesh-ellipse', true);
+    set('mesh-corrected', true);
+    T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.08,
+                          rotationDeg: 0, aspect: 1 };
+    T.drawMagnifier();
+    const ellipses = magnifyCanvas._ctx.drawn.ellipses;
+    const last = ellipses.length ? ellipses[ellipses.length - 1] : null;
+    check('the fallback ellipse mask is centred in the window',
+      !!last && last[0] === 0 && last[1] === 0 && last[2] > 0,
+      JSON.stringify(last));
+    const live = T.magnifierView(400, 300);
+    check('the live window has the same field of view as the render',
+      Math.abs(live.height / live.width - T.selectionAspect()) < 0.01,
+      `${live.width}x${live.height} vs ${T.selectionAspect()}`);
+    T.state.selection = saved;
+    set('mesh-ellipse', ellipseBefore);
+    set('mesh-corrected', correctedBefore);
+  }
+
   /* 经纬度：a floating readout in the picture's bottom-right corner, not a
      cell in the footer.  It follows the pointer, and a selected landform pins
      it to that feature's own marker until the selection goes. */
@@ -2841,6 +3028,26 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     Math.abs(wide.width / wide.height - 1 / 0.4) < 0.05 && wide.height <= 100,
     `${wide.width}×${wide.height}`);
   T.state.selection = { ...T.state.selection, aspect };
+  /* 椭圆选框 masks the high-resolution render on the server; the live window
+     has to show the same field, or it previews a picture the export will not
+     produce. */
+  {
+    const saved = T.state.selection;
+    T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.1,
+                          rotationDeg: 0, aspect: 1 };
+    set('mesh-ellipse', false);
+    T.drawMagnifier();
+    const plain = document.getElementById('magnify')._ctx.drawn.fills.length;
+    set('mesh-ellipse', true);
+    T.drawMagnifier();
+    const masked = document.getElementById('magnify')._ctx.drawn.fills.length;
+    check('the live close-up is masked to the ellipse too',
+      masked > plain, `${plain} -> ${masked}`);
+    set('mesh-ellipse', false);
+    T.state.selection = saved;
+    T.drawMagnifier();
+  }
+
   /* Rotation is the *frame's*, so the drawing turns the image into the box's
      axes rather than turning the window's contents. */
   T.state.selection = { ...T.state.selection, rotationDeg: 30 };
@@ -3001,6 +3208,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('zooming the geometry pane zooms the processed one',
     T.views.raw.zoom === 3 && T.views.proc.zoom === 3,
     `${T.views.raw.zoom} / ${T.views.proc.zoom}`);
+  {
+    const rawCanvas = document.getElementById('raw');
+    const fitW = T.views.raw.fitW;
+    check('close-up zoom changes the canvas CSS size, not a compositor transform',
+      rawCanvas.style.transform === 'none'
+      && parseFloat(rawCanvas.style.width) > fitW * 2.5,
+      `${rawCanvas.style.transform} / ${rawCanvas.style.width} / fit ${fitW}`);
+  }
   T.setZoom('proc', 1);
   check('and the other way round',
     T.views.raw.zoom === 1 && T.views.proc.zoom === 1);
@@ -3469,6 +3684,45 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('the × takes the ruler off the picture',
       document.getElementById('mark-ruler').checked === false &&
       evalIn(sandbox, 'rulerOn()') === false);
+  }
+
+  console.log('');
+  console.log('the scale bar is a layout obstacle');
+  /* The bar is the one thing on the disk that is drawn by hand in frame pixels
+     and can be dragged anywhere, so the layout has to be told where it is --
+     and told again when it moves or goes away. */
+  {
+    const diskAsk = () => fetchCalls
+      .filter((c) => c.url === '/api/annotations' && c.body.frame === 'disk').pop();
+    T.state.labelsOn = true;
+    set('mark-ruler', true);
+    fire('mark-ruler', 'change');
+    await tick();
+    const rects = diskAsk().body.obstacles;
+    check('showing the bar asks the layout to keep clear of it',
+      Array.isArray(rects) && rects.length === 1, JSON.stringify(rects));
+    const frameWidth = evalIn(sandbox, 'DISK.width');
+    const bar = evalIn(sandbox, 'rulerGeometry(diskGeom(), DISK.width, DISK.height)');
+    check('the reserved box covers the bar, in frame pixels',
+      rects && rects[0][2] >= bar.length && Math.abs(rects[0][0] - bar.left) < 20,
+      JSON.stringify({ rect: rects && rects[0],
+                       bar: { left: bar.left, top: bar.top, length: bar.length } }));
+    // A drag of the bar is a new box, so the names are laid out again around it.
+    const before = fetchCalls.filter((c) => c.url === '/api/annotations').length;
+    evalIn(sandbox, 'ruler.x = 0.5');
+    evalIn(sandbox, 'overlay.drag = { kind: "ruler" }; overlayUp()');
+    await tick();
+    check('moving the bar re-plans the disk',
+      fetchCalls.filter((c) => c.url === '/api/annotations').length > before);
+    check('and the new box follows it',
+      Math.abs(diskAsk().body.obstacles[0][0] - 0.5 * frameWidth) < 80,
+      JSON.stringify(diskAsk().body.obstacles));
+    set('mark-ruler', false);
+    fire('mark-ruler', 'change');
+    await tick();
+    check('hiding it frees the space again',
+      diskAsk().body.obstacles.length === 0,
+      JSON.stringify(diskAsk().body.obstacles));
   }
 
   console.log('');
@@ -4852,6 +5106,51 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   }
 
   console.log('');
+  console.log('a dragged selection follows the pointer in pixels');
+  {
+    const start = { lon: 10, lat: 20, radiusFraction: 0.05, rotationDeg: 0, aspect: 1 };
+    const origin = T.lonLatToPixel(10, 20);
+    const moved = evalIn(sandbox,
+      `movedSelection(${JSON.stringify(start)}, 40, -25)`);
+    const after = moved ? T.lonLatToPixel(moved.lon, moved.lat) : null;
+    check('the box centre lands the pointer distance away',
+      after && Math.abs(after.x - (origin.x + 40)) < 0.2 &&
+      Math.abs(after.y - (origin.y - 25)) < 0.2,
+      JSON.stringify({ origin, after }));
+    /* The old code added a lon/lat delta; near the limb that is not the same
+       pixel distance, which is what a reader saw as the box lagging behind
+       the cursor. */
+    const nearLimb = { ...start, lon: 70, lat: 0 };
+    const limbOrigin = T.lonLatToPixel(70, 0);
+    const slid = evalIn(sandbox,
+      `movedSelection(${JSON.stringify(nearLimb)}, -18, 10)`);
+    const limbAfter = slid ? T.lonLatToPixel(slid.lon, slid.lat) : null;
+    check('and it does so near the limb, where the projection bends',
+      limbAfter && Math.abs(limbAfter.x - (limbOrigin.x - 18)) < 0.3 &&
+      Math.abs(limbAfter.y - (limbOrigin.y + 10)) < 0.3,
+      JSON.stringify({ limbOrigin, limbAfter }));
+  }
+
+  console.log('');
+  console.log('the sky chart\'s tracks and frame can be put away');
+  {
+    const all = T.skyOptions();
+    check('the three switches start on',
+      all.moonTrack === true && all.sunTrack === true && all.phaseFrame === true,
+      JSON.stringify(all));
+    set('sky-moon-track', false);
+    set('sky-sun-track', false);
+    set('sky-phase-frame', false);
+    const none = T.skyOptions();
+    check('and each one reaches the painter',
+      none.moonTrack === false && none.sunTrack === false && none.phaseFrame === false,
+      JSON.stringify(none));
+    set('sky-moon-track', true);
+    set('sky-sun-track', true);
+    set('sky-phase-frame', true);
+  }
+
+  console.log('');
   console.log('the sky chart keeps its geometry honest');
   {
     const high = {
@@ -4898,6 +5197,115 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     }
     check('labels that start on top of one another are pushed apart',
       placed.length === 3 && !overlaps, JSON.stringify(placed));
+  }
+
+  console.log('');
+  console.log('an elliptical selection is a ground patch on the Moon');
+  /* The ellipse is measured on the ground, so moving it towards the limb
+     foreshortens it.  Its centre is capped at the point where its far edge
+     touches the limb: it may hug the edge, but it is never cut by it. */
+  {
+    const saved = T.state.selection;
+    const ellipseBefore = document.getElementById('mesh-ellipse').checked;
+    const correctedBefore = document.getElementById('mesh-corrected').checked;
+    set('mesh-ellipse', true);
+    set('mesh-corrected', true);
+    const boundary = (lon, radiusFraction) => {
+      T.state.selection = { lon, lat: 0, radiusFraction, rotationDeg: 0, aspect: 1 };
+      const result = evalIn(sandbox, 'ellipseBoundarySegments()');
+      const g = evalIn(sandbox, 'diskGeom()');
+      let maxR = 0;
+      let count = 0;
+      for (const seg of (result ? result.segments : [])) {
+        for (const point of seg) {
+          maxR = Math.max(maxR, Math.hypot(point.x - g.cx, point.y - g.cy) / g.radius);
+          count += 1;
+        }
+      }
+      return { result, maxR, count };
+    };
+    const middle = boundary(0, 0.2);
+    check('a selection in the middle is a closed ring entirely on the disk',
+      middle.result && middle.result.closed && middle.maxR < 0.6,
+      JSON.stringify({ closed: middle.result && middle.result.closed, maxR: middle.maxR }));
+    const edge = boundary(88, 0.4);
+    check('at the edge the boundary is one closed loop that reaches the limb',
+      edge.result && edge.result.closed && edge.result.segments.length === 1
+      && edge.maxR > 0.99 && edge.maxR <= 1.001,
+      JSON.stringify({ closed: edge.result && edge.result.closed, maxR: edge.maxR,
+                       count: edge.count }));
+    const past = boundary(95, 0.5);
+    check('pushed past the limb its centre is pulled back, not clipped',
+      past.result && past.result.closed && past.maxR > 0.98 && past.maxR <= 1.001,
+      JSON.stringify({ closed: past.result && past.result.closed, maxR: past.maxR,
+                       count: past.count }));
+    check('and the selection centre actually moved inward',
+      T.state.selection.lon < 94, String(T.state.selection.lon));
+    T.state.selection = saved;
+    set('mesh-ellipse', ellipseBefore);
+    set('mesh-corrected', correctedBefore);
+  }
+
+  console.log('');
+  console.log('an uncorrected ellipse is the classic sky-plane shape');
+  {
+    const saved = T.state.selection;
+    set('mesh-ellipse', true);
+    set('mesh-corrected', false);
+    T.state.selection = { lon: 95, lat: 0, radiusFraction: 0.2,
+                          rotationDeg: 0, aspect: 1 };
+    const boundary = T.ellipseBoundarySegments();
+    check('it may run past the limb without its centre being pulled in',
+      boundary && T.state.selection.lon === 95,
+      `${boundary ? boundary.closed : null} ${T.state.selection.lon}`);
+    T.state.selection = saved;
+    set('mesh-corrected', false);
+  }
+
+  console.log('');
+  console.log('the ellipse mask stays in the frame while the picture turns');
+  /* The close-up rotates the picture into the selection's axes and masks it
+     with the same projected ellipse.  Turning the selection must therefore
+     turn the boundary on the disk and the picture by the same angle, leaving
+     the mask still.  Compare the mask's bounding box at two angles. */
+  {
+    const saved = T.state.selection;
+    const correctedBefore = document.getElementById('mesh-corrected').checked;
+    set('mesh-ellipse', true);
+    set('mesh-corrected', true);
+    T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.08,
+                          rotationDeg: 0, aspect: 1 };
+    const geom = T.diskGeom();
+    const centre = T.lonLatToPixel(0, 0);
+    const bounds = (rotationDeg) => {
+      T.state.selection = { ...T.state.selection, rotationDeg };
+      const boundary = T.ellipseBoundarySegments();
+      if (!boundary || !boundary.closed) return null;
+      const r = rotationDeg * Math.PI / 180;
+      const c = Math.cos(r), sn = Math.sin(r);
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const p of boundary.segments[0]) {
+        const dx = p.x - centre.x, dy = p.y - centre.y;
+        const x = dx * c - dy * sn;
+        const y = dx * sn + dy * c;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+        y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+      return { x0, x1, y0, y1 };
+    };
+    const level = bounds(0);
+    const turned = bounds(35);
+    check('the projected boundary closes at both angles',
+      level && turned, JSON.stringify({ level, turned }));
+    if (level && turned) {
+      const drift = Math.max(
+        Math.abs(level.x0 - turned.x0), Math.abs(level.x1 - turned.x1),
+        Math.abs(level.y0 - turned.y0), Math.abs(level.y1 - turned.y1));
+      check('and its screen bounding box does not rotate',
+        drift < 1.0, `drift ${drift.toFixed(3)} px`);
+    }
+    T.state.selection = saved;
+    set('mesh-corrected', correctedBefore);
   }
 
   console.log('');

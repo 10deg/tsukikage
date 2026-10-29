@@ -231,13 +231,15 @@
               </label>
               <label class="check inline" title="文字描边设置">描边
                 <input type="color" id="text-stroke" value="#0c0e14">
-                <input type="number" id="text-stroke-width" min="0" max="6" step="0.5" value="2">
+                <input type="number" id="text-stroke-width" min="0" max="6" step="0.1" value="1.2">
               </label>
               <!-- 标注点 = 图上那个小圆点。它的描边和文字描边是两件事：文字描边
-                   是为了读得出来，圆点的描边是为了在地貌上留一个位置记号。 -->
+                   是为了读得出来，圆点的描边是为了在地貌上留一个位置记号。
+                   参考 MoonLabeler，圆点很小、默认只有一根发丝边；已有轮廓圈的
+                   地貌不画圆点，着陆点画成十字。 -->
               <label class="check inline" title="标注点描边设置">标注点描边
                 <input type="color" id="marker-stroke" value="#0c0e14">
-                <input type="number" id="marker-stroke-width" min="0" max="3" step="0.1" value="1">
+                <input type="number" id="marker-stroke-width" min="0" max="3" step="0.1" value="0.6">
               </label>
               <label class="check inline">
                 <input type="checkbox" id="text-bold">
@@ -266,6 +268,13 @@
               <label class="check inline" title="停用避让算法，允许标注有重叠">
                 <input type="checkbox" id="label-overlap">
                 <span>停用避让</span>
+              </label>
+              <!-- 区域名（月海、月湖、月湾、月沼）压在自身区域中央，像纸图那样；
+                   默认就是压上去的，关掉后跟其他地貌一样在区域外引一条线。 -->
+              <label class="check inline"
+                     title="月海、月湖、月湾、月沼的名称写在区域中央，不引线">
+                <input type="checkbox" id="label-region" checked>
+                <span>月海居中</span>
               </label>
               <!-- 手动标记是读者自己按 Ctrl 点出来的锚点，不是地名库的一部分；
                    清空只清这些点，不动地貌标注的分类与位置。 -->
@@ -329,8 +338,8 @@
           <canvas id="overlay"></canvas>
           <canvas id="labels-disk" class="labels"></canvas>
           <div class="busy" id="disk-busy">渲染中…</div>
-          <!-- 右下角一行：选框坐标 + 实时经纬度。选框坐标用与「预览」
-               相同的浮层格式，右边缘与经纬度读数对齐。 -->
+          <!-- 选框坐标在左下角，实时经纬度在右下角，底边相平；选框坐标用
+               与「预览」相同的浮层格式。 -->
           <div class="disk-bottom-hud">
             <div class="selection-inputs disk-selection">
               <label>中心经度 <span class="en">Lon</span>
@@ -353,6 +362,7 @@
 
           <!-- 图窗左上角：预览用的渲染分辨率。既可从下拉里挑给定档位，也可
                直接键入任意像素数（上限由服务端给出）。 -->
+          <div class="view-toolbar">
           <div class="view-tools" id="preview-tools">
             <label class="check inline" title="整月面预览的分辨率（px），分辨率越高渲染越慢。">
               <span>预览</span>
@@ -400,6 +410,9 @@
                 <option value="1.8">1.8 px</option>
               </select>
             </label>
+          </div>
+          <button class="ghost mini view-3d" id="view-3d" aria-pressed="false"
+                  title="把全月面预览切换为可旋转的低倍 3D 球面">3D</button>
           </div>
 
           <!-- 图窗右上角：缩放。 -->
@@ -1030,85 +1043,80 @@
           <!-- 3D模型：成像模拟 / 后期处理之后的第三种输出。不是第三张照片，
                而是当前选框的实体切片。 -->
           <div class="train-pane" id="proc-model" hidden>
-            <div class="param-row">
-              <span class="slider-label">范围</span>
-              <select id="mesh-scope">
-                <option value="selection" selected>当前选框</option>
-                <option value="moon">全月面</option>
-              </select>
+            <div class="grid2">
+              <label>范围 <span class="en">Scope</span>
+                <select id="mesh-scope">
+                  <option value="selection" selected>当前选框</option>
+                  <option value="moon">全月面</option>
+                </select>
+              </label>
+              <label title="打印模型长边的地面长度；短边按选框宽高比取整">长边尺寸 mm <span class="en">Long side</span>
+                <input type="number" id="mesh-size-mm" value="100" min="5" max="10000" step="1">
+              </label>
             </div>
-            <p class="hint" id="mesh-plan" hidden></p>
             <div id="mesh-selection-controls">
-            <div class="param-row">
-              <span class="slider-label">长边尺寸</span>
-              <input type="number" id="mesh-size-mm" value="100" min="5" max="2000" step="1">
-              <span class="unit">mm</span>
-            </div>
-            <div class="param-row"
-                 title="底部平面距离选框内 DEM 最低点多少公里；这是模型的底座厚度">
-              <span class="slider-label">底部厚度</span>
-              <input type="number" id="mesh-base-km" value="2" min="0" max="100" step="0.1">
-              <span class="unit">km</span>
-            </div>
-            <div class="param-row"
-                 title="只放大高度方向；1 是物理正确值，起伏太小、想打印得更明显时可以调高">
-              <span class="slider-label">垂向夸张</span>
-              <input type="number" id="mesh-vertical" value="1" min="0.1" max="20" step="0.1">
-              <span class="unit">×</span>
-            </div>
-            <div class="param-row"
-                 title="沿长边的采样数；匹配当前数据源按当前 DEM 的原生分辨率计算采样数。">
-              <span class="slider-label">采样</span>
-              <select id="mesh-resolution">
-                <option value="auto" selected>匹配当前数据源</option>
-                <option value="128">128</option>
-                <option value="256">256</option>
-                <option value="384">384</option>
-                <option value="512">512</option>
-                <option value="768">768</option>
-              </select>
-              <span class="unit">长边</span>
-            </div>
-            <label class="check">
-              <input type="checkbox" id="mesh-projection" checked>
-              <span>投影修正</span>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="mesh-corrected">
-              <span>使用带投影修正的选框</span>
-            </label>
-            </div>
-            <div id="mesh-moon-controls" hidden>
-              <div class="param-row">
-                <span class="slider-label">直径</span>
-                <input type="number" id="mesh-moon-size-mm" value="200" min="5" max="2000" step="1">
-                <span class="unit">mm</span>
+              <div class="grid2">
+                <label title="底部平面距离选框内 DEM 最低点多少公里；这是模型的底座厚度">底部厚度 km <span class="en">Base</span>
+                  <input type="number" id="mesh-base-km" value="2" min="0" max="100" step="0.1">
+                </label>
+                <label title="只放大高度方向；1 是物理正确值，起伏太小、想打印得更明显时可以调高">垂向夸张 × <span class="en">Vertical</span>
+                  <input type="number" id="mesh-vertical" value="1" min="0.1" max="20" step="0.1">
+                </label>
               </div>
-              <div class="param-row" title="赤道方向的网格采样数；纹理宽度为其两倍，最大 2048">
-                <span class="slider-label">分辨率</span>
+              <div class="grid2">
+                <label title="沿长边的采样数；匹配当前数据源按当前 DEM 的原生分辨率计算采样数。">采样 <span class="en">Samples</span>
+                  <select id="mesh-resolution"
+                          title="采样：沿模型长边方向的 DEM 网格采样点数。数值越高，地形细节越多、文件越大；「匹配当前数据源」按 DEM 原生分辨率计算。">
+                    <option value="auto" selected>匹配当前数据源</option>
+                    <option value="128">128</option>
+                    <option value="256">256</option>
+                    <option value="384">384</option>
+                    <option value="512">512</option>
+                    <option value="768">768</option>
+                  </select>
+                </label>
+                <label id="mesh-lighting-row" title="生成 Blender 预览场景时使用的默认光照">光照 <span class="en">Lighting</span>
+                  <select id="mesh-blend-light">
+                    <option value="low">低角度光照</option>
+                    <option value="phase" selected>当前月相光照</option>
+                  </select>
+                </label>
+              </div>
+              <div class="row mesh-shape-row">
+                <label class="check inline" title="用椭圆选框代替矩形选框；模型按地面圆形底面生成">
+                  <input type="checkbox" id="mesh-ellipse">
+                  <span>椭圆选框</span>
+                </label>
+                <label class="check inline">
+                  <input type="checkbox" id="mesh-corrected">
+                  <span>使用带投影修正的选框</span>
+                </label>
+                <button class="ghost mini" id="mesh-reset"
+                        title="把选框方向复位；椭圆选框同时恢复为正圆">复位</button>
+              </div>
+            </div>
+            <div class="grid2" id="mesh-moon-controls" hidden>
+              <label>直径 mm <span class="en">Diameter</span>
+                <input type="number" id="mesh-moon-size-mm" value="200" min="5" max="2000" step="1">
+              </label>
+              <label title="赤道方向的网格采样数；纹理宽度为其两倍，最大 2048">分辨率 <span class="en">Resolution</span>
                 <select id="mesh-moon-resolution">
                   <option value="512">512</option>
                   <option value="1024" selected>1024</option>
                   <option value="2048">2048</option>
                 </select>
-              </div>
+              </label>
             </div>
-            <div class="param-row" id="mesh-lighting-row">
-              <span class="slider-label">光照</span>
-              <select id="mesh-blend-light" title="生成 Blender 预览场景时使用的默认光照">
-                <option value="low">低角度光照</option>
-                <option value="phase" selected>当前月相光照</option>
-              </select>
-            </div>
-            <div class="row">
+            <div class="grid2 mesh-actions">
               <button class="primary" id="mesh-export">导出 STL <span class="en">Export STL</span></button>
               <button class="outline" id="mesh-export-glb"
                       title="带地貌纹理的 GLB（单位 m），可直接拖进 Blender 查看">导出 GLB <span class="en">Export GLB</span></button>
-              <button class="outline compact" id="mesh-export-blend"
+              <button class="outline compact wide" id="mesh-export-blend"
                       title="生成可直接用 Blender 打开的 .blend 预览场景（含纹理与无穷远太阳）">生成 Blender 预览场景</button>
-              <a class="download-link" id="mesh-download" hidden>下载文件</a>
             </div>
+            <a class="download-link" id="mesh-download" hidden>下载文件</a>
             <p class="hint" id="mesh-status" hidden></p>
+            <p class="hint" id="mesh-plan" hidden></p>
           </div>
 
           <div class="row proc-actions">
@@ -1451,6 +1459,18 @@
       <label class="check inline" title="在月亮与太阳之间连线，并标出该时刻的距角">
         <input type="checkbox" id="sky-elongation" checked>
         <span>距角连线</span>
+      </label>
+      <label class="check inline" title="显示月亮在天空中的轨迹">
+        <input type="checkbox" id="sky-moon-track" checked>
+        <span>月球轨迹</span>
+      </label>
+      <label class="check inline" title="显示太阳在天空中的轨迹">
+        <input type="checkbox" id="sky-sun-track" checked>
+        <span>太阳轨迹</span>
+      </label>
+      <label class="check inline" title="月相模拟图外侧的圆框">
+        <input type="checkbox" id="sky-phase-frame" checked>
+        <span>月相边框</span>
       </label>
       <label class="check inline" title="月亮较高、离太阳很远时，只画月亮的一段轨迹；太阳用箭头指示方向">
         <input type="checkbox" id="sky-closeup">

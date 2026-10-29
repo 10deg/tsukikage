@@ -381,6 +381,15 @@ _DEFAULT_FONT_PX = 13.0
 _OUTLINE_CLASSES = frozenset({"basin", "crater", "mare", "lacus", "sinus", "palus",
                                "lunar100"})
 
+#: Classes whose caption belongs **on** the formation instead of beside it.
+#: These are the named tracts of the Moon -- the maria, lakes, bays and marshes
+#: -- and a chart sets their names across the dark patch itself, not on a leader
+#: pointing into it.  The planner still needs the beside-the-feature candidates
+#: when the middle is taken by another caption, so this is a first choice, not
+#: a rule.  The set is the IAU families a reader recognises as areas; craters,
+#: mountains and rilles stay point features with a leader.
+_REGION_CLASSES = frozenset({"mare", "lacus", "sinus", "palus"})
+
 #: Classes whose marker may be recentred on the drawn rim.  Only the genuinely
 #: round ones: a mare's gazetteer diameter is the width of an irregular patch,
 #: and the centroid of a circle invented around it is not a better answer than
@@ -1204,6 +1213,10 @@ class Annotation:
     #: also be included without a caption when they would otherwise have lost
     #: their label to the budget.
     highlight: bool = False
+    #: True when the caption is set *across its own formation* -- a mare's name
+    #: on the mare, as a paper chart does it -- rather than beside it with a
+    #: leader.  Such a caption covers its own marker and carries no leader line.
+    region: bool = False
 
     @property
     def labelled(self) -> bool:
@@ -1232,6 +1245,7 @@ class Annotation:
             "label_h": round(self.label_h, 2),
             "leader": self.leader,
             "highlight": bool(self.highlight),
+            "region": bool(self.region),
             "outline": (
                 None if self.outline is None
                 else [[x, y] for x, y in self.outline]
@@ -1543,6 +1557,8 @@ def plan_annotations(
     focus: Optional[Dict[str, float]] = None,
     related: Optional[str] = None,
     lunar100: bool = False,
+    region: bool = False,
+    obstacles: Optional[Sequence[Tuple[float, float, float, float]]] = None,
 ) -> AnnotationPlan:
     """Choose the labels for one frame and lay them out.
 
@@ -1637,6 +1653,18 @@ def plan_annotations(
         it on, tagged existing places are painted in the Lunar 100 colour and
         the list's descriptive names are added; every locatable list entry also
         gets a marker even when the label budget is smaller than 97.
+    region
+        Set the names of the named **tracts** -- the maria, lakes, bays and
+        marshes of :data:`_REGION_CLASSES` -- across the formation itself
+        instead of beside it: the caption is centred on the feature's own
+        position and carries no leader, the way a chart writes a sea's name on
+        the sea.  Other families keep their beside-the-feature captions.
+    obstacles
+        Rectangles in frame pixels -- ``(x, y, width, height)`` -- that are
+        already on the picture and must stay legible: a legend, an inset, a
+        scale bar.  Captions and their leaders are laid out around them.  The
+        rectangles are only obstacles; they are not labels, so they never take a
+        name's slot.
     """
     if max_labels < 0:
         raise MoonlibError("max_labels cannot be negative.")
@@ -1960,16 +1988,26 @@ def plan_annotations(
             "height": label_height,
             "priority": order,
             "important": index in important_indices,
+            "region": bool(region) and groups.get(index) in _REGION_CLASSES,
         })
+    region_keys = {entry["key"] for entry in wanted if entry["region"]}
     if avoid_overlap:
         placements, _arranged_leaders, _omitted = arrange_labels(
-            wanted, frame.width, frame.height, gap=gap)
+            wanted, frame.width, frame.height, gap=gap, obstacles=obstacles or ())
     else:
         # 停用避让: every chosen name gets its nearest slot regardless of what
         # is already there.  The result can overlap, which is the point -- at
         # the highest densities the alternative is names that never appear.
         placements = {}
         for entry in wanted:
+            if entry["region"]:
+                # 停用避让 keeps a region caption's own rule: its name belongs on
+                # the formation, so it is set across the anchor instead of
+                # taking the first free slot beside it.
+                placements[entry["key"]] = _centred_label(
+                    entry["anchor"], float(entry["width"]), float(entry["height"]),
+                    frame.width, frame.height)
+                continue
             box = _place_label(
                 float(entry["anchor"][0]), float(entry["anchor"][1]),
                 float(entry["radius_px"]), float(entry["width"]),
@@ -2059,6 +2097,7 @@ def plan_annotations(
                 outline=outline,
                 feature_class=groups.get(index, "other"),
                 highlight=feature.name_en in related_names,
+                region=index in region_keys,
             )
         )
 
@@ -2144,6 +2183,26 @@ _LABEL_DIRECTIONS = (
     (0.7, 0.7),
     (-0.7, 0.7),
 )
+
+
+def _centred_label(
+    anchor: Tuple[float, float],
+    width: float,
+    height: float,
+    frame_width: float,
+    frame_height: float,
+) -> Tuple[float, float]:
+    """Where a region caption sits when it is set across its own formation.
+
+    Centred on the anchor and clamped into the frame; the caller keeps the
+    caption even when the box is wider than the frame, so the clamp is applied
+    to the *left edge* rather than to a negative maximum.
+    """
+    left = min(max(float(anchor[0]) - 0.5 * width, 0.0),
+               max(0.0, float(frame_width) - width))
+    top = min(max(float(anchor[1]) - 0.5 * height, 0.0),
+              max(0.0, float(frame_height) - height))
+    return left, top
 
 
 def _place_label(
@@ -2338,11 +2397,19 @@ class _Grid:
 
     The layout asks "what is near this candidate?" thousands of times; comparing
     every caption with every other one is what made a dense view slow.
+
+    Each key remembers the cells it occupies, so moving a caption during the
+    reflow leaves the old cells behind instead of shadowing them -- a stale
+    entry would make every later candidate near that spot pay for a caption that
+    is no longer there -- and dropping one is a lookup rather than a walk over
+    every bucket.
     """
 
     def __init__(self, cell: float) -> None:
         self.cell = max(8.0, float(cell))
         self.buckets: Dict[Tuple[int, int], Dict[Any, Any]] = {}
+        self.cells: Dict[Any, Tuple[Tuple[int, int], ...]] = {}
+        self.entries: Dict[Any, Tuple[Tuple[float, float, float, float], Any]] = {}
 
     def _keys(self, rect: Tuple[float, float, float, float], padding: float = 0.0):
         x0 = int((rect[0] - padding) // self.cell)
@@ -2354,20 +2421,31 @@ class _Grid:
                 yield gx, gy
 
     def put(self, key: Any, rect: Tuple[float, float, float, float], value: Any = None) -> None:
-        for cell in self._keys(rect):
-            self.buckets.setdefault(cell, {})[key] = (rect, value)
+        self.remove(key)
+        entry = (rect, value)
+        cells = tuple(self._keys(rect))
+        self.cells[key] = cells
+        self.entries[key] = entry
+        for cell in cells:
+            self.buckets.setdefault(cell, {})[key] = entry
 
     def remove(self, key: Any) -> None:
-        for bucket in self.buckets.values():
+        for cell in self.cells.pop(key, ()):
+            bucket = self.buckets.get(cell)
+            if bucket is None:
+                continue
             bucket.pop(key, None)
+            if not bucket:
+                del self.buckets[cell]
+        self.entries.pop(key, None)
 
     def near(self, rect: Tuple[float, float, float, float], padding: float = 0.0,
              exclude: Any = None) -> List[Any]:
         found: Dict[Any, Any] = {}
         for cell in self._keys(rect, padding):
-            for key, payload in self.buckets.get(cell, {}).items():
+            for key, entry in self.buckets.get(cell, {}).items():
                 if key != exclude:
-                    found[key] = payload
+                    found[key] = entry
         return list(found.values())
 
 
@@ -2379,9 +2457,18 @@ def candidate_rects(
     gap: float,
     outline: Optional[Sequence[Tuple[float, float]]] = None,
     reach: Sequence[float] = _LABEL_REACH,
+    region: bool = False,
 ) -> Iterator[Tuple[float, float, float, float]]:
-    """Every place a caption for one feature may be tried, best guess first."""
+    """Every place a caption for one feature may be tried, best guess first.
+
+    A *region* caption -- a mare's name, say -- may be set across the middle of
+    its own formation, so that centred box is tried before any of the positions
+    beside the feature.  It is still only a candidate: if another caption is
+    already there, the ordinary positions follow.
+    """
     ax, ay = float(anchor[0]), float(anchor[1])
+    if region:
+        yield (ax - 0.5 * width, ay - 0.5 * height, float(width), float(height))
     for reach in reach:
         for angle in _LABEL_ANGLES:
             radians = math.radians(angle)
@@ -2445,12 +2532,14 @@ def arrange_labels(
     gap: float = 8.0,
     *,
     max_labels: Optional[int] = None,
+    obstacles: Sequence[Tuple[float, float, float, float]] = (),
 ) -> Tuple[Dict[Any, Any], Dict[Any, Any], Set[Any]]:
     """Lay captions out so that none of them collide, and say which ones fit.
 
     Each request is a mapping with ``key``, ``anchor`` (x, y), ``radius_px``,
     ``width``, ``height`` and optionally ``outline``, ``priority`` (lower goes
-    first) and ``important``.  Returns ``(placements, leaders, omitted)``.
+    first), ``important`` and ``region``.  Returns ``(placements, leaders,
+    omitted)``.
 
     Two tiers, and the order between them is the point.  A landmark is placed
     against an **empty** picture: while it is being arranged, the only markers
@@ -2463,6 +2552,16 @@ def arrange_labels(
     Within each tier the placement is greedy in priority order, then reflowed
     until nothing moves, and an important caption that finds no compact position
     may search further out before it is given up on.
+
+    A request marked ``region`` names a tract rather than a point, so it may be
+    set **across its own formation**: the centred box is tried first, it may
+    cover its own marker, and a caption that ends up over its anchor is drawn
+    without a leader.
+
+    *obstacles* are rectangles in frame pixels that belong to something already
+    on the picture -- a legend, an inset, a scale bar.  Captions and leaders
+    treat them like any other caption: they are kept clear of, but they are not
+    candidates themselves and they never take a slot from a name.
     """
     ordered = sorted(wanted, key=lambda request: request.get("priority", 0))
     if max_labels is None:
@@ -2479,6 +2578,11 @@ def arrange_labels(
     leaders: Dict[Any, Any] = {}
     registered: Dict[Any, Any] = {}          # markers currently acting as obstacles
     every_marker: Dict[Any, Any] = {}        # every marker, obstacle or not
+    for index, rect in enumerate(obstacles):
+        # A tuple key cannot collide with a feature key (the plan uses integer
+        # indices; other callers use names), so an obstacle never shadows a name.
+        box = (float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3]))
+        text.put(("__obstacle__", index), box, box)
     for request in pool:
         radius = marker_radius_px(request["radius_px"], request["height"])
         ax, ay = request["anchor"]
@@ -2495,13 +2599,19 @@ def arrange_labels(
         placements[key] = rect
         leaders[key] = line
         text.put(key, rect, rect)
-        lines.put(key, _line_rect(line), line)
+        # A zero-length leader is not a line on the picture -- a region caption
+        # covering its own anchor has none -- so it must not reserve space.
+        if line[0] != line[2] or line[1] != line[3]:
+            lines.put(key, _line_rect(line), line)
+        else:
+            lines.remove(key)
 
     def options(request: Dict[str, Any], extended: bool = False):
         """Scored candidates: conflict-free ones only, cheapest first."""
         reach = _LABEL_REACH_EXTENDED if extended else _LABEL_REACH
         for rect in candidate_rects(request["anchor"], request["width"], request["height"],
-                                    request["radius_px"], gap, request.get("outline"), reach):
+                                    request["radius_px"], gap, request.get("outline"), reach,
+                                    region=bool(request.get("region"))):
             x, y, box_w, box_h = rect
             if x < gap or y < gap or x + box_w > width - gap or y + box_h > height - gap:
                 continue

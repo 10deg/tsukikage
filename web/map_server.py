@@ -35,6 +35,8 @@ import threading
 import time
 import traceback
 from collections import OrderedDict
+
+from PIL import Image
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -60,6 +62,11 @@ MAX_ZOOM = 8
 #: Tile-cache entries; a screenful at one zoom is a few dozen, and a reader
 #: panning around should not make the process grow without bound.
 TILE_CACHE = 384
+#: At and above this zoom the 64 ppd global pyramid is visibly coarser than the
+#: tile.  Cut a regional window from the best global raster instead of asking
+#: the small pyramid for detail that is not in it.
+DETAIL_ZOOM = 5
+DETAIL_CACHE = 8
 #: The map's own "largest useful" catalogue density, by zoom.  Below this the
 #: payload is all labels and no picture; above it the page is a wall of text.
 _MIN_DIAMETER_BY_ZOOM = {0: 220.0, 1: 120.0, 2: 70.0, 3: 35.0, 4: 15.0, 5: 6.0, 6: 2.5, 7: 1.0, 8: 0.0}
@@ -101,6 +108,9 @@ class LunarMapService:
         self._terrain = None
         self._features: Optional[List[Dict[str, Any]]] = None
         self._tiles: "OrderedDict[Tuple[Any, ...], bytes]" = OrderedDict()
+        self._detail: "OrderedDict[Tuple[int, int, int], Any]" = OrderedDict()
+        self._shadows: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+        self._detail_source = None
 
     # -- data ------------------------------------------------------------
     def terrain(self):
@@ -108,6 +118,73 @@ class LunarMapService:
             if self._terrain is None:
                 self._terrain = moonlib.open_terrain(include_albedo=True)
             return self._terrain
+
+    def _detail_source_path(self):
+        """The finest suitable global raster for a high-zoom regional window."""
+        if self._detail_source is not None:
+            return self._detail_source
+        try:
+            sources = moonlib.terrain.global_dem_sources()
+        except Exception:
+            sources = []
+        # SLDEM2015 is the 59 m product; the USGS 118 m mosaic is the fallback
+        # when only that is readable.  Never return the 64 ppd pyramid here:
+        # that is the very source this path exists to bypass.
+        chosen = None
+        for path, _km in sources:
+            name = Path(path).name.lower()
+            if "sldem" in name:
+                chosen = path
+                break
+            if "118m" in name and chosen is None:
+                chosen = path
+        if chosen is None and sources:
+            chosen = sources[0][0]
+        self._detail_source = chosen
+        return chosen
+
+    def _tile_terrain(self, zoom: int, x: int, y: int):
+        """Terrain for one tile: the baked pyramid, or a high-res window."""
+        if zoom < DETAIL_ZOOM:
+            return self.terrain()
+        key = (int(zoom), int(x), int(y))
+        with self._lock:
+            cached = self._detail.get(key)
+            if cached is not None:
+                self._detail.move_to_end(key)
+                return cached
+        source = self._detail_source_path()
+        if source is None:
+            return self.terrain()
+        lon, lat = _lonlat_grid(zoom, x, y)
+        cols, rows = _tile_counts(zoom)
+        d_lon = 360.0 / (cols * TILE_PX)
+        d_lat = 180.0 / (rows * TILE_PX)
+        # The cast-shadow grid reaches 16 base pixels to the sunward side of
+        # the tile; a two-pixel DEM window left it sampling outside its own
+        # terrain, which is why high-zoom shadows did not sit on the terrain
+        # they were drawn over.
+        margin_lon = 20.0 * d_lon
+        margin_lat = 20.0 * d_lat
+        try:
+            terrain = moonlib.terrain.open_region_box(
+                float(np.min(lon)) - margin_lon,
+                float(np.max(lon)) + margin_lon,
+                float(np.min(lat)) - margin_lat,
+                float(np.max(lat)) + margin_lat,
+                source=source,
+                terrain=self.terrain(),
+            )
+        except Exception:
+            # A missing or unreadable high-res raster must not take the map
+            # down; the baked pyramid still gives a picture.
+            terrain = self.terrain()
+        with self._lock:
+            self._detail[key] = terrain
+            self._detail.move_to_end(key)
+            while len(self._detail) > DETAIL_CACHE:
+                self._detail.popitem(last=False)
+        return terrain
 
     def features(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -172,6 +249,14 @@ class LunarMapService:
                 albedo_info["name"] = terrain.sources.albedo_path.name
             except Exception:
                 pass
+        detail_info = None
+        detail_source = self._detail_source_path()
+        if detail_source is not None:
+            detail_info = {"name": Path(detail_source).name}
+            for path, km in sources:
+                if Path(path).name == Path(detail_source).name:
+                    detail_info["km_per_px"] = float(km)
+                    break
         return {
             "ok": True,
             "service": "lunar-map",
@@ -182,6 +267,7 @@ class LunarMapService:
             "max_zoom": MAX_ZOOM,
             "tile_grid": "z=0 is 2 x 1 tiles; each zoom doubles",
             "dem": dem_info,
+            "detail_dem": detail_info,
             "albedo": albedo_info,
             "sources": sources,
             "feature_count": len(self.features()),
@@ -331,13 +417,90 @@ class LunarMapService:
                 "name_zh": phase.name_zh,
                 "name_en": phase.name_en,
                 "illumination_percent": float(phase.illuminated_percent_geo),
+                "phase_angle_deg": float(phase.phase_angle_geo_deg),
+                "age_days": float(phase.age_days),
             },
             "moon": {
                 "azimuth_deg": float(state.azimuth_deg),
                 "elevation_deg": float(state.elevation_deg),
                 "distance_km": float(state.geo_distance_km),
+                "topo_distance_km": float(state.topo_distance_km),
+                "angular_diameter_arcsec": float(state.angular_diameter_arcsec),
+                "ra_hours": float(state.ra_hours),
+                "dec_deg": float(state.dec_deg),
+                "elongation_deg": float(state.elongation_deg),
+                "sun_elevation_deg": float(state.sun_elevation_deg),
+                "velocity_kms": float(state.velocity_kms),
+                "light_time_s": float(state.light_time_s),
             },
         }
+
+    def _mean_light_vectors(self, zoom: int, x: int, y: int,
+                            light: Tuple[float, float]):
+        lon, lat = _lonlat_grid(zoom, x, y)
+        sun_lon = math.radians(float(light[0]))
+        sun_lat = math.radians(float(light[1]))
+        sx = math.cos(sun_lat) * math.cos(sun_lon)
+        sy = math.cos(sun_lat) * math.sin(sun_lon)
+        sz = math.sin(sun_lat)
+        lon_r = np.radians(lon)
+        lat_r = np.radians(lat)
+        east = -np.sin(lon_r) * sx + np.cos(lon_r) * sy
+        north = (
+            -np.sin(lat_r) * np.cos(lon_r) * sx
+            - np.sin(lat_r) * np.sin(lon_r) * sy
+            + np.cos(lat_r) * sz
+        )
+        up = (
+            np.cos(lat_r) * np.cos(lon_r) * sx
+            + np.cos(lat_r) * np.sin(lon_r) * sy
+            + np.sin(lat_r) * sz
+        )
+        return float(np.mean(east)), float(np.mean(north)), float(np.mean(up))
+
+    def _shadow_mask_for(self, zoom: int, x: int, y: int,
+                         light: Optional[Tuple[float, float]],
+                         terrain: Any = None) -> Optional[np.ndarray]:
+        """The shadow map for a tile, cached by tile and light.
+
+        Zoom 6 is the reference: from there on the shadow is cropped out of
+        that tile's map, so the high-zoom picture keeps the shadow shape the
+        reader already judged right and the 1024-cell march is not repeated for
+        every child tile.
+        """
+        if light is None:
+            return None
+        key = (zoom, x, y, round(float(light[0]), 4), round(float(light[1]), 4))
+        if key in self._shadows:
+            self._shadows.move_to_end(key)
+            return self._shadows[key]
+        if terrain is None:
+            terrain = self._tile_terrain(zoom, x, y)
+        east, north, up = self._mean_light_vectors(zoom, x, y, light)
+        norm = math.sqrt(east * east + north * north + up * up)
+        mask = None
+        if norm > 1e-12:
+            mask = self._cast_shadow_mask(
+                zoom, x, y, light, east / norm, north / norm, up / norm, terrain,
+            )
+        self._shadows[key] = mask
+        self._shadows.move_to_end(key)
+        while len(self._shadows) > 64:
+            self._shadows.popitem(last=False)
+        return mask
+
+    @staticmethod
+    def _crop_shadow(mask: Optional[np.ndarray], ix: int, iy: int,
+                     factor: int) -> Optional[np.ndarray]:
+        if mask is None or factor <= 1:
+            return mask
+        size = max(1, TILE_PX // factor)
+        crop = mask[iy * size:(iy + 1) * size, ix * size:(ix + 1) * size]
+        if crop.size == 0:
+            return None
+        image = Image.fromarray((np.clip(crop, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
+        return np.asarray(image.resize((TILE_PX, TILE_PX), Image.BILINEAR),
+                          dtype=np.float64) / 255.0
 
     # -- tiles -----------------------------------------------------------
     def tile(self, zoom: int, x: int, y: int,
@@ -363,11 +526,148 @@ class LunarMapService:
                 self._tiles.popitem(last=False)
         return png
 
+    def _cast_shadow_mask(
+        self,
+        zoom: int,
+        x: int,
+        y: int,
+        light: Tuple[float, float],
+        sun_east: float,
+        sun_north: float,
+        sun_up: float,
+        terrain: Any = None,
+    ) -> Optional[np.ndarray]:
+        """A 256x256 cast-shadow mask for one tile, or None when it is cheap to skip.
+
+        This is deliberately a *coarse* shadow map: the DEM is sampled on 64 or
+        128 cells, a short uphill march finds the horizon, and the result is
+        blurred on the way back to tile resolution.  It is not the renderer's
+        per-pixel ray march; it is the cheapest way to let a ridge or a crater
+        rim throw a shadow at low Sun without turning map tiles into a render
+        job.  Only low Sun benefits, so high Sun returns None before doing any
+        work.
+        """
+        from PIL import Image, ImageFilter
+
+        # Below z4 a tile covers tens of degrees.  The terrain under it is
+        # necessarily coarser than the shadow, and a binary cast shadow there
+        # is the "black grid" artefact: the honest low-zoom treatment is the
+        # smooth slope shading, not a blocky shadow map.  Cast shadows start
+        # where the tile can resolve them.
+        if zoom < 4:
+            return None
+        if not (math.radians(0.6) < math.asin(max(-1.0, min(1.0, sun_up))) < math.radians(18.0)):
+            return None
+        horizontal = math.hypot(sun_east, sun_north)
+        if horizontal <= 1e-6:
+            return None
+        sun_east /= horizontal
+        sun_north /= horizontal
+        altitude = math.asin(max(-1.0, min(1.0, sun_up)))
+        tan_alt = math.tan(altitude)
+        if not (tan_alt > 0.0):
+            return None
+
+        cols, rows = _tile_counts(zoom)
+        total_w = cols * TILE_PX
+        total_h = rows * TILE_PX
+        size = 256
+        halo = 32
+        cell = TILE_PX // size
+        n = size + 2 * halo
+
+        # Grid origins are aligned to the global base-pixel grid, so adjacent
+        # tiles sample the same shadow cells along their shared edge.
+        start_x = x * TILE_PX - halo * cell
+        start_y = y * TILE_PX - halo * cell
+        px = start_x + (np.arange(n, dtype=np.float64) + 0.5) * cell
+        py = start_y + (np.arange(n, dtype=np.float64) + 0.5) * cell
+        px = np.clip(px, 0.5, total_w - 0.5)
+        py = np.clip(py, 0.5, total_h - 0.5)
+        lon = -180.0 + px / total_w * 360.0
+        lat = 90.0 - py / total_h * 180.0
+        lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+        cell_km = math.radians(360.0 / total_w) * 1737.4
+        cell_km *= max(math.cos(math.radians(float(np.mean(lat)))), 0.08)
+        cell_km *= cell
+        if terrain is None:
+            terrain = self.terrain()
+        try:
+            level = int(terrain.dem.level_for_ground_scale(cell_km))
+        except Exception:
+            level = 0
+        level = max(0, min(level, int(getattr(terrain.dem, "n_levels", level + 1)) - 1))
+        heights = np.asarray(
+            terrain.dem.sample(lon_grid, lat_grid, level), dtype=np.float64
+        )
+        if heights.shape != lon_grid.shape:  # pragma: no cover - defensive
+            heights = np.broadcast_to(heights, lon_grid.shape).astype(np.float64)
+        if not np.isfinite(heights).any():
+            return None
+        heights = np.where(np.isfinite(heights), heights, np.nanmin(heights))
+
+        # Direction toward the Sun in integer shadow-grid coordinates.  The
+        # grid's row axis runs south, so north is negative row.
+        dx_km = math.radians(360.0 / total_w) * 1737.4 * cell * max(
+            math.cos(math.radians(float(np.mean(lat)))), 0.08
+        )
+        dy_km = math.radians(180.0 / total_h) * 1737.4 * cell
+        step_x = sun_east / max(dx_km, 1e-9)
+        step_y = -sun_north / max(dy_km, 1e-9)
+        step_norm = math.hypot(step_x, step_y)
+        if step_norm <= 1e-12:
+            return None
+        step_x /= step_norm
+        step_y /= step_norm
+        step_km = math.hypot(step_x * dx_km, step_y * dy_km)
+
+        yy, xx = np.mgrid[0:n, 0:n].astype(np.float64)
+        shadow = np.full((n, n), -1e30)
+        steps = min(48, halo)
+
+        def sample(field: np.ndarray, sample_x: np.ndarray,
+                   sample_y: np.ndarray) -> np.ndarray:
+            x0 = np.floor(sample_x).astype(np.int64)
+            y0 = np.floor(sample_y).astype(np.int64)
+            x1 = np.clip(x0 + 1, 0, field.shape[1] - 1)
+            y1 = np.clip(y0 + 1, 0, field.shape[0] - 1)
+            x0 = np.clip(x0, 0, field.shape[1] - 1)
+            y0 = np.clip(y0, 0, field.shape[0] - 1)
+            fx = sample_x - np.floor(sample_x)
+            fy = sample_y - np.floor(sample_y)
+            return (
+                field[y0, x0] * (1 - fx) * (1 - fy)
+                + field[y0, x1] * fx * (1 - fy)
+                + field[y1, x0] * (1 - fx) * fy
+                + field[y1, x1] * fx * fy
+            )
+
+        for index in range(1, steps + 1):
+            upstream = sample(
+                heights, xx + index * step_x, yy + index * step_y
+            )
+            shadow = np.maximum(
+                shadow, upstream - tan_alt * index * step_km
+            )
+        mask = (shadow > heights + 1e-6).astype(np.float64)
+        central = mask[halo:halo + size, halo:halo + size]
+        image = Image.fromarray((central * 255.0 + 0.5).astype(np.uint8))
+        # Remove isolated one-cell shadow/light pixels before the downsample;
+        # they are the salt-and-pepper half of the low-angle artefact.
+        image = image.filter(ImageFilter.MedianFilter(3))
+        if size != TILE_PX:
+            image = image.resize((TILE_PX, TILE_PX), Image.BILINEAR)
+        # One hairline of antialiasing, not a grey wash: the threshold below
+        # still makes everything but the edge itself pure black.
+        image = image.filter(ImageFilter.GaussianBlur(2.0))
+        return np.asarray(image, dtype=np.float64) / 255.0
+
     def _render_tile(self, zoom: int, x: int, y: int,
                      light: Optional[Tuple[float, float]] = None) -> bytes:
         from PIL import Image
 
-        terrain = self.terrain()
+        terrain = self._tile_terrain(zoom, x, y)
         lon, lat = _lonlat_grid(zoom, x, y)
         cols, rows = _tile_counts(zoom)
         total_w = cols * TILE_PX
@@ -437,14 +737,42 @@ class LunarMapService:
                 + np.cos(lat_r) * np.sin(lon_r) * sy
                 + np.sin(lat_r) * sz
             )
-        shade = (
+        direct = (
             normal_east * light_east
             + normal_north * light_north
             + normal_up * light_up
         )
         ambient = 0.18 if light is None else 0.10
         gain = 0.92 if light is None else 1.05
-        shade = np.clip(ambient + gain * np.maximum(shade, 0.0), 0.0, 1.15)
+        shadow = None
+        if light is not None:
+            if zoom >= 6:
+                # 132-260x is the magnification where the high-resolution
+                # picture and the cast shadow read as one surface.  Freeze the
+                # shadow at that tile level: deeper zooms crop and upscale this
+                # map instead of recomputing a different shape at every step.
+                factor = 2 ** (zoom - 6)
+                parent_x = x // factor
+                parent_y = y // factor
+                parent = self._shadow_mask_for(6, parent_x, parent_y, light)
+                shadow = self._crop_shadow(
+                    parent, x - parent_x * factor, y - parent_y * factor, factor,
+                )
+            else:
+                shadow = self._shadow_mask_for(zoom, x, y, light, terrain)
+        shade = ambient + gain * np.maximum(direct, 0.0)
+        if shadow is not None:
+            # The shadow core sits at the same ambient floor as the night side:
+            # a hard cast shadow is not blacker than the map's own night, and
+            # making it zero produced the abrupt black patches.  Only the edge
+            # is blended, narrowly, to avoid a staircase.  The whole effect is
+            # also faded in from z4; switching it on at full strength when the
+            # reader crosses 30x made the same terrain jump.
+            blocked = np.clip((shadow - 0.42) / 0.22, 0.0, 1.0)
+            strength = min(1.0, max(0.0, 0.35 + 0.65 * (zoom - 4) / 2.0))
+            blocked *= strength
+            shade = shade * (1.0 - blocked) + ambient * blocked
+        shade = np.clip(shade, 0.0, 1.15)
 
         colors = None
         if terrain.albedo is not None:
@@ -462,6 +790,11 @@ class LunarMapService:
                            0.15, 1.0)
             base = np.repeat(grey[..., None], 3, axis=-1)
         rgb = np.clip(base * shade[..., None], 0.0, 1.0)
+        # A soft highlight shoulder: the full-Moon shading otherwise multiplies
+        # bright highland albedo straight to 255 and the landforms disappear in
+        # a white field.  The curve keeps the midtones and rolls the highlights
+        # off instead of clipping them.
+        rgb = rgb * 0.92 / (1.0 + 0.18 * rgb)
         image = Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8))
         buffer = io.BytesIO()
         image.save(buffer, format="PNG", compress_level=3)
@@ -546,8 +879,10 @@ class Handler(BaseHTTPRequestHandler):
                         if math.isfinite(light_lon) and math.isfinite(light_lat):
                             light = (light_lon, light_lat)
                 png = self.service.tile(zoom, x, y, light)
-                return self._send(200, png, "image/png",
-                                  cache="public, max-age=86400")
+                # Tiles carry baked shadows; leaving them in the browser
+                # cache means a restart can still be showing yesterday's
+                # algorithm, which is exactly the local mismatch reported.
+                return self._send(200, png, "image/png", cache="no-store")
             return self._error(404, f"no route {path}")
         except moonlib.MoonlibError as error:
             return self._error(400, str(error))

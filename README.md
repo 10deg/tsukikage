@@ -1,6 +1,6 @@
 # Tsukikage
 
-**当前版本 / Version：1.6.1**
+**当前版本 / Version：1.6.2**
 
 一套可**完全离线**运行的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
 **位置、月相、升落、天平动等信息**，并能用 NASA SVS 的 LOLA 高程与
@@ -187,13 +187,13 @@ matplotlib 就有），两条路径结果一致。
 | **带纹理 GLB（Blender 直接查看）** | `TerrainTile.glb_bytes()`、网页「导出 GLB」 |
 | **Blender 预览场景（.blend，含三个光照场景）** | 网页「生成 Blender 预览场景」、`POST /api/mesh/blender` |
 | **全月面 GLB / Blender 场景（尺寸/分辨率可设，当前月相光照）** | 网页「全月面」范围、`POST /api/moon/glb`、`POST /api/moon/blender` |
-| **可打印的投影修正选框** | `moonlib.selection_correction`、网页「使用带投影修正的选框」 |
+| **可打印的投影修正 / 椭圆选框（圆形底面）** | `moonlib.selection_correction`、网页「使用带投影修正的选框」「椭圆选框」 |
 | **天平动目标分类（独立观测列表）** | `moonlib.annotations.load_libration_targets`、网页「天平动目标」 |
 | **月面特写与自动取景** | `moonlib.moonview.render_region`、`moonlib.render_feature` |
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
 | **月面 X / V / L预报** | `moonlib.events` |
 | **最高／最低月亮** | `moonlib.events` |
-| **地貌标注** | `moonlib.annotations` |
+| **地貌标注**（分类、密度、避让、月海居中、避让已有图元） | `moonlib.annotations`、网页「月海居中」 |
 | **曲线图** | `web/static/app.js`、`moonlib.analemma`、`moonlib.moonview` |
 | **模拟实拍效果** | `moonlib.instrument` |
 | **生成动画**；**HDR 图片** | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |

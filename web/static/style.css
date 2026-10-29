@@ -654,10 +654,17 @@ button[aria-pressed="true"] {
 
 /* Controls floating over a picture.  Both sit above the label layer (z-index 1)
    and neither may start a selection drag: the script checks for `.view-tools`. */
-.view-tools {
+.view-toolbar {
   position: absolute;
   top: 6px;
   left: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.view-tools {
+  position: relative;
   z-index: 3;
   display: flex;
   align-items: center;
@@ -666,6 +673,18 @@ button[aria-pressed="true"] {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: rgba(15, 17, 22, .74);
+}
+/* 3D is a mode of its own, not another reading inside the preview box: its own
+   border and its own latch state. */
+.view-3d {
+  padding: 2px 9px;
+  border-color: var(--line);
+  background: rgba(15, 17, 22, .74);
+}
+.view-3d[aria-pressed="true"] {
+  border-color: #ffd666;
+  background: rgba(255, 214, 102, .16);
+  color: #ffe6a3;
 }
 .view-tools .check { margin: 0; }
 .view-tools select { width: auto; }
@@ -1528,18 +1547,21 @@ details.fold > .hint { margin: 0 0 6px; }
    对齐，浮层格式与左上角「预览」那一行一致。 */
 .disk-bottom-hud {
   position: absolute;
+  left: 8px;
   right: 8px;
   bottom: 6px;
   z-index: 4;
   display: flex;
   align-items: flex-end;
-  justify-content: flex-end;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 4px 6px;
-  max-width: calc(100% - 16px);
+  max-width: none;
+  pointer-events: none;
 }
 .selection-inputs.disk-selection {
   position: static;
+  pointer-events: auto;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
@@ -1557,6 +1579,7 @@ details.fold > .hint { margin: 0 0 6px; }
   position: static;
   flex: 0 1 auto;
   max-width: none;
+  pointer-events: none;
 }
 /* 名称、输入、名称、输入…压成一条：不再每个标签各占一列，输入框也缩到
    足够放下五位数字/负号即可。 */
@@ -1834,6 +1857,22 @@ details.fold > .hint { margin: 0 0 6px; }
   min-width: 0;
 }
 .proc-panel .slider-row.wide output { min-width: 3.2em; }
+/* 3D模型: the panel is a two-column form like 模拟设置, not a row of short
+   fields with a gutter.  Every menu and number field therefore fills its cell,
+   and the export buttons share the same two columns instead of each taking a
+   different width. */
+.proc-panel .mesh-shape-row {
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0 0 9px;
+}
+.proc-panel .mesh-actions { gap: 7px 9px; margin: 0 0 5px; }
+.proc-panel .mesh-actions button { width: 100%; }
+.proc-panel .mesh-actions .wide { grid-column: 1 / -1; }
+.proc-panel .grid2 > label > .pick-row .unit {
+  flex: 0 0 auto;
+  color: var(--ink-dim);
+}
 .proc-panel .row .check.inline { margin: 0; }
 /* 镜像's two glyphs are text, not an icon font: ◀▶ and ▲▼ are two triangles each,
    and at the 13 px `button.icon` uses they read as a hyphen and a smudge. */

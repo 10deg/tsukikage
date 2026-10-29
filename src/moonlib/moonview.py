@@ -3040,18 +3040,31 @@ def _ground_to_surface(
     ``R*up0 + x*u + y*v`` (that point is *above* the sphere): the component
     along ``up0`` that keeps the point on the sphere is
     ``sqrt(R**2 - x**2 - y**2)``.
+
+    A selection pushed against the limb can have a *bounding rectangle* whose
+    corners lie just outside the tangent disk even though every measured point
+    of the footprint is on the sphere.  Those corners are folded back onto the
+    limb instead of being refused: the deformed selection then runs along the
+    sphere, which is what a projection-corrected selection means.  Refusing the
+    whole tile because its rectangular envelope cut a corner made a round model
+    disappear exactly when it touched the edge.
     """
     reference = MOON_REFERENCE_RADIUS_KM
-    inside = reference * reference - np.asarray(x) ** 2 - np.asarray(y) ** 2
-    if np.any(inside <= 0.0):
-        raise MoonlibError(
-            "the selection extends past the lunar limb; shrink it or move it inward."
-        )
-    height = np.sqrt(inside)
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    radial = np.hypot(x, y)
+    # Stay a hair inside the sphere so the height is real and the normal is
+    # defined; the folded points land on the visible limb.
+    limit = reference * (1.0 - 1e-9)
+    over = radial > limit
+    if np.any(over):
+        x = np.where(over, x * limit / np.maximum(radial, 1e-30), x)
+        y = np.where(over, y * limit / np.maximum(radial, 1e-30), y)
+    height = np.sqrt(np.maximum(reference * reference - x * x - y * y, 0.0))
     return (
         height[..., None] * up0[None, ...]
-        + np.asarray(x)[..., None] * u[None, ...]
-        + np.asarray(y)[..., None] * v[None, ...]
+        + x[..., None] * u[None, ...]
+        + y[..., None] * v[None, ...]
     )
 
 
@@ -3172,12 +3185,17 @@ def selection_correction(
     x, y, _lon, _lat, cos_theta = _sky_ground_coordinates(
         camera, right, up, up0, u, v, tan_u, tan_v
     )
-    if np.any(~np.isfinite(x)) or np.any(~np.isfinite(y)) or np.any(~np.isfinite(cos_theta)):
+    # Near the limb a box can have rays that miss the sphere.  Those samples
+    # are not part of the visible ground; dropping them lets a tile straddling
+    # the edge print instead of failing outright.  Too few usable samples still
+    # mean the selection is effectively on the far side.
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(cos_theta)
+    if int(np.count_nonzero(finite)) < 8:
         raise MoonlibError(
             "the selection extends past the lunar limb; shrink it or move it inward."
         )
-    x0, x1 = float(np.min(x)), float(np.max(x))
-    y0, y1 = float(np.min(y)), float(np.max(y))
+    x0, x1 = float(np.min(x[finite])), float(np.max(x[finite]))
+    y0, y1 = float(np.min(y[finite])), float(np.max(y[finite]))
     if not (x1 > x0 and y1 > y0):
         raise MoonlibError("the selection has no measurable ground extent.")
 
@@ -3196,12 +3214,17 @@ def selection_correction(
     surface = _ground_to_surface(ground[:, 0], ground[:, 1], up0, u, v)
     directions = surface - camera["origin"][None, :]
     depth = np.einsum("ij,j->i", directions, camera["forward"])
-    if np.any(depth <= 0.0):
+    # A footprint that reaches the limb can have part of its ground rectangle on
+    # the hidden hemisphere.  Those samples cannot define a *sky* frame, but they
+    # are still valid ground to print: keep the visible part for the close-up
+    # box instead of rejecting the whole selection.
+    visible = depth > 0.0
+    if int(np.count_nonzero(visible)) < 8:
         raise MoonlibError(
             "the selection is on the far side as seen from this observer."
         )
-    across = np.einsum("ij,j->i", directions, right) / depth
-    along = np.einsum("ij,j->i", directions, up) / depth
+    across = np.einsum("ij,j->i", directions, right)[visible] / depth[visible]
+    along = np.einsum("ij,j->i", directions, up)[visible] / depth[visible]
     half_u = float(np.max(np.abs(across)))
     half_v = float(np.max(np.abs(along)))
     if not (half_u > 0.0 and half_v > 0.0):
@@ -3222,6 +3245,258 @@ def selection_correction(
         u=np.asarray(u, dtype=np.float64),
         v=np.asarray(v, dtype=np.float64),
     )
+
+
+@dataclass(frozen=True)
+class SelectionEllipse:
+    """A circular/elliptical patch of ground, projected onto the sky.
+
+    ``radius_fraction`` is measured on the Moon: the patch's shorter half-axis
+    is that fraction of the lunar radius.  A projection-corrected ellipse is a
+    ground patch, so moving it towards the limb *foreshortens* it instead of
+    making it cover more ground.  The centre is kept on the cap where the whole
+    patch stays visible -- its far edge may touch the limb, never cross it.
+    """
+
+    lon_deg: float
+    lat_deg: float
+    rotation_deg: float
+    fov_radius_arcsec: float
+    aspect: float
+    ground_half_width_km: float
+    ground_half_height_km: float
+    radius_fraction: float
+    shrink: float
+    reference_radius_km: float
+    origin: np.ndarray
+    forward: np.ndarray
+    right: np.ndarray
+    up: np.ndarray
+    up0: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+
+    def boundary_points(self, samples: int = 481) -> np.ndarray:
+        """The patch boundary on the reference sphere, as 3-D points."""
+        count = max(24, int(samples))
+        theta = np.linspace(0.0, 2.0 * math.pi, count, endpoint=False)
+        x = self.ground_half_width_km * np.cos(theta)
+        y = self.ground_half_height_km * np.sin(theta)
+        radius2 = self.reference_radius_km * self.reference_radius_km
+        inside = np.maximum(radius2 - x * x - y * y, 0.0)
+        height = np.sqrt(inside)
+        return (
+            height[:, None] * self.up0[None, :]
+            + x[:, None] * self.u[None, :]
+            + y[:, None] * self.v[None, :]
+        )
+
+    def boundary_lonlat(self, samples: int = 481) -> np.ndarray:
+        """The patch boundary as ``(n, 2)`` lon/lat degrees."""
+        points = self.boundary_points(samples)
+        radius = np.linalg.norm(points, axis=-1)
+        lon = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
+        lat = np.degrees(np.arcsin(np.clip(points[:, 2] / radius, -1.0, 1.0)))
+        return np.stack([lon, lat], axis=1)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "lon_deg": float(self.lon_deg),
+            "lat_deg": float(self.lat_deg),
+            "rotation_deg": float(self.rotation_deg),
+            "fov_radius_arcsec": float(self.fov_radius_arcsec),
+            "aspect": float(self.aspect),
+            "ground_width_km": float(2.0 * self.ground_half_width_km),
+            "ground_height_km": float(2.0 * self.ground_half_height_km),
+            "radius_fraction": float(self.radius_fraction),
+            "shrink": float(self.shrink),
+        }
+
+
+def _radius_fraction_from_fov(view: Any, fov_radius_arcsec: float) -> float:
+    """The Moon-fraction radius that the page's sky angle stands for.
+
+    ``radiusFraction`` is the page's own size unit: a fraction of the Moon's
+    angular radius.  A payload from an older page may only carry the angular
+    size, so derive the fraction from the view rather than guessing.
+    """
+    angular = float(getattr(view, "angular_diameter_deg", 0.0) or 0.0)
+    if not (angular > 0.0):
+        raise MoonlibError(
+            "an elliptical selection needs radius_fraction or the view's "
+            "angular diameter."
+        )
+    return float(fov_radius_arcsec) / (0.5 * angular * 3600.0)
+
+
+def selection_ellipse_geometry(
+    view: MoonView,
+    lon_deg: float,
+    lat_deg: float,
+    *,
+    radius_fraction: float,
+    aspect: float = 1.0,
+    rotation_deg: float = 0.0,
+    samples: int = 361,
+    terrain: Optional[MoonTerrain] = None,
+) -> SelectionEllipse:
+    """Build the circular/elliptical ground patch the ellipse selector means.
+
+    The patch is lifted from its tangent plane onto the sphere; its sky
+    projection is the curve the page draws and the close-up masks.  If the
+    requested patch would cross the limb, its *centre* is slid towards the
+    sub-observer point until the whole patch is visible (a fixed-size patch
+    cannot fit any closer).  ``shrink`` remains a numerical safety net for a
+    payload that already carried a too-large patch; normal pages never hit it.
+    """
+    fraction = float(radius_fraction)
+    if not math.isfinite(fraction) or fraction <= 0.0:
+        raise MoonlibError("radius_fraction must be positive.")
+    ratio = float(aspect)
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        ratio = 1.0
+    reference = MOON_REFERENCE_RADIUS_KM
+    short = min(fraction, 1.0 - 1e-9) * reference
+    if ratio >= 1.0:
+        half_w = short
+        half_h = short * ratio
+    else:
+        half_w = short / ratio
+        half_h = short
+    far = max(half_w, half_h)
+    if far > reference * (1.0 - 1e-9):
+        scale = reference * (1.0 - 1e-9) / far
+        half_w *= scale
+        half_h *= scale
+        far = max(half_w, half_h)
+
+    sub = np.asarray(view.observer_direction, dtype=np.float64)
+    sub = sub / max(float(np.linalg.norm(sub)), _TINY)
+    # The patch's far edge meets the limb when its centre is this far from the
+    # sub-observer point.  A larger angular distance would put part of the
+    # patch on the hidden hemisphere -- the case the old sky ellipse called
+    # "out of bounds".
+    max_delta = math.acos(min(1.0, max(0.0, far / reference)))
+    centre = _tangent_basis(float(lon_deg), float(lat_deg))[0]
+    cos_delta = float(np.dot(centre, sub))
+    delta = math.acos(max(-1.0, min(1.0, cos_delta)))
+    shrink = 1.0
+    if delta > max_delta + 1e-12:
+        if max_delta <= 1e-12:
+            moved = sub
+        else:
+            # Slerp from the target towards the sub-observer point by just
+            # enough that the patch's far edge lands on the limb.
+            sin_total = math.sin(delta)
+            if abs(sin_total) <= 1e-12:
+                moved = sub
+            else:
+                t = (delta - max_delta) / delta
+                a = math.sin((1.0 - t) * delta) / sin_total
+                b = math.sin(t * delta) / sin_total
+                moved = centre * a + sub * b
+            moved = moved / max(float(np.linalg.norm(moved)), _TINY)
+        lon_deg = math.degrees(math.atan2(float(moved[1]), float(moved[0])))
+        lat_deg = math.degrees(math.asin(max(-1.0, min(1.0, float(moved[2])))))
+        centre = moved
+        delta = math.acos(max(-1.0, min(1.0, float(np.dot(centre, sub)))))
+    camera = _region_camera(view, float(lon_deg), float(lat_deg), terrain)
+    target = np.asarray(camera["target"], dtype=np.float64)
+    normal = target / max(float(np.linalg.norm(target)), _TINY)
+    if float(np.dot(normal, camera["origin"] - target)) <= 0.0:
+        raise MoonlibError(
+            "the selection is on the far side as seen from this observer."
+        )
+    # Safety net for an explicit payload that still asked for a patch larger
+    # than the visible cap: shrink it rather than let it cross the limb.
+    cos_delta = float(np.dot(centre, sub))
+    if cos_delta < 0.0:
+        shrink = 0.0
+    elif delta > max_delta + 1e-12:
+        limit = reference * cos_delta * (1.0 - 1e-9)
+        shrink = min(1.0, limit / max(far, 1e-30))
+        half_w *= shrink
+        half_h *= shrink
+        far = max(half_w, half_h)
+
+    _, _, up0, u, v = _selection_ground_frame(
+        camera, float(lon_deg), float(lat_deg), float(rotation_deg)
+    )
+    # The camera axes for the *sky* box are the rolled ones.  Use the same
+    # frame the close-up renders with.
+    right, up = _rolled_basis(
+        np.asarray(camera["right"], dtype=np.float64),
+        np.asarray(camera["up"], dtype=np.float64),
+        float(rotation_deg),
+    )
+    points = (
+        np.sqrt(np.maximum(
+            reference * reference
+            - (half_w * np.cos(np.linspace(0.0, 2.0 * math.pi, 181))) ** 2
+            - (half_h * np.sin(np.linspace(0.0, 2.0 * math.pi, 181))) ** 2,
+            0.0,
+        ))[:, None] * up0[None, :]
+        + (half_w * np.cos(np.linspace(0.0, 2.0 * math.pi, 181)))[:, None] * u[None, :]
+        + (half_h * np.sin(np.linspace(0.0, 2.0 * math.pi, 181)))[:, None] * v[None, :]
+    )
+    directions = points - np.asarray(camera["origin"], dtype=np.float64)[None, :]
+    depth = np.einsum("ij,j->i", directions, camera["forward"])
+    visible = depth > 0.0
+    if not np.any(visible):
+        raise MoonlibError("the selection has no visible sky extent.")
+    across = np.einsum("ij,j->i", directions, right)[visible] / depth[visible]
+    along = np.einsum("ij,j->i", directions, up)[visible] / depth[visible]
+    half_u = float(np.max(np.abs(across)))
+    half_v = float(np.max(np.abs(along)))
+    if not (half_u > 0.0 and half_v > 0.0):
+        raise MoonlibError("the selection has no measurable sky extent.")
+    return SelectionEllipse(
+        lon_deg=float(lon_deg),
+        lat_deg=float(lat_deg),
+        rotation_deg=float(rotation_deg),
+        fov_radius_arcsec=math.degrees(math.atan(min(half_u, half_v))) * 3600.0,
+        aspect=half_v / half_u,
+        ground_half_width_km=float(half_w),
+        ground_half_height_km=float(half_h),
+        radius_fraction=float(fraction),
+        shrink=float(shrink),
+        reference_radius_km=float(reference),
+        origin=np.asarray(camera["origin"], dtype=np.float64),
+        forward=np.asarray(camera["forward"], dtype=np.float64),
+        right=np.asarray(right, dtype=np.float64),
+        up=np.asarray(up, dtype=np.float64),
+        up0=np.asarray(up0, dtype=np.float64),
+        u=np.asarray(u, dtype=np.float64),
+        v=np.asarray(v, dtype=np.float64),
+    )
+
+
+def selection_ellipse_boundary(
+    view: MoonView,
+    lon_deg: float,
+    lat_deg: float,
+    *,
+    fov_radius_arcsec: Optional[float] = None,
+    radius_fraction: Optional[float] = None,
+    aspect: float = 1.0,
+    rotation_deg: float = 0.0,
+    samples: int = 481,
+    terrain: Optional[MoonTerrain] = None,
+) -> np.ndarray:
+    """The elliptical ground patch's boundary, as ``(n, 2)`` lon/lat."""
+    if radius_fraction is None:
+        if fov_radius_arcsec is None:
+            raise MoonlibError("an ellipse needs radius_fraction or fov_radius_arcsec.")
+        radius_fraction = _radius_fraction_from_fov(view, float(fov_radius_arcsec))
+    geometry = selection_ellipse_geometry(
+        view, float(lon_deg), float(lat_deg),
+        radius_fraction=float(radius_fraction),
+        aspect=float(aspect),
+        rotation_deg=float(rotation_deg),
+        samples=samples,
+        terrain=terrain,
+    )
+    return geometry.boundary_lonlat(samples)
 
 
 def _tile_auto_samples(long_km: float, dem: Any) -> Tuple[int, bool]:
@@ -3298,6 +3573,7 @@ def selection_tile(
     fov_radius_arcsec: float,
     aspect: float = 1.0,
     rotation_deg: float = 0.0,
+    radius_fraction: Optional[float] = None,
     long_side_mm: float = 100.0,
     base_depth_km: float = 2.0,
     vertical_exaggeration: float = 1.0,
@@ -3305,6 +3581,7 @@ def selection_tile(
     terrain: Optional[MoonTerrain] = None,
     projection: bool = True,
     corrected: bool = False,
+    round_base: bool = False,
 ) -> TerrainTile:
     """Cut one selection out of the DEM as a closed, flat-bottomed 3D tile.
 
@@ -3341,6 +3618,10 @@ def selection_tile(
         *fov_radius_arcsec* and this ratio.
     rotation_deg
         Rotation of the selection in the sky, counter-clockwise.
+    radius_fraction
+        For ``round_base``: the elliptical ground patch's shorter half-axis as
+        a fraction of the lunar radius.  ``None`` derives it from
+        *fov_radius_arcsec* and the view's angular diameter.
     long_side_mm
         Length of the longer ground side of the printed model, millimetres.
     base_depth_km
@@ -3358,6 +3639,11 @@ def selection_tile(
         Ground-corrected x/y (default) or the raw sky plane.
     corrected
         Selection is the preimage of a ground rectangle; implies *projection*.
+    round_base
+        Build a circular ground disk instead of the rectangular ground box.
+        The top is sampled on a square-to-disk grid, the perimeter is circular
+        and the flat bottom is a circle, so a slicer sees a round model.  This
+        implies *corrected* and *projection*.
 
     Returns
     -------
@@ -3378,8 +3664,8 @@ def selection_tile(
     if not math.isfinite(ratio) or ratio <= 0.0:
         ratio = 1.0
     scale_mm = float(long_side_mm)
-    if not math.isfinite(scale_mm) or not (5.0 <= scale_mm <= 2000.0):
-        raise MoonlibError("long_side_mm must lie in 5-2000 mm.")
+    if not math.isfinite(scale_mm) or not (5.0 <= scale_mm <= 10000.0):
+        raise MoonlibError("long_side_mm must lie in 5-10000 mm.")
     base_depth = float(base_depth_km)
     if not math.isfinite(base_depth) or not (0.0 <= base_depth <= 100.0):
         raise MoonlibError("base_depth_km must lie in 0-100 km.")
@@ -3394,7 +3680,8 @@ def selection_tile(
             "(0 means the DEM's own resolution)."
         )
     corrected = bool(corrected)
-    if corrected:
+    round_base = bool(round_base)
+    if corrected or round_base:
         projection = True
     projection = bool(projection)
 
@@ -3406,7 +3693,9 @@ def selection_tile(
     # hit by the same line of sight, which is a different piece of ground.
     target = np.asarray(camera["target"], dtype=np.float64)
     normal = target / max(float(np.linalg.norm(target)), _TINY)
-    if float(np.dot(normal, camera["origin"] - target)) <= 0.0:
+    # A round tile clamps its centre onto the visible cap before anything is
+    # sampled, so a request that names a point just over the limb is valid.
+    if not round_base and float(np.dot(normal, camera["origin"] - target)) <= 0.0:
         raise MoonlibError(
             "the selection is on the far side as seen from this observer."
         )
@@ -3419,7 +3708,139 @@ def selection_tile(
     correction: Optional[SelectionCorrection] = None
     resolution_capped = False
 
-    if corrected:
+    if round_base and corrected:
+        fraction = radius_fraction
+        if fraction is None:
+            fraction = _radius_fraction_from_fov(view, fov)
+        ellipse = selection_ellipse_geometry(
+            view, float(lon_deg), float(lat_deg),
+            radius_fraction=float(fraction),
+            aspect=ratio,
+            rotation_deg=float(rotation_deg),
+            terrain=terrain,
+        )
+        lon_deg = ellipse.lon_deg
+        lat_deg = ellipse.lat_deg
+        up0 = ellipse.up0
+        u = ellipse.u
+        v = ellipse.v
+        radius_km = min(
+            ellipse.ground_half_width_km,
+            ellipse.ground_half_height_km,
+        )
+        x0, x1 = -radius_km, radius_km
+        y0, y1 = -radius_km, radius_km
+        width_km = height_km = 2.0 * radius_km
+        model_ratio = 1.0
+        boundary = ellipse.boundary_lonlat(81)
+        terrain = _tile_window(
+            terrain,
+            float(np.min(boundary[:, 0])), float(np.max(boundary[:, 0])),
+            float(np.min(boundary[:, 1])), float(np.max(boundary[:, 1])),
+        )
+        if auto:
+            samples, resolution_capped = _tile_auto_samples(
+                2.0 * radius_km, terrain.dem
+            )
+        else:
+            samples = requested
+        # A square-to-disk grid: all four edges of the parameter square map
+        # onto the same circle, so the outer perimeter is round while the grid
+        # stays regular (texture, UVs and GLB keep working).
+        nx = ny = samples
+        grid_u = np.linspace(-1.0, 1.0, nx)
+        grid_v = np.linspace(-1.0, 1.0, ny)
+        unit_x, unit_y = np.meshgrid(grid_u, grid_v)
+        raw_x = radius_km * unit_x * np.sqrt(
+            np.maximum(0.0, 1.0 - unit_y * unit_y / 2.0)
+        )
+        raw_y = radius_km * unit_y * np.sqrt(
+            np.maximum(0.0, 1.0 - unit_x * unit_x / 2.0)
+        )
+        surface = _ground_to_surface(raw_x, raw_y, up0, u, v)
+        lon = np.degrees(np.arctan2(surface[..., 1], surface[..., 0]))
+        lat = np.degrees(
+            np.arcsin(np.clip(surface[..., 2] / reference, -1.0, 1.0))
+        )
+        cos_theta = np.sqrt(
+            np.maximum(reference * reference - raw_x ** 2 - raw_y ** 2, 0.0)
+        ) / reference
+        grid_x = raw_x
+        grid_y = raw_y
+        lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
+        lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
+    elif round_base:
+        # Classic round model: the ellipse is a sky-plane shape.  Measure the
+        # ellipse's own ground footprint (not its bounding rectangle's), so the
+        # circular model is centred on the patch the marquee draws.
+        count = 181
+        theta = np.linspace(0.0, 2.0 * math.pi, count, endpoint=False)
+        ellipse_u = np.cos(theta) * math.tan(half_w)
+        ellipse_v = np.sin(theta) * math.tan(half_h)
+        gx, gy, glon, glat, gcos = _sky_ground_coordinates(
+            camera, box_right, box_up, up0, u, v, ellipse_u, ellipse_v
+        )
+        gx_flat = np.asarray(gx, dtype=np.float64).ravel()
+        gy_flat = np.asarray(gy, dtype=np.float64).ravel()
+        glon_flat = np.asarray(glon, dtype=np.float64).ravel()
+        glat_flat = np.asarray(glat, dtype=np.float64).ravel()
+        finite = (
+            np.isfinite(gx_flat) & np.isfinite(gy_flat)
+            & np.isfinite(np.asarray(gcos, dtype=np.float64).ravel())
+        )
+        if int(np.count_nonzero(finite)) < 8:
+            raise MoonlibError(
+                "the selection extends past the lunar limb; shrink it or move it inward."
+            )
+        x0, x1 = float(np.min(gx_flat[finite])), float(np.max(gx_flat[finite]))
+        y0, y1 = float(np.min(gy_flat[finite])), float(np.max(gy_flat[finite]))
+        if not (x1 > x0 and y1 > y0):
+            raise MoonlibError("the selection has no measurable ground extent.")
+        width_km = x1 - x0
+        height_km = y1 - y0
+        radius_km = 0.5 * min(width_km, height_km)
+        # Keep the round model centred on the selection point, not on the
+        # ground bounding box of a foreshortened sky ellipse: near the limb
+        # that box's centre drifts, and the exported patch then looks offset
+        # from the marquee even though its width is right.
+        centre_x = 0.0
+        centre_y = 0.0
+        terrain = _tile_window(
+            terrain,
+            float(np.min(glon_flat[finite])), float(np.max(glon_flat[finite])),
+            float(np.min(glat_flat[finite])), float(np.max(glat_flat[finite])),
+        )
+        if auto:
+            samples, resolution_capped = _tile_auto_samples(
+                2.0 * radius_km, terrain.dem
+            )
+        else:
+            samples = requested
+        nx = ny = samples
+        unit_x, unit_y = np.meshgrid(
+            np.linspace(-1.0, 1.0, nx), np.linspace(-1.0, 1.0, ny)
+        )
+        raw_x = centre_x + radius_km * unit_x * np.sqrt(
+            np.maximum(0.0, 1.0 - unit_y * unit_y / 2.0)
+        )
+        raw_y = centre_y + radius_km * unit_y * np.sqrt(
+            np.maximum(0.0, 1.0 - unit_x * unit_x / 2.0)
+        )
+        width_km = height_km = 2.0 * radius_km
+        model_ratio = 1.0
+        surface = _ground_to_surface(raw_x, raw_y, up0, u, v)
+        lon = np.degrees(np.arctan2(surface[..., 1], surface[..., 0]))
+        lat = np.degrees(
+            np.arcsin(np.clip(surface[..., 2] / reference, -1.0, 1.0))
+        )
+        cos_theta = np.sqrt(
+            np.maximum(reference * reference - raw_x ** 2 - raw_y ** 2, 0.0)
+        ) / reference
+        grid_x = raw_x - centre_x
+        grid_y = raw_y - centre_y
+        lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
+        lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
+    elif corrected:
         correction = selection_correction(
             view, float(lon_deg), float(lat_deg),
             fov_radius_arcsec=fov, aspect=ratio,
@@ -3724,12 +4145,16 @@ def selection_tile(
         "rotation_deg": float(rotation_deg),
         "projection": bool(projection),
         "corrected": bool(corrected),
+        "shape": "circle" if round_base else "rectangle",
+        "round_base": bool(round_base),
         "width_km": float(width_km),
         "height_km": float(height_km),
         "lon_span_deg": lon_span,
         "lat_span_deg": lat_span,
         "long_side_mm": float(scale_mm),
         "short_side_mm": float(short_mm),
+        "diameter_km": float(min(width_km, height_km))
+        if round_base else None,
         "base_depth_km": float(base_depth),
         "vertical_exaggeration": float(exaggeration),
         "scale_mm_per_km": float(scale),

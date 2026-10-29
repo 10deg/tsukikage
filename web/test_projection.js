@@ -611,8 +611,11 @@ check('a missing context is not an error', true);
     JSON.stringify(resized.calls.texts.map((t) => [t[1], t[2]])) ===
     JSON.stringify(asLaidOut.calls.texts.map((t) => [t[1], t[2]])),
     JSON.stringify(resized.calls.texts.map((t) => [t[1], t[2]])));
-  check('while the markers grow with the type',
-    resized.calls.arcs[0][2] > asLaidOut.calls.arcs[0][2],
+  /* The locator follows the reference proportions, not the type: a 30 px plan
+     still gets the two-pixel dot, because a dot that grew with the letters
+     would become a bubble over the feature. */
+  check('while the locator stays a small dot, not a bubble',
+    resized.calls.arcs[0][2] <= 3 && resized.calls.arcs[0][2] === asLaidOut.calls.arcs[0][2],
     `${resized.calls.arcs[0][2]} / ${asLaidOut.calls.arcs[0][2]}`);
 }
 
@@ -665,13 +668,16 @@ const outlinePlan = {
 };
 const rimCtx = recordingContext();
 T.paintLabels(rimCtx, outlinePlan);
-check('an outline is closed and stroked twice, plus the marker edge',
-  rimCtx.calls.closes === 2 && rimCtx.calls.strokes === 3,
+check('an outline is closed and stroked twice, and nothing more',
+  rimCtx.calls.closes === 2 && rimCtx.calls.strokes === 2,
   JSON.stringify([rimCtx.calls.closes, rimCtx.calls.strokes]));
 check('every vertex of the ring is drawn',
   rimCtx.calls.moves === 2 && rimCtx.calls.lines === 2 * 47,
   JSON.stringify([rimCtx.calls.moves, rimCtx.calls.lines]));
-check('the centre still gets its marker', rimCtx.calls.arcs.length === 1);
+/* The rim is the marker: a second dot in the middle of the circle only
+   competes with the name, which is what the reference tool does too. */
+check('the rim marks the feature, so there is no dot inside it',
+  rimCtx.calls.arcs.length === 0, String(rimCtx.calls.arcs.length));
 check('a rim is drawn without a leader line', rimCtx.calls.texts.length === 1);
 check('a solid rim clears the dash pattern after each pass',
   rimCtx.calls.dashes.every((dash) => dash.length === 0),

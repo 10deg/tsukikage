@@ -16,6 +16,60 @@
     </div>
   </div>
 
+  <!-- 地貌标注 is a bar inside the header, the way the full-disk page keeps its
+       label controls on the picture.  The class switches sit behind the caret
+       so the header stays one line wide; the search field is a compact entry
+       on the right, not a banner of its own. -->
+  <div class="map-label-bar" id="map-label-bar" data-collapsed="true">
+    <button class="ghost annotate" id="labels-toggle" aria-pressed="true"
+            title="显示或隐藏全部地貌标注：名称、点、轮廓圈与真实直径">月面地貌标注</button>
+    <label class="check inline">名称
+      <select id="name-language">
+        <option value="zh" selected>中文</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+    <label class="check inline" title="标注密度：百分比越低，画面上的名字越少">
+      密度 <input type="range" id="label-density" min="0" max="1" step="0.02" value="1">
+      <b id="density-value">100%</b>
+    </label>
+    <button class="ghost mini" id="classes-all">全选</button>
+    <button class="ghost mini" id="classes-none">全不选</button>
+    <button class="ghost caret" id="classes-toggle" aria-expanded="false"
+            title="展开标注设置"></button>
+  </div>
+
+  <div class="geometry-bar" id="geometry-bar">
+    <button class="ghost mini" id="marks-toggle" aria-pressed="true"
+            title="显示或隐藏全部几何标注（阴影带、极点、赤道、日下点、天平动点、经纬网）">几何标注</button>
+        <div class="mark-bar" id="mark-bar">
+          <label class="mark-chip" data-on="false" title="太阳高度为 0 的那条曲线">
+            <input type="checkbox" id="mark-terminator" checked>
+            <span>阴影带</span>
+          </label>
+          <label class="mark-chip" data-on="false" title="标注南北极点">
+            <input type="checkbox" id="mark-poles" checked>
+            <span>南北极</span>
+          </label>
+          <label class="mark-chip" data-on="false" title="标注月面赤道">
+            <input type="checkbox" id="mark-equator">
+            <span>赤道</span>
+          </label>
+          <label class="mark-chip" data-on="false" title="标注日下点（太阳直下点）">
+            <input type="checkbox" id="mark-subsolar" checked>
+            <span>日下点</span>
+          </label>
+          <label class="mark-chip" data-on="false" title="标注天平动点（地球直下点）">
+            <input type="checkbox" id="mark-libration" checked>
+            <span>天平动点</span>
+          </label>
+          <label class="mark-chip" data-on="false" title="经纬网与刻度">
+            <input type="checkbox" id="mark-graticule" checked>
+            <span>经纬网</span>
+          </label>
+        </div>
+  </div>
+
   <form class="search" id="search-form" autocomplete="off">
     <input id="search-input" type="search" placeholder="搜索地名" aria-label="搜索地名">
     <button type="submit" aria-label="搜索">搜索</button>
@@ -29,83 +83,170 @@
     <button id="fit" title="显示整个月面">全月</button>
     <button id="export-map" title="把当前视图保存为 PNG">导出</button>
   </div>
+
+    <div class="annot-detail" id="annot-detail">
+      <div class="label-controls">
+        <label class="check inline" title="地貌标注的字号；留空按窗口自动">字号 px
+          <input type="number" id="label-font" min="6" max="64" step="1" placeholder="自动">
+        </label>
+        <label class="check inline" title="地貌标注按分类自动着色">
+          <input type="checkbox" id="label-colour" checked>
+          <span>彩色</span>
+        </label>
+        <label class="check inline">文字
+          <input type="color" id="text-color" value="#eef2ff">
+        </label>
+        <label class="check inline" title="文字描边设置">描边
+          <input type="color" id="text-stroke" value="#030509">
+          <input type="number" id="text-stroke-width" min="0" max="6" step="0.1" value="1.2">
+        </label>
+        <label class="check inline" title="标注点描边设置">标注点描边
+          <input type="color" id="marker-stroke" value="#030509">
+          <input type="number" id="marker-stroke-width" min="0" max="3" step="0.1" value="0.6">
+        </label>
+        <label class="check inline">
+          <input type="checkbox" id="text-bold">
+          <span>粗体</span>
+        </label>
+        <label class="check inline" title="设置环形地貌的轮廓线">
+          线条
+          <input type="color" id="outline-color" value="#b4d6ff">
+          <input type="number" id="outline-width" min="0.2" max="4" step="0.1" value="1">
+          <select id="outline-style">
+            <option value="solid" selected>实线</option>
+            <option value="dash">虚线</option>
+            <option value="dot">点线</option>
+            <option value="none">不画</option>
+          </select>
+        </label>
+        <label class="check inline" title="停用避让算法，允许标注有重叠">
+          <input type="checkbox" id="label-overlap">
+          <span>停用避让</span>
+        </label>
+        <label class="check inline" title="按地貌的真实直径画出轮廓圈">
+          <input type="checkbox" id="diameter-toggle" checked>
+          <span>真实直径</span>
+        </label>
+      </div>
+      <div class="class-bar" id="label-classes"></div>
+    </div>
 </header>
 
-<main class="map-shell">
-  <aside class="panel layer-panel">
-    <div class="panel-heading">
-      <h2>图层</h2>
-      <span class="hint" id="layer-count"></span>
-    </div>
-    <div id="layer-list" class="layer-list"></div>
-    <div class="panel-actions">
-      <button id="layers-all">全选</button>
-      <button id="layers-none">全不选</button>
-    </div>
+<main class="map-shell" id="map-shell">
+  <aside class="panel layer-panel" id="map-left">
+    <section class="group">
+      <h2>观测信息 <span class="en">Observer</span></h2>
+      <div class="grid2 time-row">
+        <label>日期时间 <span class="en">Date and time</span>
+          <input id="light-when" type="datetime-local" step="60">
+        </label>
+        <label>时区 <span class="en">Time zone</span>
+          <span class="tz-field">
+            <i class="unit">UTC</i>
+            <input id="light-tz" type="text" inputmode="numeric" value="+8" size="3"
+                   title="整小时，带符号（+8 / -5）">
+          </span>
+        </label>
+      </div>
+      <div class="row time-nudge" id="light-nudges">
+        <button class="ghost mini" data-nudge="-1w" title="往前一周">-1w</button>
+        <button class="ghost mini" data-nudge="-1d" title="往前一天">-1d</button>
+        <button class="ghost mini" data-nudge="-1h" title="往前一小时">-1h</button>
+        <button class="ghost mini" data-nudge="-1m" title="往前一分钟">-1m</button>
+        <button class="ghost icon" id="light-now" title="同步设备时间：把日期时间设为此刻">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M19 2.4v4.2h-4.2" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 7.6V12l3.1 1.9" fill="none" stroke="currentColor"
+                  stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button class="ghost mini" data-nudge="+1m" title="往后一分钟">+1m</button>
+        <button class="ghost mini" data-nudge="+1h" title="往后一小时">+1h</button>
+        <button class="ghost mini" data-nudge="+1d" title="往后一天">+1d</button>
+        <button class="ghost mini" data-nudge="+1w" title="往后一周">+1w</button>
+      </div>
+      <div class="grid2">
+        <label>纬度 °N <span class="en">Latitude</span>
+          <input id="light-lat" type="number" min="-90" max="90" step="0.1" value="30">
+        </label>
+        <label>经度 °E <span class="en">Longitude</span>
+          <input id="light-lon" type="number" min="-180" max="180" step="0.1" value="120">
+        </label>
+      </div>
+    </section>
 
-    <h2>显示</h2>
-    <label class="field">
-      <span>名称</span>
-      <select id="name-language">
-        <option value="zh" selected>中文</option>
-        <option value="en">English</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>投影</span>
-      <select id="projection">
-        <option value="equirect" selected>等距圆柱</option>
-        <option value="mercator">墨卡托</option>
-        <option value="globe">球面 / 3D</option>
-      </select>
-    </label>
-    <label class="field">
-      <span>底图亮度</span>
-      <input id="base-brightness" type="range" min="0.35" max="1.6" step="0.05" value="1">
-    </label>
-    <label class="check">
-      <input id="labels-toggle" type="checkbox" checked>
-      <span>名称</span>
-    </label>
-    <label class="check">
-      <input id="diameter-toggle" type="checkbox" checked>
-      <span>真实直径</span>
-    </label>
+    <section class="group">
+      <h2>月球信息 <span class="en">Moon</span></h2>
+      <dl class="readout" id="map-moon-info">
+        <dt>月相</dt><dd id="mi-map-phase">—</dd>
+        <dt>照亮比例</dt><dd id="mi-map-illum">—</dd>
+        <dt>相位角</dt><dd id="mi-map-phase-angle">—</dd>
+        <dt>月龄</dt><dd id="mi-map-age">—</dd>
+        <dt>天平动</dt><dd id="mi-map-libration">—</dd>
+        <dt>日下点</dt><dd id="mi-map-subsolar">—</dd>
+        <dt>余经度</dt><dd id="mi-map-colong">—</dd>
+        <dt>地心距 / 站心距</dt><dd id="mi-map-dist">—</dd>
+        <dt>视直径</dt><dd id="mi-map-diam">—</dd>
+        <dt>高度</dt><dd id="mi-map-alt">—</dd>
+        <dt>方位角</dt><dd id="mi-map-az">—</dd>
+        <dt>赤经</dt><dd id="mi-map-ra">—</dd>
+        <dt>赤纬</dt><dd id="mi-map-dec">—</dd>
+        <dt>与太阳距角</dt><dd id="mi-map-elong">—</dd>
+        <dt>太阳高度</dt><dd id="mi-map-sunalt">—</dd>
+        <dt>轨道速度</dt><dd id="mi-map-vel">—</dd>
+        <dt>光行时</dt><dd id="mi-map-light">—</dd>
+      </dl>
 
-    <h2>光照</h2>
-    <label class="field">
-      <span>UTC</span>
-      <input id="light-when" type="datetime-local" step="60">
-    </label>
-    <div class="field-pair">
-      <label class="field"><span>纬度</span>
-        <input id="light-lat" type="number" min="-90" max="90" step="0.1" value="30">
+    </section>
+
+    <section class="group">
+      <h2>光照 <span class="en">Lighting</span></h2>
+      <label class="check" title="按当前日下点方向给地形坡度做明暗；低太阳角时叠加山脊和坑缘的投射阴影">
+        <input id="light-on" type="checkbox" checked>
+        <span>月面光照</span>
       </label>
-      <label class="field"><span>经度</span>
-        <input id="light-lon" type="number" min="-180" max="180" step="0.1" value="120">
+      <label class="check">
+        <input id="shadow-on" type="checkbox" checked>
+        <span>夜面压暗</span>
       </label>
-    </div>
-    <label class="check">
-      <input id="light-on" type="checkbox" checked>
-      <span>月面光照</span>
-    </label>
-    <label class="check">
-      <input id="shadow-on" type="checkbox" checked>
-      <span>阴影带</span>
-    </label>
-    <div class="panel-actions">
-      <button id="light-apply">应用</button>
-      <button id="light-now">此刻</button>
-    </div>
-    <div class="hint" id="light-readout">—</div>
+    </section>
 
-    <h2>工具</h2>
-    <div class="panel-actions">
-      <button id="copy-coords">复制坐标</button>
-      <button id="clear-selection">清除选中</button>
-    </div>
-    <div id="tool-slot" class="tool-slot"></div>
+    <section class="group">
+      <h2>显示 <span class="en">Display</span></h2>
+      <label class="field">
+        <span>投影</span>
+        <select id="projection">
+          <option value="equirect" selected>等距圆柱</option>
+          <option value="mercator">墨卡托</option>
+          <option value="globe">球面 / 3D</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>底图亮度</span>
+        <input id="base-brightness" type="range" min="0.35" max="1.6" step="0.05" value="1">
+      </label>
+    </section>
+
+    <section class="group">
+      <h2>图层 <span class="hint" id="layer-count"></span></h2>
+      <div id="layer-list" class="layer-list"></div>
+    </section>
+
+    <section class="group">
+      <h2>工具 <span class="en">Tools</span></h2>
+      <div class="panel-actions">
+        <button id="copy-coords">复制坐标</button>
+        <button id="clear-selection">清除选中</button>
+      </div>
+      <button class="ghost mini" id="light-from-map" title="把观测点设为当前地图中心">取地图中心</button>
+      <div id="tool-slot" class="tool-slot"></div>
+    </section>
   </aside>
+
+  <div class="map-splitter v" data-target="left" title="拖动调整左栏宽度"></div>
 
   <section class="map-stage" id="map-stage">
     <canvas id="map-canvas"></canvas>
@@ -118,7 +259,9 @@
     </div>
   </section>
 
-  <aside class="panel info-panel">
+  <div class="map-splitter v" data-target="right" title="拖动调整右栏宽度"></div>
+
+  <aside class="panel info-panel" id="map-right">
     <h2>选中对象</h2>
     <div id="selection-info" class="selection-info empty">—</div>
 

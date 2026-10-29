@@ -33,6 +33,7 @@ moonlib = use_src()
 
 import moonlib  # noqa: E402
 from moonlib.annotations import annotate_frame, disk_frame, region_frame  # noqa: E402
+from moonlib.labelpaint import leader_start, marker_shape  # noqa: E402
 
 #: The page's palette, one colour per landform class.  The page owns this table
 #: -- colour is presentation -- and this tool carries a copy so that what it
@@ -129,7 +130,6 @@ def draw_annotations(
     # outline_color here is what makes that flag do something: it was being
     # converted into a local that nothing used, so changing it had no effect.
     outline_ink = _rgb(outline_color)
-    radius = max(1.6, plan.font_px * 0.16)
     palette = CLASS_COLORS if class_colors is None else class_colors
 
     def colour_of(item: Any) -> Tuple[int, int, int]:
@@ -186,11 +186,28 @@ def draw_annotations(
             stroke_rim([tuple(point) for point in item.outline],
                        colour_of(item), outline_width)
     for item in plan.items:
+        # A region name set across its own formation is its own locator; a
+        # feature whose rim is drawn is located by the rim; a landing site is a
+        # crosshair.  The rules live in ``labelpaint`` so the page, the preview
+        # and an animation cannot drift apart.
+        if item.region and item.labelled and not item.leader:
+            continue
+        shape = marker_shape(item, plan.font_px, outline_style != "none")
+        if shape is None:
+            continue
+        kind, radius, line_width = shape
+        if kind == "cross":
+            width = max(1, int(round(line_width)))
+            draw.line([item.x - radius, item.y, item.x + radius, item.y],
+                      fill=colour_of(item), width=width)
+            draw.line([item.x, item.y - radius, item.x, item.y + radius],
+                      fill=colour_of(item), width=width)
+            continue
         draw.ellipse(
             [item.x - radius, item.y - radius, item.x + radius, item.y + radius],
             fill=colour_of(item),
-            outline=outline_ink,
-            width=1,
+            outline=outline_ink if plan.font_px * 0.03 >= 0.6 else None,
+            width=max(1, int(round(plan.font_px * 0.03))),
         )
     for item in plan.items:
         if not item.labelled:
@@ -199,9 +216,12 @@ def draw_annotations(
         right, bottom = left + item.label_w, top + item.label_h
         centre_y = top + item.label_h / 2.0
         if item.leader:
-            anchor_x = min(max(item.x, left), right)
-            anchor_y = min(max(item.y, top), bottom)
-            draw.line([item.x, item.y, anchor_x, anchor_y], fill=colour_of(item), width=1)
+            start = leader_start(item)
+            if start is not None:
+                anchor_x = min(max(item.x, left), right)
+                anchor_y = min(max(item.y, top), bottom)
+                draw.line([start[0], start[1], anchor_x, anchor_y],
+                          fill=colour_of(item), width=max(1, int(round(plan.font_px * 0.04))))
         if box_outline:
             draw.rectangle([left, top, right, bottom], outline=(90, 120, 200), width=1)
         draw.text(
@@ -236,13 +256,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--outline-color", default="#b4d6ff")
     parser.add_argument("--text-color", default="#eef2ff")
     parser.add_argument("--text-stroke", default="#0c0e14")
-    parser.add_argument("--text-stroke-width", type=float, default=2.0)
+    parser.add_argument("--text-stroke-width", type=float, default=1.2)
     parser.add_argument("--bold", action="store_true", help="bold label text")
     parser.add_argument("--all-kinds", action="store_true", help="keep unlit features too")
     parser.add_argument("--classes", help="comma-separated class keys (see --list-classes)")
     parser.add_argument("--list-classes", action="store_true", help="print the classes and exit")
     parser.add_argument("--uniform", action="store_true",
                         help="one colour for everything, as the page's 统一配色 does")
+    parser.add_argument("--region-captions", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="set the maria/lakes/bays names across the formation "
+                             "(月海居中; on by default, --no-region-captions turns it off)")
     parser.add_argument("--box-outline", action="store_true", help="draw label boxes (debug)")
     parser.add_argument("--font", help="font file for the labels")
     parser.add_argument("--out", type=Path, help="PNG to write")
@@ -307,6 +331,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # The same height field the picture was traced from, so the names land
         # on the pixels they name rather than on the sphere under them.
         terrain=moonlib.open_terrain(),
+        region=args.region_captions,
     )
     counts = plan.to_dict()["counts"]
     shown_classes = ", ".join(

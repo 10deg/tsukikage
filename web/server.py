@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -233,6 +233,40 @@ def _f(payload: Dict[str, Any], key: str, default: float) -> float:
 def _opt_f(payload: Dict[str, Any], key: str) -> Optional[float]:
     value = _finite(payload.get(key), float("nan"))
     return None if value != value else value
+
+
+def _obstacle_rects(value: Any) -> Tuple[Tuple[float, float, float, float], ...]:
+    """Rectangles a label layout must keep clear of, in frame pixels.
+
+    The page sends these for the parts of the picture that are already drawn by
+    hand -- the movable scale bar, an inset -- so a landform name cannot be set
+    on top of them.  Each entry is ``[x, y, width, height]``; a malformed entry
+    is a bad request rather than a silently ignored rectangle, because the only
+    caller is our own page and a silently dropped obstacle would show up as a
+    label sitting on the scale bar with no way to see why.
+    """
+    if value in (None, (), []):
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise moonlib.MoonlibError("obstacles must be a list of [x, y, width, height].")
+    rects = []
+    for entry in value:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 4:
+            raise moonlib.MoonlibError(
+                "each obstacle must have four numbers: [x, y, width, height]."
+            )
+        try:
+            x, y, width, height = (float(entry[index]) for index in range(4))
+        except (TypeError, ValueError):
+            raise moonlib.MoonlibError(
+                "obstacle coordinates must be numbers: [x, y, width, height]."
+            ) from None
+        if not all(math.isfinite(number) for number in (x, y, width, height)):
+            raise moonlib.MoonlibError("obstacle coordinates must be finite numbers.")
+        if width <= 0.0 or height <= 0.0:
+            continue
+        rects.append((x, y, width, height))
+    return tuple(rects)
 
 
 def parse_train(payload: Dict[str, Any]) -> moonlib.ImagingTrain:
@@ -551,6 +585,153 @@ def _apply_region_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if array.ndim == 2:
         return array * coverage
     return array * coverage[..., None]
+
+
+def _ellipse_region_mask(width: int, height: int) -> np.ndarray:
+    """A filled ellipse inscribed in the close-up frame.
+
+    The ellipse selection is the sky footprint; the close-up camera covers its
+    bounding rectangle, so the ellipse touches the middle of each edge.  The
+    preview is masked to that exact shape, which is what makes the on-screen
+    frame agree with the elliptical selector and the round model.
+    """
+    from PIL import Image, ImageDraw
+
+    width = max(8, int(width))
+    height = max(8, int(height))
+    image = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(image).ellipse((0, 0, width - 1, height - 1), fill=255)
+    return np.asarray(image, dtype=np.float32) / 255.0
+
+
+def _orthorectify_ellipse(
+    image: np.ndarray,
+    view: Any,
+    region: Any,
+    ellipse: Any,
+    rotation_deg: float,
+    terrain: Any,
+) -> np.ndarray:
+    """Resample a perspective close-up into the corrected ellipse frame.
+
+    The renderer produces a photograph: near the limb the selected ground
+    patch is foreshortened.  A projection-corrected selection asks for the
+    ground patch itself, so the finished frame is resampled through the same
+    tangent plane the live preview uses.  The output keeps the requested pixel
+    size; the standard ellipse is fitted inside it, with black around it.
+    """
+    array = np.asarray(image, dtype=np.float32)
+    height, width = array.shape[:2]
+    frame = region_frame(
+        view,
+        float(region.lon_deg), float(region.lat_deg), float(region.span_km),
+        int(width), int(height),
+        rotation_deg=float(rotation_deg), terrain=terrain,
+        target_elevation_km=float(region.target_elevation_km),
+    )
+    half_w = max(float(ellipse.ground_half_width_km), 1e-6)
+    half_h = max(float(ellipse.ground_half_height_km), 1e-6)
+    aspect = half_w / half_h
+    if width / max(height, 1) > aspect:
+        ellipse_w = height * aspect
+        ellipse_h = float(height)
+    else:
+        ellipse_w = float(width)
+        ellipse_h = width / max(aspect, 1e-9)
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    u = (xx + 0.5 - width / 2.0) / max(ellipse_w / 2.0, 1e-9)
+    v = (height / 2.0 - (yy + 0.5)) / max(ellipse_h / 2.0, 1e-9)
+    inside = u * u + v * v <= 1.0
+    gx = u * half_w
+    gy = v * half_h
+    reference = float(ellipse.reference_radius_km)
+    height_km = np.sqrt(np.maximum(reference * reference - gx * gx - gy * gy, 0.0))
+    points = (
+        height_km[..., None] * np.asarray(ellipse.up0)[None, None, :]
+        + gx[..., None] * np.asarray(ellipse.u)[None, None, :]
+        + gy[..., None] * np.asarray(ellipse.v)[None, None, :]
+    )
+    flat = (points / reference).reshape(-1, 3)
+    projected = frame.project_directions(flat)
+    src_x = np.asarray(projected["x"], dtype=np.float64).reshape(height, width)
+    src_y = np.asarray(projected["y"], dtype=np.float64).reshape(height, width)
+    facing = np.asarray(projected["facing"], dtype=bool).reshape(height, width)
+    inside &= facing & (src_x >= 0.0) & (src_x <= width - 1.0) \
+        & (src_y >= 0.0) & (src_y <= height - 1.0)
+    x0 = np.floor(src_x).astype(np.int64)
+    y0 = np.floor(src_y).astype(np.int64)
+    x1 = np.clip(x0 + 1, 0, width - 1)
+    y1 = np.clip(y0 + 1, 0, height - 1)
+    x0 = np.clip(x0, 0, width - 1)
+    y0 = np.clip(y0, 0, height - 1)
+    fx = (src_x - np.floor(src_x))[..., None]
+    fy = (src_y - np.floor(src_y))[..., None]
+    if array.ndim == 2:
+        fx = fx[..., 0]
+        fy = fy[..., 0]
+    top = array[y0, x0] * (1.0 - fx) + array[y0, x1] * fx
+    bottom = array[y1, x0] * (1.0 - fx) + array[y1, x1] * fx
+    sampled = top * (1.0 - fy) + bottom * fy
+    out = np.zeros_like(array)
+    mask = inside[..., None] if array.ndim == 3 else inside
+    out = np.where(mask, sampled, out)
+    return out
+
+
+def _projected_ellipse_region_mask(
+    view: Any,
+    ellipse: Any,
+    width: int,
+    height: int,
+    target_elevation_km: float,
+    terrain: Any,
+) -> np.ndarray:
+    """Rasterise the elliptical selector's *deformed* footprint.
+
+    A plain ellipse in the finished frame is the sky-plane shape.  Against the
+    limb that shape is wrong: the cone of rays meets the sphere in a curve that
+    runs along the limb, and the page draws exactly that curve.  The mask has
+    to use the same one, or the exported picture is cut by a circle the reader
+    never drew.
+
+    The boundary is computed on the reference sphere by
+    :func:`moonlib.selection_ellipse_boundary` and projected through the
+    renderer's own frame, so the mask and the picture cannot disagree about
+    where the selector went.
+    """
+    from PIL import Image, ImageDraw
+
+    width = max(8, int(width))
+    height = max(8, int(height))
+    distance = float(view.distance_km)
+    span_km = 2.0 * distance * math.tan(
+        math.radians(float(ellipse.fov_radius_arcsec) / 3600.0)
+    )
+    frame = region_frame(
+        view, float(ellipse.lon_deg), float(ellipse.lat_deg), span_km, width, height,
+        rotation_deg=float(ellipse.rotation_deg), terrain=terrain,
+        target_elevation_km=float(target_elevation_km),
+    )
+    lonlat = ellipse.boundary_lonlat(721)
+    projected = frame.project(lonlat[:, 1], lonlat[:, 0], 0.0)
+    scale = min(1.0, 2048.0 / max(width, height))
+    mask_w = max(8, int(round(width * scale)))
+    mask_h = max(8, int(round(height * scale)))
+    points = [
+        (float(x) * scale, float(y) * scale)
+        for x, y in zip(projected["x"], projected["y"])
+        if math.isfinite(float(x)) and math.isfinite(float(y))
+    ]
+    if len(points) < 3:
+        # A degenerate projection (a selection almost exactly on the far-side
+        # limit) still has to produce a frame; fall back to the sky ellipse
+        # rather than masking the whole picture black.
+        return _ellipse_region_mask(width, height)
+    canvas = Image.new("L", (mask_w, mask_h), 0)
+    ImageDraw.Draw(canvas).polygon(points, fill=255)
+    if (mask_w, mask_h) != (width, height):
+        canvas = canvas.resize((width, height), Image.BILINEAR)
+    return np.asarray(canvas, dtype=np.float32) / 255.0
 
 
 def _corrected_region_mask(
@@ -1282,6 +1463,8 @@ class MoonService:
         # selection; build them once per terrain object.
         self._globe_lock = threading.Lock()
         self._globe_cache: Optional[Tuple[int, bytes, Dict[str, Any]]] = None
+        # Low-resolution equirectangular textures for the full-disk 3D view.
+        self._texture_cache: Dict[Tuple[Any, ...], bytes] = {}
         # The flag the running render polls.  Set by /api/cancel, replaced at the
         # start of every render: a cancel that arrives after the frame it was
         # meant for must not stop the next one.
@@ -2011,6 +2194,119 @@ class MoonService:
         finally:
             self._render_lock.release()
 
+    def globe_texture(self, request: Dict[str, Any], width: int) -> bytes:
+        """A low-resolution equirectangular Moon for the 3D preview.
+
+        This is deliberately not a ray march: the client only uses it at low
+        zoom, and a 1024x512 shaded texture is a few hundred kilobytes.  The
+        texture is rebuilt when the Sun direction changes and cached by width
+        and subsolar vector, so rotating the globe costs no server work at all.
+        """
+        width = max(512, min(2048, int(width)))
+        height = width // 2
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        view = self.view(
+            when.get("at") or None, site,
+            _earthshine(request.get("earthshine"))["earth_geometric_albedo"],
+            parse_viewpoint(request),
+        )
+        key = (
+            width,
+            round(float(view.sun_direction[0]), 4),
+            round(float(view.sun_direction[1]), 4),
+            round(float(view.sun_direction[2]), 4),
+        )
+        with self._lock:
+            cached = self._texture_cache.get(key)
+        if cached is not None:
+            return cached
+
+        terrain = self.terrain()
+        lon = np.linspace(-180.0, 180.0, width, endpoint=False) + 180.0 / width
+        lat = 90.0 - (np.arange(height, dtype=np.float64) + 0.5) / height * 180.0
+        lon_grid, lat_grid = np.meshgrid(lon, lat)
+        radius_km = float(terrain.reference_radius_km)
+        km_per_px = math.radians(360.0 / width) * radius_km
+        try:
+            level = int(terrain.dem.level_for_ground_scale(km_per_px))
+        except Exception:
+            level = 0
+        level = max(0, min(level, int(getattr(terrain.dem, "n_levels", level + 1)) - 1))
+        heights = np.asarray(
+            terrain.dem.sample(lon_grid, lat_grid, level), dtype=np.float64
+        )
+        if heights.shape != lon_grid.shape:  # pragma: no cover - defensive
+            heights = np.broadcast_to(heights, lon_grid.shape).astype(np.float64)
+        heights = np.where(np.isfinite(heights), heights, np.nanmin(heights))
+
+        d_lon = 360.0 / width
+        d_lat = 180.0 / height
+        east = np.asarray(terrain.dem.sample(lon_grid + d_lon, lat_grid, level),
+                          dtype=np.float64)
+        west = np.asarray(terrain.dem.sample(lon_grid - d_lon, lat_grid, level),
+                          dtype=np.float64)
+        north = np.asarray(terrain.dem.sample(lon_grid, lat_grid + d_lat, level),
+                           dtype=np.float64)
+        south = np.asarray(terrain.dem.sample(lon_grid, lat_grid - d_lat, level),
+                           dtype=np.float64)
+        cos_lat = np.maximum(np.cos(np.radians(lat_grid)), 0.02)
+        dx_km = math.radians(d_lon) * radius_km * cos_lat
+        dy_km = math.radians(d_lat) * radius_km
+        slope_east = (east - west) / (2.0 * dx_km)
+        slope_north = (north - south) / (2.0 * dy_km)
+        norm = np.sqrt(slope_east * slope_east + slope_north * slope_north + 1.0)
+        normal_east = -slope_east / norm
+        normal_north = -slope_north / norm
+        normal_up = 1.0 / norm
+
+        sx, sy, sz = (float(value) for value in view.sun_direction)
+        lon_r = np.radians(lon_grid)
+        lat_r = np.radians(lat_grid)
+        light_east = -np.sin(lon_r) * sx + np.cos(lon_r) * sy
+        light_north = (
+            -np.sin(lat_r) * np.cos(lon_r) * sx
+            - np.sin(lat_r) * np.sin(lon_r) * sy
+            + np.cos(lat_r) * sz
+        )
+        light_up = (
+            np.cos(lat_r) * np.cos(lon_r) * sx
+            + np.cos(lat_r) * np.sin(lon_r) * sy
+            + np.sin(lat_r) * sz
+        )
+        direct = (
+            normal_east * light_east
+            + normal_north * light_north
+            + normal_up * light_up
+        )
+        shade = np.clip(0.10 + 1.04 * np.maximum(direct, 0.0), 0.0, 1.15)
+
+        colors = None
+        if terrain.albedo is not None:
+            try:
+                colors = np.asarray(
+                    terrain.albedo_rgb(lon_grid, lat_grid, level), dtype=np.float64
+                )
+            except Exception:
+                colors = None
+        if colors is not None and colors.shape[-1] >= 3:
+            base = np.clip(colors[..., :3], 0.0, 1.0) ** 0.45
+            base = np.clip(base * 1.22, 0.0, 1.0)
+        else:
+            grey = np.clip(
+                0.55 + 0.55 * (heights - float(np.mean(heights))) / 8.0,
+                0.15, 1.0,
+            )
+            base = np.repeat(grey[..., None], 3, axis=-1)
+        rgb = np.clip(base * shade[..., None], 0.0, 1.0)
+        rgb = rgb * 0.92 / (1.0 + 0.18 * rgb)
+        png = encode_png(rgb)
+        with self._lock:
+            self._texture_cache[key] = png
+            while len(self._texture_cache) > 6:
+                self._texture_cache.pop(next(iter(self._texture_cache)))
+        return png
+
     def disk(self, request: Dict[str, Any], width: int, samples: int,
              shadow_steps: int,
              cancel: Optional[Callable[[], bool]] = None,
@@ -2204,9 +2500,46 @@ class MoonService:
         rotation = _f(selection, "rotation_deg", 0.0)
         fov = _f(selection, "fov_radius_arcsec", 200.0)
         base_aspect = _f(selection, "aspect", 1.0)
+        ellipse = bool(selection.get("ellipse"))
         corrected = bool(selection.get("corrected"))
+        ellipse_geometry = None
         correction = None
-        if corrected:
+        # An ellipse is a *ground patch*: radius_on_the_Moon, not a sky angle.
+        # Its screen shape foreshortens near the limb, and its centre is kept
+        # on the cap where the whole patch is visible -- so it can touch the
+        # limb but never be cut by it.
+        if ellipse and corrected:
+            radius_fraction = _opt_f(selection, "radius_fraction")
+            if radius_fraction is None:
+                radius_fraction = fov / max(
+                    1e-9, 0.5 * float(view.angular_diameter_deg) * 3600.0
+                )
+            ellipse_geometry = moonlib.selection_ellipse_geometry(
+                view, lon, lat,
+                radius_fraction=radius_fraction,
+                aspect=base_aspect,
+                rotation_deg=rotation,
+                terrain=self.terrain(),
+            )
+            lon = ellipse_geometry.lon_deg
+            lat = ellipse_geometry.lat_deg
+            # The corrected frame is the ground patch itself; the renderer's
+            # sky frame has to be large enough to contain its long axis, not
+            # only the short one.  Otherwise the orthorectification has no
+            # source pixels beyond the sky footprint and clips the patch.
+            ground_half = max(
+                ellipse_geometry.ground_half_width_km,
+                ellipse_geometry.ground_half_height_km,
+            )
+            fov = max(
+                fov,
+                math.degrees(math.atan(ground_half / max(view.distance_km, 1.0)))
+                * 3600.0 * 1.15,
+            )
+        # A corrected rectangle describes a different selection from an
+        # ellipse; the 3D endpoint still builds a round corrected tile from the
+        # same flags.
+        if corrected and not ellipse:
             # The page's box is still the ordinary sky rectangle; the corrected
             # frame is the smallest rectangle around its irregular preimage.
             # Both the render and the mask are built from this one answer.
@@ -2242,7 +2575,24 @@ class MoonService:
         )
         linear = sunlit if earthshine is None else sunlit + earthshine
         mask_fraction = None
-        if correction is not None:
+        ellipse_preview = ellipse
+        mask = None
+        if ellipse_geometry is not None:
+            # The corrected ellipse is a patch of ground projected onto the
+            # sky; mask that curve, the same one the page draws on the full
+            # disk and in the live close-up.
+            mask = _projected_ellipse_region_mask(
+                view, ellipse_geometry,
+                int(render.region.width), int(render.region.height),
+                float(render.region.target_elevation_km), self.terrain(),
+            )
+        elif ellipse_preview:
+            # Classic ellipse: the sky-plane shape, allowed to run over the
+            # limb exactly like an uncorrected square selection.
+            mask = _ellipse_region_mask(
+                int(render.region.width), int(render.region.height)
+            )
+        elif correction is not None:
             # The camera covers the bounding sky box; the irregular selection
             # is the only part that is processed.  Masking the *linear* frame,
             # before it is cached, is what makes every later slider pass and
@@ -2252,12 +2602,28 @@ class MoonService:
                 int(render.region.width), int(render.region.height),
                 float(render.region.target_elevation_km), self.terrain(),
             )
+        if mask is not None:
             mask_fraction = float(np.mean(mask))
             sunlit = _apply_region_mask(sunlit, mask)
             if earthshine is not None:
                 earthshine = _apply_region_mask(earthshine, mask)
             linear = _apply_region_mask(linear, mask)
-
+        orthorectified = (
+            ellipse_geometry is not None
+            and bool(selection.get("ellipse"))
+            and bool(selection.get("corrected"))
+        )
+        if orthorectified:
+            sunlit = _orthorectify_ellipse(
+                sunlit, view, render.region, ellipse_geometry, rotation,
+                self.terrain(),
+            )
+            if earthshine is not None:
+                earthshine = _orthorectify_ellipse(
+                    earthshine, view, render.region, ellipse_geometry, rotation,
+                    self.terrain(),
+                )
+            linear = sunlit if earthshine is None else sunlit + earthshine
 
         # The counter and the frame it names are written together: two requests
         # arriving at once must not be handed the same render_id, or the page
@@ -2292,6 +2658,9 @@ class MoonService:
                 "angular_diameter_deg": float(view.angular_diameter_deg),
                 "viewpoint": view.viewpoint.value,
                 "corrected": bool(corrected),
+                "ellipse": bool(selection.get("ellipse")),
+                "ellipse_masked": bool(ellipse_preview),
+                "orthorectified": bool(orthorectified),
             })
             if correction is not None:
                 region_context.update({
@@ -2299,8 +2668,9 @@ class MoonService:
                     "corrected_aspect": float(correction.aspect),
                     "ground_width_km": float(correction.ground_width_km),
                     "ground_height_km": float(correction.ground_height_km),
-                    "mask_fraction": mask_fraction,
                 })
+            if mask_fraction is not None:
+                region_context["mask_fraction"] = float(mask_fraction)
             self._linear_context = {
                 "region": region_context,
                 "train": train.to_dict(),
@@ -2315,13 +2685,17 @@ class MoonService:
         }
         body["region"]["render_seconds"] = time.time() - started
         body["region"]["corrected"] = bool(corrected)
+        body["region"]["ellipse"] = bool(selection.get("ellipse"))
+        body["region"]["ellipse_masked"] = bool(ellipse_preview)
+        body["region"]["orthorectified"] = bool(orthorectified)
+        if mask_fraction is not None:
+            body["region"]["mask_fraction"] = float(mask_fraction)
         if correction is not None:
             body["region"].update({
                 "corrected_fov_radius_arcsec": float(correction.fov_radius_arcsec),
                 "corrected_aspect": float(correction.aspect),
                 "ground_width_km": float(correction.ground_width_km),
                 "ground_height_km": float(correction.ground_height_km),
-                "mask_fraction": mask_fraction,
                 "ground_box_km": list(correction.ground_box),
             })
         # Reported the way the disk render reports it, so the pane that says how
@@ -2392,6 +2766,7 @@ class MoonService:
         )
         options = request.get("mesh") or {}
         corrected = bool(selection.get("corrected"))
+        round_base = bool(selection.get("ellipse"))
         projection = bool(options.get("projection", True))
         # The page sends a valid fallback number in `resolution` as well as
         # `resolution_mode`: an older server that does not know the auto mode
@@ -2402,13 +2777,11 @@ class MoonService:
             0 if resolution_mode == "auto"
             else int(_f(options, "resolution", 0))
         )
-        tile = moonlib.selection_tile(
-            view,
-            _f(selection, "lon", 0.0),
-            _f(selection, "lat", 0.0),
+        arguments = dict(
             fov_radius_arcsec=_f(selection, "fov_radius_arcsec", 0.0),
             aspect=_f(selection, "aspect", 1.0),
             rotation_deg=_f(selection, "rotation_deg", 0.0),
+            radius_fraction=_opt_f(selection, "radius_fraction"),
             long_side_mm=_f(options, "long_side_mm", 100.0),
             base_depth_km=_f(options, "base_depth_km", 2.0),
             vertical_exaggeration=_f(options, "vertical_exaggeration", 1.0),
@@ -2416,7 +2789,23 @@ class MoonService:
             terrain=self.terrain(),
             projection=projection,
             corrected=corrected,
+            round_base=round_base,
         )
+        lon = _f(selection, "lon", 0.0)
+        lat = _f(selection, "lat", 0.0)
+        try:
+            tile = moonlib.selection_tile(view, lon, lat, **arguments)
+        except moonlib.MoonlibError as exc:
+            # A box drawn against the limb can still describe printable ground
+            # even when some rays miss the sphere.  The corrected path keeps the
+            # valid ground rectangle; retrying that way is better than refusing
+            # the export.  A truly far-side target is still rejected.
+            if corrected or "past the lunar limb" not in str(exc):
+                raise
+            arguments["corrected"] = True
+            tile = moonlib.selection_tile(view, lon, lat, **arguments)
+            options = dict(options)
+            options["limb_fallback"] = True
         return tile, options
 
     def mesh(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -3466,6 +3855,12 @@ class MoonService:
             satellite = "full"
         related = request.get("related")
         related = str(related).strip() if related not in (None, "") else None
+        # A region caption is set across the formation it names (a mare's name
+        # on the mare) instead of beside it with a leader; obstacles are the
+        # rectangles the page has already drawn -- the movable scale bar -- that
+        # no name may be set on top of.
+        region = bool(request.get("region", False))
+        obstacles = _obstacle_rects(request.get("obstacles"))
         focus = request.get("focus")
         if isinstance(focus, dict):
             focus = {
@@ -3495,6 +3890,8 @@ class MoonService:
             "focus": focus,
             "related": related or None,
             "lunar100": bool(request.get("lunar100", False)),
+            "region": region,
+            "obstacles": obstacles,
         }
         if frame_name == "disk":
             when = request.get("when") or {}
@@ -3561,6 +3958,8 @@ class MoonService:
             "focus": options["focus"],
             "related": options["related"],
             "lunar100": options["lunar100"],
+            "region": options["region"],
+            "obstacles": len(options["obstacles"]),
         }
         return payload
 
@@ -3933,6 +4332,7 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
         "satellites": bool(value.get("satellites", True)),
         "avoid_overlap": bool(value.get("avoid_overlap", True)),
         "lunar100": bool(value.get("lunar100", False)),
+        "region": bool(value.get("region", False)),
         "style": style,
     }
 
@@ -3974,6 +4374,7 @@ class _AnimationLabelPainter:
             "satellites": bool(spec.get("satellites", True)),
             "avoid_overlap": spec.get("avoid_overlap", True),
             "lunar100": bool(spec.get("lunar100", False)),
+            "region": bool(spec.get("region", False)),
         }
         self._frozen = None
 
@@ -4415,6 +4816,24 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path == "/api/features":
             return self._json(200, self.service.features())
+        if path == "/api/globe-texture":
+            query = parse_qs(urlparse(self.path).query)
+            def first(name, default=""):
+                return query.get(name, [default])[0]
+            try:
+                width = int(float(first("width", "1024")))
+            except ValueError:
+                width = 1024
+            when = {
+                "at": first("at", ""),
+                "tz_offset_hours": float(first("tz", "8") or 8),
+                "observer": {
+                    "lat": float(first("lat", "30") or 30),
+                    "lon": float(first("lon", "120") or 120),
+                },
+            }
+            png = self.service.globe_texture({"when": when}, width)
+            return self._send(200, png, "image/png")
         if path == "/api/settings":
             return self._json(200, self.service.settings.list())
         match = re.fullmatch(r"/api/patch/(\d+)", path)
