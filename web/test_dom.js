@@ -196,8 +196,11 @@ check('the landform search lives in the always-visible label bar',
     .test(html));
 check('the geometric marks are one full-width row with their own all/none',
   /class="mark-row"[\s\S]*?id="marks-all"/.test(html)
-  && /class="label-divider"/.test(html)
-  && /class="class-row"[\s\S]*?id="classes-all"/.test(html));
+  && /class="class-row"[\s\S]*?id="classes-all"/.test(html)
+  /* The divider belongs above the geometric row, separating the style controls
+     from the switches, not between the switches and the class chips. */
+  && /class="label-divider"[\s\S]*?class="mark-row"/.test(html)
+  && !/class="mark-row"[\s\S]*?class="label-divider"/.test(html));
 /* 锐化半径 is an unsharp mask, and past 4 px it stops sharpening and starts
    redrawing large-scale shading; the slider's own range says so. */
 check('锐化半径 stops at 4 px',
@@ -260,6 +263,12 @@ check('the landform fold caret is a centred CSS triangle',
     .test(css) &&
   /\.label-bar \.caret\[aria-expanded="true"\]::before\s*\{[^}]*rotate\(90deg\)/
     .test(css));
+/* 全宽 means the geometric row spans the panel: the pills keep their own width
+   and sit side by side.  A `width: 100%` on the chips turns every switch into
+   its own row, which is what this rule guards against. */
+check('geometric mark pills share the row instead of each taking a full row',
+  /\.disk-head \.mark-bar \.mark-chip\s*\{[^}]*width:\s*auto/.test(css)
+  && !/\.disk-head \.mark-bar \.mark-chip\s*\{[^}]*width:\s*100%/.test(css));
 /* 曲线图 is a second door in the same heading row, immediately left of
    天空位置.  Both are accent-coloured entries, not switches. */
 check('the curve button sits left of the sky button',

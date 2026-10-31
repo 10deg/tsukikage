@@ -60,7 +60,7 @@ from moonlib.annotations import (  # noqa: E402
     feature_class,
 )
 
-MAP_VERSION = "1.0.0"
+MAP_VERSION = "1.0.1"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -1830,7 +1830,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.0.0"
+    server_version = "TsukikageMap/1.0.1"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

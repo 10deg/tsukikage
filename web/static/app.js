@@ -3780,13 +3780,21 @@ function paintLabels(ctx, plan, style) {
     if (item.leader) {
       const start = leaderStart(item);
       if (start) {
+        // The leader is what ties a displaced name to its locator; as a bare
+        // hairline in the class colour it disappeared over bright highland.
+        // A dark shadow under the same path keeps it legible without drawing a
+        // second line (which the projection test counts).
+        ctx.save();
         ctx.beginPath();
         ctx.moveTo(start.x, start.y);
         ctx.lineTo(Math.min(Math.max(item.x, left), right),
                    Math.min(Math.max(item.y, top), bottom));
         ctx.strokeStyle = colour;
-        ctx.lineWidth = Math.max(1.1, fontPx * 0.04);
+        ctx.lineWidth = Math.max(1.2, fontPx * 0.055);
+        ctx.shadowColor = 'rgba(12, 14, 20, .85)';
+        ctx.shadowBlur = Math.max(1.5, fontPx * 0.14);
         ctx.stroke();
+        ctx.restore();
       }
     }
     if (strokeWidth > 0) {
@@ -17024,6 +17032,16 @@ function syncMarkChips() {
       caption.style.color = box.checked && style ? style.colour : '';
     }
   }
+  updateMarksAllLabel();
+}
+
+/** 全选/全不选 is one button whose word says what the next press will do. */
+function updateMarksAllLabel() {
+  const button = $('marks-all');
+  if (!button) return;
+  const boxes = DISK_MARKS.map((name) => $('mark-' + name)).filter(Boolean);
+  const allOn = boxes.length > 0 && boxes.every((box) => box.checked);
+  button.textContent = allOn ? '全不选' : '全选';
 }
 
 function setResultTab(tab) {
@@ -17752,6 +17770,9 @@ function init() {
       box.checked = !allOn;
       box.dispatchEvent(new Event('change'));
     }
+    // The change events update the pills; make sure the button's own word
+    // follows even when there was nothing to toggle.
+    updateMarksAllLabel();
   });
   $('classes-all').addEventListener('click', () => {
     const boxes = [...document.querySelectorAll('#label-classes input[type="checkbox"]')];

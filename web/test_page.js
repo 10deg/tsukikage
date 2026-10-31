@@ -1767,6 +1767,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('and with all of them off an export can go straight out',
     evalIn(sandbox, 'marksWanted()') === false);
 
+  const marksAll = document.getElementById('marks-all');
+  check('the geometry all/none button says 全选 while the overlays are off',
+    marksAll.textContent === '全选', marksAll.textContent);
+  fire('marks-all', 'click');
+  check('one press turns them all on and the word becomes 全不选',
+    marksAll.textContent === '全不选'
+    && evalIn(sandbox, 'marksWanted()') === true,
+    marksAll.textContent);
+  fire('marks-all', 'click');
+  check('pressing it again clears every overlay and returns to 全选',
+    marksAll.textContent === '全选'
+    && evalIn(sandbox, 'marksWanted()') === false,
+    marksAll.textContent);
+
   console.log('');
   console.log('the landform search');
   await T.loadFeatureIndex();

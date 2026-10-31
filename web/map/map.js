@@ -15,6 +15,11 @@ const TILE = 256;
 const TILE_VERSION = '182';
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 8;
+//: Pixel budget for the globe's base while the camera is moving.  A full
+//: 1200x800 globe costs tens of milliseconds per repaint; a buffer this size
+//: keeps the drag responsive and is stretched over the stage until the camera
+//: settles, when the full-resolution base is painted again.
+const GLOBE_MOVING_PIXELS = 260000;
 const KM_PER_DEGREE = Math.PI / 180 * 1737.4;
 
 const LAYER_COLORS = {
@@ -163,6 +168,10 @@ const state = {
   hashTimer: null,
   fitted: false,
   fullscreen: false,
+  //: True while a drag or a wheel burst is changing the camera.  Projected
+  //: bases may then be painted at reduced resolution and sharpened when the
+  //: camera stops; the overlays stay at full resolution throughout.
+  interacting: false,
 };
 
 /* ── view maths ─────────────────────────────────────────────────────────── */
@@ -224,7 +233,20 @@ function globeRadius() {
   return Math.min(state.width, state.height) * 0.44 * state.globe.zoom;
 }
 
+//: The globe basis is shared by the base painter, every marker, caption and
+//: graticule sample.  A view does not change inside a frame, so the same three
+//: vectors can be reused instead of recomputing a dozen sin/cos calls and
+//: allocating three arrays for every use -- that churn was a large part of the
+//: globe's drag cost.
+let globeBasisCache = null;
+let globeBasisLon = NaN;
+let globeBasisLat = NaN;
+
 function globeBasis() {
+  if (globeBasisCache && state.globe.lon === globeBasisLon
+      && state.globe.lat === globeBasisLat) {
+    return globeBasisCache;
+  }
   const lon = state.globe.lon * Math.PI / 180;
   const lat = state.globe.lat * Math.PI / 180;
   const up = [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
@@ -234,7 +256,10 @@ function globeBasis() {
     -Math.sin(lat) * Math.sin(lon),
     Math.cos(lat),
   ];
-  return { up, east, north };
+  globeBasisCache = { up, east, north };
+  globeBasisLon = state.globe.lon;
+  globeBasisLat = state.globe.lat;
+  return globeBasisCache;
 }
 
 function mercatorY(lat) {
@@ -396,12 +421,13 @@ function clampCenter() {
 }
 
 function fitView() {
+  endInteraction();
   if (state.projection === 'globe') {
     state.globe = { lon: 0, lat: 0, zoom: 1 };
     state.centerLon = 0;
     state.centerLat = 0;
     state.mercY = 0;
-    render();
+    flushRender();
     scheduleFeatures();
     scheduleHash();
     return;
@@ -416,7 +442,7 @@ function fitView() {
   state.centerLat = 0;
   state.mercY = 0;
   clampCenter();
-  render();
+  flushRender();
   scheduleFeatures();
   scheduleHash();
 }
@@ -435,9 +461,14 @@ function recenterAfterZoom(geo, pivot) {
     const pxPerDeg = (world.w / 360) * state.scale;
     const pxPerRad = pxPerDeg * 180 / Math.PI;
     state.centerLon = wrapLon(geo.lon - (pivot.x - state.width / 2) / pxPerDeg);
-    const m = state.mercY + (pivot.y - state.height / 2) / pxPerRad;
+    // Solve the forward projection for the centre.  The old code reused the
+    // previous centre's mercator ordinate while the pixel scale had already
+    // changed, so a wheel zoom away from the middle moved the picture by the
+    // old offset: the point under the pointer (and the view centre with it)
+    // drifted on every step.
+    const m = mercatorY(geo.lat) + (pivot.y - state.height / 2) / pxPerRad;
+    state.mercY = m;
     state.centerLat = clamp(mercatorYToLat(m), -85, 85);
-    state.mercY = mercatorY(state.centerLat);
     return;
   }
   const point = lonlatToWorld(geo.lon, geo.lat);
@@ -465,10 +496,11 @@ function zoomTo(nextZoom, anchor) {
   scheduleHash();
 }
 
-function zoomBy(factor, anchor) {
+function zoomBy(factor, anchor, defer) {
   if (state.projection === 'globe') {
     state.globe.zoom = clamp(state.globe.zoom * factor, 0.45, 16.0);
-    render();
+    if (defer) renderSoon();
+    else render();
     scheduleFeatures();
     return;
   }
@@ -488,7 +520,8 @@ function zoomBy(factor, anchor) {
   state.scale = clamp(nextScale, 0.18, 16);
   recenterAfterZoom(geo, pivot);
   clampCenter();
-  render();
+  if (defer) renderSoon();
+  else render();
   scheduleFeatures();
   scheduleHash();
 }
@@ -2300,6 +2333,38 @@ function wirePhotoLibrary() {
   wirePhotoMask();
 }
 
+function nextFrame(callback) {
+  if (typeof requestAnimationFrame === 'function') {
+    return requestAnimationFrame(callback);
+  }
+  return setTimeout(callback, 0);
+}
+
+function cancelFrame(id) {
+  if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+  else clearTimeout(id);
+}
+
+let renderFrame = null;
+
+/** Coalesce pointer-move redraws: one frame's work per displayed frame. */
+function renderSoon() {
+  if (renderFrame !== null) return;
+  renderFrame = nextFrame(() => {
+    renderFrame = null;
+    render();
+  });
+}
+
+/** Cancel a queued coarse frame and paint the settled view immediately. */
+function flushRender() {
+  if (renderFrame !== null) {
+    cancelFrame(renderFrame);
+    renderFrame = null;
+  }
+  render();
+}
+
 function render() {
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   ctx.clearRect(0, 0, state.width, state.height);
@@ -2841,19 +2906,98 @@ function ensureProjectionSource() {
   }
 }
 
+/** Paint the globe's orthographic disc into an ImageData buffer.
+ *
+ * This is the only per-pixel trigonometry in the page, so it stays a separate,
+ * small hot function instead of growing the renderer that also handles tiles,
+ * photos, labels and the Mercator branch.  Pixels outside the disc are left
+ * transparent; the canvas background already shows there.
+ */
+function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
+  gain, bounds, resolution) {
+  // Globe: orthographic inverse projection, inlined.  The old loop called
+  // screenToLonLat -- and therefore globeBasis -- for every one of ~1e6
+  // output pixels.  That rebuilt three arrays and a dozen sin/cos values per
+  // pixel; the basis is constant for the frame, so only the inverse projection
+  // (atan2 + asin) is left per pixel.  The disc has a known bounding box.
+  const { up, east, north } = globeBasis();
+  // `resolution` below 1 paints a smaller buffer that drawImage stretches over
+  // the stage while the camera is moving; all screen-space maths stays in the
+  // same units as the full-resolution frame.
+  const scale = resolution === undefined ? 1 : resolution;
+  const radius = globeRadius() * scale;
+  const cx = state.width * 0.5 * scale;
+  const cy = state.height * 0.5 * scale;
+  const invRadius = 1 / Math.max(radius, 1e-9);
+  const x0 = Math.max(0, Math.floor(cx - radius - 0.5));
+  const x1 = Math.min(width - 1, Math.ceil(cx + radius - 0.5));
+  const y0 = Math.max(0, Math.floor(cy - radius - 0.5));
+  const y1 = Math.min(height - 1, Math.ceil(cy + radius - 0.5));
+  const invDeg = 180 / Math.PI;
+  const uSpan = bounds ? Math.max(1e-9, bounds.east - bounds.west) : 360;
+  const vSpan = bounds ? Math.max(1e-9, bounds.north - bounds.south) : 180;
+  const uScale = bounds ? 1 / uSpan : 1 / 360;
+  const uOffset = bounds ? -bounds.west / uSpan : 0.5;
+  const vScale = bounds ? -1 / vSpan : -1 / 180;
+  const vOffset = bounds ? bounds.north / vSpan : 0.5;
+  const lastX = sourceWidth - 1;
+  const lastY = sourceHeight - 1;
+  for (let y = y0; y <= y1; y += 1) {
+    const ny = (cy - (y + 0.5)) * invRadius;
+    const ny2 = ny * ny;
+    if (ny2 > 1) continue;
+    const row = y * width * 4;
+    for (let x = x0; x <= x1; x += 1) {
+      const nx = (x + 0.5 - cx) * invRadius;
+      const rho2 = nx * nx + ny2;
+      if (rho2 > 1) continue;
+      const nz = Math.sqrt(1 - rho2);
+      const vx = nx * east[0] + ny * north[0] + nz * up[0];
+      const vy = nx * east[1] + ny * north[1] + nz * up[1];
+      const vz = nx * east[2] + ny * north[2] + nz * up[2];
+      const u = Math.atan2(vy, vx) * invDeg * uScale + uOffset;
+      if (u < 0 || u > 1) continue;
+      const z = vz > 1 ? 1 : vz < -1 ? -1 : vz;
+      const v = Math.asin(z) * invDeg * vScale + vOffset;
+      if (v < 0 || v > 1) continue;
+      let sx = (u * sourceWidth) | 0;
+      let sy = (v * sourceHeight) | 0;
+      if (sx > lastX) sx = lastX;
+      if (sy > lastY) sy = lastY;
+      const sourceOffset = (sy * sourceWidth + sx) * 4;
+      const offset = row + x * 4;
+      // ImageData is a Uint8ClampedArray, so the assignment does the 0..255
+      // clamp that the old Math.min calls paid for on every channel.
+      out[offset] = source[sourceOffset] * gain;
+      out[offset + 1] = source[sourceOffset + 1] * gain;
+      out[offset + 2] = source[sourceOffset + 2] * gain;
+      out[offset + 3] = 255;
+    }
+  }
+}
+
 function drawProjectedBase() {
   ensureProjectionSource();
   if (!state.sourceCanvas || !state.sourcePixels) return;
-  const width = Math.max(1, Math.round(state.width));
-  const height = Math.max(1, Math.round(state.height));
+  // A full-resolution globe repaint costs tens of milliseconds and most of a
+  // 120 Hz frame.  While the camera moves, paint a smaller buffer and let
+  // drawImage stretch it; the base is sharp again as soon as the pointer (or
+  // wheel) stops.  The budget is in pixels, so a large display gets a coarser
+  // moving base instead of dropping more frames than a small one.
+  const resolution = state.interacting && state.projection === 'globe'
+    ? Math.max(0.25, Math.min(1,
+      Math.sqrt(GLOBE_MOVING_PIXELS / Math.max(1, state.width * state.height))))
+    : 1;
+  const width = Math.max(1, Math.round(state.width * resolution));
+  const height = Math.max(1, Math.round(state.height * resolution));
   const cacheKey = [
     state.projection, state.centerLon, state.centerLat, state.mercY,
     state.globe.lon, state.globe.lat, state.globe.zoom,
-    width, height, state.scale, state.sourceReadyKey,
+    width, height, resolution, state.scale, state.sourceReadyKey,
     state.brightness,
   ].join('|');
   if (state.projectedBase && state.projectedBase.key === cacheKey) {
-    ctx.drawImage(state.projectedBase.canvas, 0, 0);
+    ctx.drawImage(state.projectedBase.canvas, 0, 0, state.width, state.height);
     drawGlobeOutline();
     return;
   }
@@ -2913,46 +3057,15 @@ function drawProjectedBase() {
       }
     }
   } else {
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        const geo = screenToLonLat(x + 0.5, y + 0.5);
-        const offset = (y * width + x) * 4;
-        if (!geo) {
-          out[offset] = background[0];
-          out[offset + 1] = background[1];
-          out[offset + 2] = background[2];
-          out[offset + 3] = 255;
-          continue;
-        }
-        const u = bounds
-          ? (geo.lon - bounds.west) / Math.max(1e-9, bounds.east - bounds.west)
-          : (geo.lon + 180) / 360;
-        const v = bounds
-          ? (bounds.north - geo.lat) / Math.max(1e-9, bounds.north - bounds.south)
-          : (90 - geo.lat) / 180;
-        if (u < 0 || u > 1 || v < 0 || v > 1) {
-          out[offset] = background[0];
-          out[offset + 1] = background[1];
-          out[offset + 2] = background[2];
-          out[offset + 3] = 255;
-          continue;
-        }
-        const sx = Math.min(sourceWidth - 1, Math.floor(u * sourceWidth));
-        const sy = Math.min(sourceHeight - 1, Math.floor(v * sourceHeight));
-        const sourceOffset = (sy * sourceWidth + sx) * 4;
-        out[offset] = Math.min(255, source[sourceOffset] * gain);
-        out[offset + 1] = Math.min(255, source[sourceOffset + 1] * gain);
-        out[offset + 2] = Math.min(255, source[sourceOffset + 2] * gain);
-        out[offset + 3] = 255;
-      }
-    }
+    paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
+      gain, bounds, resolution);
   }
   const off = document.createElement('canvas');
   off.width = width;
   off.height = height;
   off.getContext('2d').putImageData(image, 0, 0);
   state.projectedBase = { key: cacheKey, canvas: off };
-  ctx.drawImage(off, 0, 0);
+  ctx.drawImage(off, 0, 0, state.width, state.height);
   drawGlobeOutline();
 }
 
@@ -3436,17 +3549,23 @@ function placeFeatureLabel(item, occupied, force = false) {
   // ring is off pushed names of large maria a whole feature away from their
   // point.
   const ringDrawn = state.diameters && radius > 3 && state.outlineStyle !== 'none';
-  const gap = ringDrawn ? radius : Math.max(4, item.marker || 4);
+  // Point features put their name immediately to the left of the locator; the
+  // ring, when drawn, is context rather than a no-go zone, so it no longer
+  // pushes the name a full radius away.  A region's name still belongs across
+  // the formation, so that branch keeps its centred first choice.
+  const gap = Math.max(3, item.marker || 4);
   const attempts = REGION_LABEL_CLASSES.has(feature.class)
     ? [
       { x: screen.x, y: screen.y, align: 'center' },
       { x: screen.x, y: screen.y - height * 0.9, align: 'center' },
       { x: screen.x, y: screen.y + height * 0.9, align: 'center' },
-      { x: screen.x + gap + 6, y: screen.y, align: 'left' },
+      { x: screen.x - gap - 6, y: screen.y, align: 'right' },
     ]
     : [
-      { x: screen.x + gap + 6, y: screen.y, align: 'left' },
       { x: screen.x - gap - 6, y: screen.y, align: 'right' },
+      { x: screen.x - gap - 6, y: screen.y - height * 0.9, align: 'right' },
+      { x: screen.x - gap - 6, y: screen.y + height * 0.9, align: 'right' },
+      { x: screen.x + gap + 6, y: screen.y, align: 'left' },
       { x: screen.x, y: screen.y - gap - height * 0.7, align: 'center' },
       { x: screen.x, y: screen.y + gap + height * 0.7, align: 'center' },
     ];
@@ -3461,6 +3580,40 @@ function placeFeatureLabel(item, occupied, force = false) {
       const collision = occupied.some((other) => !(box.right < other.left
         || box.left > other.right || box.bottom < other.top || box.top > other.bottom));
       if (collision) continue;
+    }
+    // A caption that is not on its marker gets a short leader, with a dark
+    // underlay so it survives against bright highland as well as shadow.
+    // Centred captions (the inside-the-rim case) have nothing to connect.
+    const nearX = Math.min(Math.max(screen.x, box.left), box.right);
+    const nearY = Math.min(Math.max(screen.y, box.top), box.bottom);
+    const dx = nearX - screen.x;
+    const dy = nearY - screen.y;
+    const reach = Math.hypot(dx, dy);
+    let startX = screen.x;
+    let startY = screen.y;
+    if (ringDrawn && reach > radius) {
+      startX += dx / reach * radius;
+      startY += dy / reach * radius;
+    }
+    const leaderLength = Math.hypot(nearX - startX, nearY - startY);
+    // A close, inside-the-ring caption needs no line; a point marker or a
+    // caption that had to step outside the ring still gets one.
+    if (leaderLength > 2.5 && (!ringDrawn || reach > radius + 2)) {
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(nearX, nearY);
+      ctx.strokeStyle = 'rgba(3, 5, 9, .78)';
+      ctx.lineWidth = Math.max(2.4, fontPx * 0.20);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(nearX, nearY);
+      ctx.strokeStyle = highlight ? '#ffffff' : colour;
+      ctx.lineWidth = Math.max(1, fontPx * 0.075);
+      ctx.stroke();
+      ctx.restore();
     }
     ctx.textAlign = attempt.align;
     const strokeWidth = Number(state.textStrokeWidth) || 0;
@@ -3988,6 +4141,36 @@ function stagePoint(event) {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
+let interactionTimer = null;
+
+/** A drag or a wheel burst: paint the moving base at reduced resolution. */
+function beginInteraction() {
+  state.interacting = true;
+  if (interactionTimer) {
+    clearTimeout(interactionTimer);
+    interactionTimer = null;
+  }
+}
+
+/** After the last wheel event, sharpen once the camera has settled. */
+function endInteractionSoon(delay) {
+  if (interactionTimer) clearTimeout(interactionTimer);
+  interactionTimer = setTimeout(() => {
+    interactionTimer = null;
+    if (state.drag || state.manualDrag) return;
+    state.interacting = false;
+    render();
+  }, delay === undefined ? 180 : delay);
+}
+
+function endInteraction() {
+  if (interactionTimer) {
+    clearTimeout(interactionTimer);
+    interactionTimer = null;
+  }
+  state.interacting = false;
+}
+
 stage.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
   if (event.target && event.target.closest
@@ -4000,6 +4183,7 @@ stage.addEventListener('pointerdown', (event) => {
   }
   const manual = manualAt(point.x, point.y);
   if (manual) {
+    beginInteraction();
     state.manualDrag = { id: manual.mark.id };
     stage.setPointerCapture(event.pointerId);
     setStatus(`${manual.mark.text}：${formatCoord(manual.mark.lon, manual.mark.lat)}`);
@@ -4012,6 +4196,7 @@ stage.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
+  beginInteraction();
   const dragGeo = screenToLonLat(point.x, point.y);
   state.drag = {
     x: event.clientX, y: event.clientY,
@@ -4035,7 +4220,7 @@ stage.addEventListener('pointermove', (event) => {
         mark.lon = geo.lon;
         mark.lat = geo.lat;
         updatePositionReadout(geo.lon, geo.lat, point);
-        render();
+        renderSoon();
         setStatus(`${mark.text}：${formatCoord(mark.lon, mark.lat)}`);
       }
     }
@@ -4067,7 +4252,7 @@ stage.addEventListener('pointermove', (event) => {
         state.drag.lat + dy / state.scale / world.h * 180, -90, 90);
       clampCenter();
     }
-    render();
+    renderSoon();
     scheduleFeatures();
     scheduleHash();
     hideTooltip();
@@ -4087,19 +4272,21 @@ stage.addEventListener('pointermove', (event) => {
 function endDrag(event) {
   if (state.manualDrag) {
     state.manualDrag = null;
+    endInteraction();
     if (event && event.pointerId !== undefined) {
       try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* noop */ }
     }
-    render();
+    flushRender();
     return;
   }
   if (!state.drag) return;
   state.drag = null;
+  endInteraction();
   stage.classList.remove('dragging');
   if (event && event.pointerId !== undefined) {
     try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* noop */ }
   }
-  render();
+  flushRender();
   scheduleFeatures();
 }
 
@@ -4132,7 +4319,9 @@ stage.addEventListener('dblclick', (event) => {
 stage.addEventListener('wheel', (event) => {
   event.preventDefault();
   const point = stagePoint(event);
-  zoomBy(Math.exp(-event.deltaY * 0.0016), point);
+  beginInteraction();
+  zoomBy(Math.exp(-event.deltaY * 0.0016), point, true);
+  endInteractionSoon();
 }, { passive: false });
 
 function showTooltip(feature, point) {
@@ -4363,8 +4552,20 @@ function setMapFullscreen(on) {
 }
 
 function wire() {
-  $('zoom-in').addEventListener('click', () => zoomBy(1.6));
-  $('zoom-out').addEventListener('click', () => zoomBy(1 / 1.6));
+  const zoomCommand = (factor, immediate) => {
+    if (immediate) {
+      // A single click can afford one sharp repaint; the reduced-resolution
+      // path is for a wheel burst or a held key.
+      endInteraction();
+      zoomBy(factor);
+      return;
+    }
+    beginInteraction();
+    zoomBy(factor, null, true);
+    endInteractionSoon();
+  };
+  $('zoom-in').addEventListener('click', () => zoomCommand(1.6, true));
+  $('zoom-out').addEventListener('click', () => zoomCommand(1 / 1.6, true));
   $('fit').addEventListener('click', fitView);
   if ($('manual-clear')) {
     $('manual-clear').addEventListener('click', clearManualMarks);
@@ -4668,6 +4869,10 @@ function wire() {
     }
   });
   $('export-map').addEventListener('click', () => {
+    // The moving base may still be the reduced-resolution one; export the
+    // settled, sharp frame instead.
+    endInteraction();
+    flushRender();
     const link = document.createElement('a');
     link.download = `lunar-map-${Date.now()}.png`;
     link.href = canvas.toDataURL('image/png');
@@ -4675,8 +4880,8 @@ function wire() {
   });
   document.addEventListener('keydown', (event) => {
     if (event.target && /input|textarea|select/i.test(event.target.tagName)) return;
-    if (event.key === '+' || event.key === '=') { zoomBy(1.6); event.preventDefault(); }
-    else if (event.key === '-' || event.key === '_') { zoomBy(1 / 1.6); event.preventDefault(); }
+    if (event.key === '+' || event.key === '=') { zoomCommand(1.6); event.preventDefault(); }
+    else if (event.key === '-' || event.key === '_') { zoomCommand(1 / 1.6); event.preventDefault(); }
     else if (event.key === '0') { fitView(); event.preventDefault(); }
     else if (event.key === 'ArrowLeft') { panBy(-0.18, 0); event.preventDefault(); }
     else if (event.key === 'ArrowRight') { panBy(0.18, 0); event.preventDefault(); }
@@ -4716,10 +4921,12 @@ function syncSplitters() {
 
 function panBy(fractionX, fractionY) {
   const world = worldSize();
+  beginInteraction();
   state.centerLon += fractionX * state.width / state.scale / world.w * 360;
   state.centerLat += fractionY * state.height / state.scale / world.h * 180;
   clampCenter();
-  render();
+  renderSoon();
+  endInteractionSoon();
   scheduleFeatures();
   scheduleHash();
 }

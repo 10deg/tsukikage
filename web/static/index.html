@@ -284,7 +284,8 @@
                       title="清除全部手动标记（Ctrl / ⌘ + 点击添加的锚点）">清空手动标记</button>
             </div>
 
-          <!-- 几何标注独占一排，地貌分类在分界线下方。 -->
+          <!-- 分界线以上是标注样式；以下先是几何标注，再是地貌分类。 -->
+          <hr class="label-divider">
           <div class="mark-row">
             <!-- 几何标注：只画在全月面上。它们不需要地名库，页面自己按正射投影算
                  得出来——这些恰好是模拟确切知道的东西。 -->
@@ -324,9 +325,8 @@
                   <span>标尺</span>
                 </label>
             </div>
-            <button class="ghost mini" id="marks-all">全选/全不选</button>
+            <button class="ghost mini" id="marks-all">全选</button>
           </div>
-          <hr class="label-divider">
           <!-- 分类开关由 app.js 按 FEATURE_CLASSES 生成，颜色就是图上用的颜色 -->
           <div class="class-row">
             <div class="class-bar" id="label-classes"></div>

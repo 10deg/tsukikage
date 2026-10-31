@@ -20,6 +20,7 @@ const runner = createRunner();
 const { check, finish } = runner;
 
 const html = fs.readFileSync(path.join(__dirname, 'map', 'index.html'), 'utf8');
+const mapStyle = fs.readFileSync(path.join(__dirname, 'map', 'map.css'), 'utf8');
 
 /* ── the elements ─────────────────────────────────────────────────────────
  *
@@ -321,7 +322,7 @@ function fakeFetch(url) {
   });
   if (url.startsWith('/api/map/health')) {
     return respond({
-      version: '1.0.0',
+      version: '1.0.1',
       dem: { name: 'dem', level0_km_per_pixel: 0.118 },
       albedo: { name: 'albedo', level0_km_per_pixel: 0.5 },
       feature_count: 9000, sources: [{ name: 'dem', km_per_px: 0.118 }],
@@ -382,7 +383,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -395,7 +396,15 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   check('the console stayed quiet', T.state !== null);
 
   console.log('');
-  console.log('the class switches moved to the top bar');
+  console.log('the class switches sit in the expanded settings');
+  {
+    const topBar = html.slice(html.indexOf('id="map-label-bar"'),
+      html.indexOf('id="annot-detail"'));
+    check('全选/全不选 left the top line',
+      !/classes-all|classes-none/.test(topBar));
+    check('全选/全不选 sit at the right of the class row',
+      /class="class-row"[\s\S]*?id="label-classes"[\s\S]*?class="class-actions"[\s\S]*?id="classes-all"[\s\S]*?id="classes-none"/.test(html));
+  }
   const chips = dom.document.querySelectorAll('.cls-chip');
   check('one chip per feature class is built',
     chips.length === 2, String(chips.length));
@@ -438,7 +447,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   dom.byId['shadow-bias'].value = '0';
   dom.byId['shadow-bias'].fire('input');
   check('the map version sits under the title',
-    dom.byId['map-version'].textContent === '1.0.0');
+    dom.byId['map-version'].textContent === '1.0.1');
   check('all of them start on, as the server says',
     T.state.active.has('mare') && T.state.active.has('crater'));
   T.setAllLayers(false);
@@ -511,6 +520,12 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   check('几何标注 has its own master switch', T.state.marksOn === false &&
     dom.byId['marks-toggle'].getAttribute('aria-pressed') === 'false'
     && dom.byId['marks-toggle'].tagName === 'H2');
+  check('its title carries a border that follows the switch state',
+    /#marks-toggle\s*\{[^}]*border:\s*1px solid/.test(mapStyle)
+    && /#marks-toggle\[aria-pressed="false"\]\s*\{[^}]*border-color:\s*var\(--line\)/
+      .test(mapStyle)
+    && /#marks-toggle\[aria-pressed="false"\]\s*\{[^}]*color:\s*var\(--faint\)/
+      .test(mapStyle));
   dom.byId['marks-toggle'].fire('click');
   check('and it comes back without touching the labels',
     T.state.marksOn === true && T.state.labels === true);
@@ -736,6 +751,199 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('vertical panning stops at the top edge, it does not wrap',
       T.state.centerLat < 89 && T.state.centerLat > 0,
       String(T.state.centerLat));
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('a Mercator zoom keeps the point under the pointer');
+  {
+    const saved = { ...T.state };
+    const savedActive = T.state.active;
+    // The base raster is irrelevant here and would start a 512-tile fetch;
+    // render() still runs the rest of the frame's overlays.
+    T.state.active = new Set();
+    T.state.projection = 'mercator';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.zoom = 3;
+    T.state.scale = 1;
+    T.state.centerLon = 12.5;
+    T.state.centerLat = 23.4;
+    T.state.mercY = 0;
+    T.clampCenter();
+    const anchor = { x: 900, y: 250 };
+    const before = T.screenToLonLat(anchor.x, anchor.y);
+    T.zoomBy(2, anchor);
+    const after = T.screenToLonLat(anchor.x, anchor.y);
+    check('zooming in leaves the anchored longitude alone',
+      before && after && Math.abs(after.lon - before.lon) < 1e-6,
+      JSON.stringify({ before, after, centre: T.state.centerLon }));
+    check('zooming in leaves the anchored latitude alone (it used to move by '
+      + 'the old offset)', before && after
+      && Math.abs(after.lat - before.lat) < 1e-6,
+      JSON.stringify({ before, after, centre: T.state.centerLat }));
+    const zoomedIn = { lon: T.state.centerLon, lat: T.state.centerLat };
+    T.zoomBy(0.5, anchor);
+    const back = T.screenToLonLat(anchor.x, anchor.y);
+    check('zooming back out returns to the same ground point',
+      back && Math.abs(back.lon - before.lon) < 1e-6
+      && Math.abs(back.lat - before.lat) < 1e-6,
+      JSON.stringify({ before, back, centre: T.state.centerLat }));
+    check('the camera centre moved to hold the pointer in place',
+      Math.abs(zoomedIn.lat - before.lat) > 1e-3,
+      JSON.stringify({ zoomedIn, before }));
+    T.state.active = savedActive;
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('the globe basis is computed once per view');
+  {
+    const saved = { ...T.state };
+    T.state.globe = { lon: 23.4, lat: -12.7, zoom: 1 };
+    const first = T.globeBasis();
+    check('the same view reuses the cached basis', T.globeBasis() === first);
+    T.state.globe.lon = 24.4;
+    const moved = T.globeBasis();
+    check('a moved view gets a fresh basis', moved !== first
+      && Math.abs(moved.up[0] - first.up[0]) > 1e-6);
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('the fast globe painter agrees with the reference projection');
+  {
+    const saved = { ...T.state };
+    T.state.projection = 'globe';
+    T.state.width = 200;
+    T.state.height = 160;
+    T.state.globe = { lon: 23.4, lat: -12.7, zoom: 1 };
+    const width = 200;
+    const height = 160;
+    const sourceWidth = 512;
+    const sourceHeight = 256;
+    const source = new Uint8ClampedArray(sourceWidth * sourceHeight * 4);
+    for (let sy = 0; sy < sourceHeight; sy += 1) {
+      for (let sx = 0; sx < sourceWidth; sx += 1) {
+        const offset = (sy * sourceWidth + sx) * 4;
+        source[offset] = Math.round(sx / (sourceWidth - 1) * 255);
+        source[offset + 1] = Math.round(sy / (sourceHeight - 1) * 255);
+        source[offset + 2] = 128;
+        source[offset + 3] = 255;
+      }
+    }
+    const out = new Uint8ClampedArray(width * height * 4);
+    T.paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight, 1, null, 1);
+    const radius = T.globeRadius();
+    let checked = 0;
+    const wrong = [];
+    for (let y = 3; y < height; y += 7) {
+      for (let x = 3; x < width; x += 7) {
+        const nx = (x + 0.5 - width / 2) / radius;
+        const ny = (height / 2 - (y + 0.5)) / radius;
+        if (nx * nx + ny * ny > 1) continue;
+        const geo = T.screenToLonLat(x + 0.5, y + 0.5);
+        if (!geo) continue;
+        const sx = Math.min(sourceWidth - 1,
+          Math.floor(((geo.lon + 180) / 360) * sourceWidth));
+        const sy = Math.min(sourceHeight - 1,
+          Math.floor(((90 - geo.lat) / 180) * sourceHeight));
+        const expectedR = Math.round(sx / (sourceWidth - 1) * 255);
+        const expectedG = Math.round(sy / (sourceHeight - 1) * 255);
+        const offset = (y * width + x) * 4;
+        checked += 1;
+        if (Math.abs(out[offset] - expectedR) > 2
+            || Math.abs(out[offset + 1] - expectedG) > 2
+            || out[offset + 3] !== 255) {
+          wrong.push({ x, y,
+            got: [out[offset], out[offset + 1], out[offset + 3]],
+            expected: [expectedR, expectedG, 255] });
+        }
+      }
+    }
+    check('inside the disc every sampled pixel matches screenToLonLat',
+      checked > 100 && wrong.length === 0,
+      JSON.stringify({ checked, wrong: wrong.slice(0, 3) }));
+    check('outside the disc is left transparent for the canvas background',
+      out[3] === 0 && out[(width * height - 1) * 4 + 3] === 0);
+
+    const halfWidth = 100;
+    const halfHeight = 80;
+    const half = new Uint8ClampedArray(halfWidth * halfHeight * 4);
+    T.paintGlobeBase(half, halfWidth, halfHeight, source,
+      sourceWidth, sourceHeight, 1, null, 0.5);
+    let halfChecked = 0;
+    const halfWrong = [];
+    for (let y = 3; y < halfHeight; y += 5) {
+      for (let x = 3; x < halfWidth; x += 5) {
+        const cssX = (x + 0.5) / 0.5;
+        const cssY = (y + 0.5) / 0.5;
+        const geo = T.screenToLonLat(cssX, cssY);
+        if (!geo) continue;
+        const sx = Math.min(sourceWidth - 1,
+          Math.floor(((geo.lon + 180) / 360) * sourceWidth));
+        const sy = Math.min(sourceHeight - 1,
+          Math.floor(((90 - geo.lat) / 180) * sourceHeight));
+        const offset = (y * halfWidth + x) * 4;
+        halfChecked += 1;
+        if (Math.abs(half[offset] - Math.round(sx / (sourceWidth - 1) * 255)) > 2
+            || Math.abs(half[offset + 1]
+              - Math.round(sy / (sourceHeight - 1) * 255)) > 2
+            || half[offset + 3] !== 255) {
+          halfWrong.push({ x, y, got: [half[offset], half[offset + 1]] });
+        }
+      }
+    }
+    check('a half-resolution moving buffer lands on the same ground',
+      halfChecked > 100 && halfWrong.length === 0,
+      JSON.stringify({ halfChecked, wrong: halfWrong.slice(0, 3) }));
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('a caption sits just to the left of its marker');
+  {
+    const saved = { ...T.state };
+    T.state.language = 'en';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.zoom = 4;
+    T.state.diameters = true;
+    T.state.outlineStyle = 'solid';
+    T.state.labels = true;
+    T.state.avoidOverlap = true;
+    T.state.density = {};
+    T.state.selected = null;
+    T.state.labelFont = 0;
+    const feature = {
+      class: 'crater', name_en: 'Big', name_zh: 'Big', lon: 0, lat: 0,
+      diameter_km: 200,
+    };
+    const item = {
+      feature, screen: { x: 600, y: 400 }, radius: 48, marker: 3, tier: 2,
+    };
+    const left = T.placeFeatureLabel(item, []);
+    check('a point feature name is set to the left of the marker',
+      left && left.right < 600 && 600 - left.right <= 16,
+      JSON.stringify(left));
+    const wide = {
+      ...item,
+      radius: 8,
+      feature: { ...feature, name_en: 'A Very Long Crater Name' },
+    };
+    const wideLeft = T.placeFeatureLabel(wide, []);
+    check('a long point name still starts on the left',
+      wideLeft && wideLeft.right < 600,
+      JSON.stringify(wideLeft));
+    const region = {
+      ...item,
+      feature: { ...feature, class: 'mare', name_en: 'Big Sea' },
+    };
+    const centred = T.placeFeatureLabel(region, []);
+    check('a region name keeps its across-the-formation slot',
+      centred && Math.abs((centred.left + centred.right) / 2 - 600) < 2
+      && Math.abs((centred.top + centred.bottom) / 2 - 400) < 2,
+      JSON.stringify(centred));
     Object.assign(T.state, saved);
   }
 

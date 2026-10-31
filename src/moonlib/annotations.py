@@ -2041,7 +2041,11 @@ def plan_annotations(
         wanted.append({
             "key": index,
             "anchor": (float(x[index]), float(y[index])),
-            "radius_px": min(float(radius[index]), max_marker),
+            # The obstacle a caption keeps clear of is the *drawn* locator, not
+            # the whole projected feature.  Using the apparent radius here put a
+            # 26 px no-go circle around a two-pixel dot and pushed every name of
+            # a large, unoutlined feature a line-height away from its marker.
+            "radius_px": marker_radius_px(float(radius[index]), font_px),
             "width": estimate_text_width(
                 _display_label(features[index], language, satellite), font_px)
             + 2.0 * padding,
@@ -2070,9 +2074,9 @@ def plan_annotations(
                 continue
             box = _place_label(
                 float(entry["anchor"][0]), float(entry["anchor"][1]),
-                float(entry["radius_px"]), float(entry["width"]),
-                float(entry["height"]), frame.width, frame.height,
-                (), 0.0, unit=1.0,
+                marker_radius_px(float(entry["radius_px"]), font_px),
+                float(entry["width"]), float(entry["height"]),
+                frame.width, frame.height, (), 0.0, unit=1.0,
             )
             if box is not None:
                 placements[entry["key"]] = box
@@ -2092,8 +2096,8 @@ def plan_annotations(
         if box is None:
             box = _place_label(
                 float(x[index]), float(y[index]),
-                min(float(radius[index]), max_marker), width, height,
-                frame.width, frame.height, (), 0.0, unit=1.0,
+                marker_radius_px(float(radius[index]), font_px), width, height,
+                frame.width, frame.height, obstacles or (), 0.0, unit=1.0,
             )
         if box is None:
             left = min(max(2.0, float(x[index]) - width / 2.0),
@@ -2362,11 +2366,13 @@ def annotate_frame(
 # ---------------------------------------------------------------------------
 # label placement: the pieces the layout is built from
 # ---------------------------------------------------------------------------
-#: Candidate directions, diagonals first: a caption set at 45 degrees tucks in
-#: closer to its feature than one set straight up, and the cardinal directions
-#: stay available for the crowded cases.
-_LABEL_ANGLES = (45.0, -45.0, 135.0, -135.0, 0.0, 180.0, 90.0, -90.0,
-                 22.5, -22.5, 157.5, -157.5, 67.5, -67.5, 112.5, -112.5)
+#: Candidate directions, left first: the page's captions sit just to the left of
+#: their locator, so the name reads as attached to the point rather than
+#: floating on top of it.  The left diagonals follow, then the other sides for
+#: the crowded cases.
+_LABEL_ANGLES = (180.0, 135.0, -135.0, 157.5, -157.5, 112.5, -112.5,
+                 90.0, -90.0, 45.0, -45.0, 0.0,
+                 22.5, -22.5, 67.5, -67.5)
 
 #: Three local distances per direction: against the feature, one gap out, and a
 #: last resort further out -- enough reach to escape a crowded limb, not enough
@@ -2539,7 +2545,8 @@ def candidate_rects(
 
     A *region* caption -- a mare's name, say -- may be set across the middle of
     its own formation, so that centred box is tried before any of the positions
-    beside the feature.  It is still only a candidate: if another caption is
+    beside the feature.  A point feature's caption starts to its left; the
+    centred box is still only a candidate for regions, and if another caption is
     already there, the ordinary positions follow.
     """
     ax, ay = float(anchor[0]), float(anchor[1])
@@ -2575,7 +2582,10 @@ def score_candidate(rect: Tuple[float, float, float, float],
     length = math.hypot(line[2] - line[0], line[3] - line[1])
     clearance = min((_rect_distance(rect, other) for other in list(others) + list(markers)),
                     default=gap * 3.0)
-    return conflicts * 1e6 + 0.45 * length - 0.8 * min(clearance, gap * 3.0)
+    # Distance dominates: the old weights rewarded an empty patch (clearance up
+    # to 3 gaps) more than a short leader, so a name could step a long way out
+    # just because nothing else was there.  Clearance is now a tie-breaker.
+    return conflicts * 1e6 + 0.9 * length - 0.3 * min(clearance, gap * 3.0)
 
 
 def _rect_distance(a: Tuple[float, float, float, float],
@@ -2712,7 +2722,14 @@ def arrange_labels(
                 continue
             if any(_segment_hits_rect(line, marker) for marker in other_marks):
                 continue
-            yield (score_candidate(rect, line, others, other_marks, gap, conflicts=0), rect, line)
+            score = score_candidate(rect, line, others, other_marks, gap, conflicts=0)
+            # A point caption belongs on the left of its locator.  Among free
+            # candidates, prefer any box wholly to the left; distance then picks
+            # the closest one.  Regions keep their centred/across-the-patch rule.
+            anchor_x, _anchor_y = request["anchor"]
+            if not request.get("region") and rect[0] + rect[2] <= anchor_x + 0.5:
+                score -= 1.0e3
+            yield (score, rect, line)
 
     def best(request: Dict[str, Any], extended: bool = False):
         found = list(options(request, extended))

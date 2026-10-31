@@ -146,7 +146,6 @@ button.caret[aria-expanded="true"]::before {
   border-color: #ffd666;
   color: #ffe6a3;
 }
-#marks-toggle[aria-pressed="true"] { color: var(--accent); border-color: #6d5832; }
 .map-label-bar .check.inline, .annot-detail .check.inline {
   display: inline-flex;
   align-items: center;
@@ -214,11 +213,27 @@ button.caret[aria-expanded="true"]::before {
   flex-wrap: wrap;
   gap: 4px 9px;
 }
+.annot-detail .class-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
 .annot-detail .class-bar {
   display: flex;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   gap: 4px;
   min-width: 0;
+}
+/* 全选/全不选 sit at the far right of the class chips, still inside the
+   expanded settings -- the header's first line keeps only the latch, the
+   density and the caret. */
+.annot-detail .class-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin-left: auto;
 }
 
 .search {
@@ -397,9 +412,28 @@ button.caret[aria-expanded="true"]::before {
 }
 .moon-info[data-collapsed="true"] .moon-extra { display: none; }
 .geometry-panel { border-bottom-color: #6d5832; }
-.geometry-panel h2 { color: #ffe6a3; }
 .geometry-panel[data-on="false"] { border-bottom-color: var(--line); }
-.geometry-panel[data-on="false"] h2 { color: var(--faint); }
+/* 几何标注's master switch is a titled button: its frame and colour are the
+   on/off state, so the left column and the picture say the same thing without
+   a separate status dot. */
+#marks-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  margin: 0 0 6px;
+  padding: 2px 9px;
+  border: 1px solid #6d5832;
+  border-radius: 5px;
+  background: rgba(255, 214, 102, .10);
+  color: #ffe6a3;
+}
+#marks-toggle:hover { border-color: #ffd666; }
+#marks-toggle[aria-pressed="false"] {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--faint);
+}
 .panel h2 .hint { margin-left: auto; font-weight: 400; }
 .layer-panel .grid2 {
   display: grid;

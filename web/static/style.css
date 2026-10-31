@@ -946,9 +946,8 @@ button.compact { padding: 3px 8px; font-size: 11px; }
   margin-top: 0;
   padding: 1px 6px;
 }
-/* Four geometric marks to a row.  The search no longer decides this column's
-   width, so a fixed basis sized for the longest name ("近地侧边界") keeps the
-   four columns even without touching the class chips beside them. */
+/* 全宽 means the geometric row spans the panel, not that every pill does: the
+   switches sit side by side and wrap only when the row runs out of width. */
 .disk-head .mark-bar {
   display: flex;
   align-items: center;
@@ -958,10 +957,10 @@ button.compact { padding: 3px 8px; font-size: 11px; }
   max-width: none;
 }
 .disk-head .mark-bar .mark-chip {
-  justify-content: center;
-  width: 100%;
+  flex: 0 0 auto;
+  width: auto;
   min-width: 0;
-  padding: 1px 4px;
+  padding: 1px 7px;
   font-size: 10px;
 }
 .label-bar input[type="number"] { width: 4.2em; text-align: center; }
