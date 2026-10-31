@@ -194,9 +194,10 @@ check('时间步长 is a menu with every common step and a custom field',
 check('the landform search lives in the always-visible label bar',
   /<div class="label-bar"[\s\S]*?id="feature-search"[\s\S]*?<div class="annot-detail"/
     .test(html));
-check('the geometric marks lay out four to a row',
-  /\.disk-head \.mark-bar\s*\{[^}]*grid-template-columns:\s*repeat\(4/
-    .test(css));
+check('the geometric marks are one full-width row with their own all/none',
+  /class="mark-row"[\s\S]*?id="marks-all"/.test(html)
+  && /class="label-divider"/.test(html)
+  && /class="class-row"[\s\S]*?id="classes-all"/.test(html));
 /* 锐化半径 is an unsharp mask, and past 4 px it stops sharpening and starts
    redrawing large-scale shading; the slider's own range says so. */
 check('锐化半径 stops at 4 px',

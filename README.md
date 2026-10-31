@@ -1,11 +1,14 @@
 # Tsukikage
 
-**当前版本 / Version：1.6.2**
+**当前版本 / Version：网页客户端 1.6.3 · 月面地图 1.0.0**
 
-一套可**完全离线**运行的月球计算内核与观测模拟器：以 JPL DE440/DE441 星历为基础，提供月球的
-**位置、月相、升落、天平动等信息**，并能用 NASA SVS 的 LOLA 高程与
-LROC 色彩数据**渲染模拟从地面看到的月面**——含真实地形阴影、明暗界线光照与地照。算法与判据全部自建，**不使用任何在线天文服务**；按「计算层 / 服务层 /
-表现层」分层，对外是稳定的 JSON 数据契约。
+一套可**完全离线**运行的月球计算内核、观测模拟器与月面地图服务。
+
+以 JPL DE440/DE441 星历为基础，提供月球的位置、月相、升落、天平动与事件预报，
+并基于 NASA SVS 的 LOLA / KAGUYA SLDEM 高程与 NASA LROC 色彩数据，渲染从地面
+看到的月面。月面地图服务复用同一套数据，提供可缩放的月面瓦片、地貌检索与标注、
+照片叠加和蒙版编辑。算法与判据全部自建，不依赖在线天文服务；只有可选的高程数据
+下载需要联网。代码按「计算层 / 服务层 / 表现层」分层，对外保持稳定的 JSON 契约。
 
 ---
 
@@ -24,7 +27,7 @@ python3 -m venv .venv
 `[full]` 会装上 numpy、spiceypy、timezonefinder 与 matplotlib。后两个是可选的：
 没有 timezonefinder 时按经度推算时区，没有 matplotlib 时只有绘图类功能不可用。
 
-确认装好了：
+确认装好：
 
 ```bash
 ./.venv/bin/python -c "import moonlib; print(moonlib.__version__)"
@@ -35,11 +38,15 @@ python3 -m venv .venv
 
 ## 简单运行
 
+命令行使用：
+
 ```bash
 ./.venv/bin/python -m moonlib info                          # 内核与历表覆盖范围
 ./.venv/bin/python -m moonlib moon --at 2026-05-25T15:30:00 --language zh
 ./.venv/bin/python -m moonlib sunpoint --moon-lon 0 --moon-lat 0 --lat 30 --lon 120 --at 2026-05-25T15:30:00 --language zh
 ```
+
+Python中使用：
 
 ```python
 import moonlib
@@ -61,24 +68,33 @@ print(moonlib.reporting.format_moon_report(report))
   中天上边缘高度 / Upper limb at transit: +58.515°
 ```
 
-本地网页：
+本地网页客户端：
 
 ```bash
 ./.venv/bin/python web/server.py --port 8765     # 打开 http://127.0.0.1:8765/
 ```
 
-每个子命令都支持 `--json`，输出与 HTTP API 完全相同的载荷。
+本地月面地图：
+
+```bash
+./.venv/bin/python web/map_server.py --port 8766 # 打开 http://127.0.0.1:8766/
+```
+
+地图服务与网页客户端共用本地的内核、地貌库和高程数据，但分别监听端口，可以同时打开。
+每个 CLI 子命令都支持 `--json`，输出与 HTTP API 完全相同的载荷。
 
 ## 运行所需的最少文件
 
-| 路径 | 为什么需要 |
+| 路径 | 功能 |
 |---|---|
 | `src/moonlib/` | 库本身 |
 | `pyproject.toml` | 安装、依赖声明、`moon` 命令行入口 |
 | `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，随仓库发布 |
+| `web/` | 非运行必需，网页客户端与月面地图服务 |
+| `tools/` | 非运行必需 |
+| `examples/` | 非运行必需 |
+| `assets/` | 非运行必需 |
 
-**要开网页**再加 `web/`。
-其余目录：`tools/`、`examples/`、`assets/`都不是运行必需。
 **要实现高分辨率月面模拟**需要额外下载高程栅格数据，见下一节。
 
 ---
@@ -96,8 +112,13 @@ export MOONLIB_TERRAIN_DIR=/data/moon-rasters  # 或一个目录，两个文件�
 export MOONLIB_CACHE_DIR=/data/moon-cache      # 金字塔缓存写到哪（默认 <仓库>/.cache）
 ```
 
-最低限度的一套是「`ldem_64.tif` + `lroc_color.exr`」（约 1.4 GB）；要做望远镜特写再补
-USGS 的全球 256 像素/度高程：
+最低限度的一套是「`ldem_64.tif` + `lroc_color.exr`」（约 1.4 GB）。
+
+月面地图服务把 DEM 当作**可选数据**：即使一个高程文件都没有，它也会用平坦高程
+启动，地貌、坐标、照片、蒙版和几何标注均可用，只是底图没有地形起伏与反照率。
+在页面右侧「其他设置」里可以看到当前数据状态，并直接启动下面的全球 DEM 下载。
+
+要实现高分辨率模拟，需要下载 USGS 的全球 256 像素/度高程，可用自带脚本下载：
 
 ```bash
 ./.venv/bin/python tools/fetch_lola_global.py     # 8.5 GB，一次性，之后全离线
@@ -109,6 +130,8 @@ USGS 的全球 256 像素/度高程：
 色彩镶嵌优先用线性的 `lroc_color.exr`（自带解码器，无需额外依赖）。若手头只有
 `lroc_color_16bit_srgb.tif`，则需要 Pillow（`pip install -e '.[tiff]'`；装了
 matplotlib 就有），两条路径结果一致。
+
+更高分辨率的高程数据，推荐使用 `SLDEM2015`，见下方。
 
 ### 高程数据源与切换
 
@@ -125,6 +148,7 @@ matplotlib 就有），两条路径结果一致。
 
 月面高程可以放多份，程序按**实测像素宽度**给它们排序（不看文件名），网页面板的
 「模拟设置 → 高级设置 → 数据源」里列出本机能用的全部产品，选哪份就用哪份画。
+切换数据源不会重烘焙整月面的金字塔。
 
 | 产品 | 网格 | 像素 | 体积 | 说明 |
 |---|---|---|---|---|
@@ -152,7 +176,10 @@ matplotlib 就有），两条路径结果一致。
 如有临时需求，只想在某一处实现高分辨率模拟时，也可不下载整份产品：高级设置里的「区域高清补片」按**当前选框**可从在线产品匹配所需的那一块（`POST /api/patch`，后台任务带进度），落在 `<cache>/regions/`，
 近景会自动改用它。可选的在线产品见 `moonlib.online.catalogue()`。
 
-**换了数据源不会重烘焙整月面的金字塔**：全月面渲染从本地金字塔加载，最高只采样到 每像素 474 m，不会动用更高分辨率的高程数据，默认的全月面渲染缓存最高支持 2300 px 分辨率。而高分辨率模拟是从源文件直接裁窗口的，不需要金字塔。故更换高分辨率数据源不影响全月面预览。
+**换了数据源不会重烘焙整月面的金字塔**：全月面渲染从本地金字塔加载，最高只采样到
+每像素 474 m，不会动用更高分辨率的高程数据，默认的全月面渲染缓存最高支持 2300 px
+分辨率。而高分辨率模拟是从源文件直接裁窗口的，不需要金字塔。故更换高分辨率数据源
+不影响全月面预览。
 
 **默认不会自动改用它。** 装好之后程序仍然沿用原来那份已烘焙的高程，直到在「数据源」里
 选中它（或有 `MOONLIB_DEM` 指定）；选过之后会记在缓存目录的 `dem_source.json` 里，
@@ -165,6 +192,22 @@ matplotlib 就有），两条路径结果一致。
 ## 界面
 
 ![Tsukikage 本地网页：左栏观测信息与月相，中间全月面与 1:1 实时特写，右栏模拟设置、后期处理与事件/动画栏](assets/screenshot.png)
+
+---
+
+## 月面地图服务
+
+地图服务是独立于模拟器的第二个本地页面（默认 `http://127.0.0.1:8766/`）。它直接读取同一份
+DEM、反照率、地貌库和月球照片工程，适合查位置、看周边地貌和整理拍摄素材：
+
+- 等距圆柱、墨卡托、球面 / 3D 三种投影；等距圆柱与墨卡托只做东西向循环，纬度在南北边缘夹住；
+- 月面光照、底图亮度、阴影偏置与地照开关；无高分 DEM 时回退为平坦底图；
+- 地貌检索、分类开关、权重标注、真实直径圆、手动标记、双击名称复制经纬度；
+- 全屏只看地图、左右栏收纳与提示按钮；
+- 照片库：按日期 / 月龄 / 覆盖地貌筛选，照片叠加、透明度、手画蒙版与自定义照片目录；
+- 右侧「其他设置」显示 DEM 状态，并可启动全球高分辨率 DEM 下载。
+
+月面地图使用独立版本号；本版为 **月面地图 1.0.0**，网页客户端为 **1.6.3**。
 
 ---
 
@@ -191,13 +234,15 @@ matplotlib 就有），两条路径结果一致。
 | **天平动目标分类（独立观测列表）** | `moonlib.annotations.load_libration_targets`、网页「天平动目标」 |
 | **月面特写与自动取景** | `moonlib.moonview.render_region`、`moonlib.render_feature` |
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
-| **月面 X / V / L预报** | `moonlib.events` |
+| **月面 X / V / L 预报** | `moonlib.events` |
+| **月面特殊观测事件预报** | `moonlib.events` |
 | **最高／最低月亮** | `moonlib.events` |
 | **地貌标注**（分类、密度、避让、月海居中、避让已有图元） | `moonlib.annotations`、网页「月海居中」 |
 | **曲线图** | `web/static/app.js`、`moonlib.analemma`、`moonlib.moonview` |
 | **模拟实拍效果** | `moonlib.instrument` |
 | **生成动画**；**HDR 图片** | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |
 | **本地网页客户端** | `web/server.py` |
+| **月面地图服务**（投影、地貌检索、照片、蒙版） | `web/map_server.py` |
 | JSON 服务契约 | `moonlib.service` |
 
 ---
@@ -209,11 +254,14 @@ matplotlib 就有），两条路径结果一致。
 ```bash
 ./.venv/bin/python tools/check_layering.py     # 分层与依赖规则
 ./.venv/bin/python tools/selfcheck.py          # 端到端自检（含一次月面渲染）
-node web/test_dom.js && node web/test_page.js && node web/test_projection.js
+node web/test_dom.js
+node web/test_page.js
+node web/test_projection.js
+node web/test_map.js
 ```
 
-页面的三个 Node 脚本共 774 项，覆盖静态接线、投影与绘制。需要栅格或内核的检查在文件
-缺失时**自动跳过**并说明原因，所以没有下载任何栅格也能跑完。
+页面的四个 Node 脚本共 959 项，覆盖静态接线、投影、绘制与地图页面。需要栅格或内核的
+检查在文件缺失时**自动跳过**并说明原因，所以没有下载任何栅格也能跑完。
 
 ---
 
@@ -259,19 +307,22 @@ node web/test_dom.js && node web/test_page.js && node web/test_projection.js
 缓存（`--detail 0 --albedo-detail 0`，约 3.5 GB）。数据本身的极限是月面直径约 7300 px
 ——再大只是插值放大。
 
+**地图服务的底图边界**：没有高分辨率 DEM 时，地图仍可启动，但底图为平坦灰度，
+只有地貌、坐标、照片与标注可用；在「其他设置」中下载 DEM 后即可恢复地形底图。
+地图的等距圆柱/墨卡托只做经度环绕，不提供上下无限重复；球面投影的经纬网密度随倍率
+自适应。
+
 **局部特写需要更高分辨率的高程。** `ldem_64` 的 474 m/px 在特写下明显不够：
 `render_region` 会报告 `terrain_limited`，为真时说明输出像素已小于地形像素、图像只是
 在插值放大。装上 USGS 的全球高程后这一切自动解决：
 
 ```bash
 ./.venv/bin/python tools/fetch_lola_global.py     # 8.5 GB 下载到本地
-
-# 或者只取需要的那一块（range 请求，约 60 MB / 1 分钟）：
-./.venv/bin/python tools/fetch_lola_global.py --name clavius --lat -66.5 -50.5 --lon -29 1
 ```
 
-`render_region` 会自己发现它、按需从本地文件里裁出画幅所需的那一小块，于是任意目标
-都能拿到 118 m/px，无需联网。
+`render_region` 会自动识别它、按需从本地文件里裁出画幅所需的那一小块，于是任意目标
+都能拿到 118 m/px，无需联网。需要只取某块区域时，用网页「区域高清补片」或
+`POST /api/patch`，不要给 `fetch_lola_global.py` 传不存在的区域参数。
 
 换一份自己的 DEM 也可以：
 `export MOONLIB_DEM=/path/to/dem.tif`，单位按文件名识别（见 `moonlib.terrain._dem_scale`）。

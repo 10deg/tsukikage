@@ -881,20 +881,6 @@ button.compact { padding: 3px 8px; font-size: 11px; }
   gap: 5px;
   width: 100%;
 }
-.disk-head .find-bar {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px 12px;
-  flex-wrap: wrap;
-  width: 100%;
-}
-.disk-head .find-left {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 0 1 auto;
-  min-width: 0;
-}
 .disk-head .mark-bar {
   display: flex;
   align-items: center;
@@ -944,11 +930,6 @@ button.compact { padding: 3px 8px; font-size: 11px; }
 /* The geometric switches start the fold now that the search lives above: no
    rule between them and the picture. */
 .disk-head .mark-bar { padding-top: 4px; }
-.disk-head .find-bar {
-  align-items: flex-start;
-  padding-top: 5px;
-  border-top: 1px solid var(--line);
-}
 .disk-head .class-bar { flex: 1 1 auto; min-width: 0; }
 /* 地貌搜索 in the label bar, at its right-hand end: the same label it was in
    the fold, but no longer something to open, and pushed right with an auto
@@ -968,10 +949,10 @@ button.compact { padding: 3px 8px; font-size: 11px; }
 /* Four geometric marks to a row.  The search no longer decides this column's
    width, so a fixed basis sized for the longest name ("近地侧边界") keeps the
    four columns even without touching the class chips beside them. */
-.disk-head .find-left { flex: 0 1 23em; }
 .disk-head .mark-bar {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 4px 6px;
   width: 100%;
   max-width: none;
@@ -1070,17 +1051,27 @@ button.compact { padding: 3px 8px; font-size: 11px; }
 }
 .mark-chip[data-on="false"] { opacity: .55; }
 
-/* The search box on the left of the block, the class switches on the right. */
-.find-bar .find-label {
-  flex: 0 0 auto;
+/* 几何标注 and 地貌分类 are two rows now: the geometry switches get the full
+   width and their own all/none control, then a divider, then the classes. */
+.mark-row, .class-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0;
-  white-space: nowrap;
+  gap: 8px;
+  width: 100%;
+  flex: 1 1 100%;
+  min-width: 0;
 }
-.find-bar .find-label input[type="text"] { width: 13em; padding: 2px 6px; }
-.find-bar .class-bar { flex: 1 1 14em; }
+.mark-row .mark-bar, .class-row .class-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.mark-row #marks-all, .class-row #classes-all { flex: 0 0 auto; }
+.label-divider {
+  width: 100%;
+  margin: 5px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 
 /* A select with its own text field beside it (物理分辨率). */
 .pick-row { display: flex; align-items: center; gap: 5px; margin-top: 2px; }
@@ -1307,7 +1298,14 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   gap: 8px;
   margin: 2px 0 0;
 }
-#event-window-open { float: none; align-self: center; }
+#event-window-open {
+  float: none;
+  align-self: center;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: rgba(122, 162, 247, .10);
+}
+#event-window-open:hover { background: rgba(122, 162, 247, .20); }
 .event-count {
   margin-left: auto;
   font-size: 10px;
@@ -1413,7 +1411,9 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   background: var(--viewport);
 }
 .event-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -1423,6 +1423,8 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   top: 0;
   z-index: 1;
   padding: 6px 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: left;
   font-weight: 600;
   color: var(--ink-dim);
@@ -1434,6 +1436,8 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   padding: 5px 9px;
   border-bottom: 1px solid var(--line);
   vertical-align: baseline;
+  overflow: hidden;
+  text-overflow: ellipsis;
   /* The per-kind tables carry up to sixteen columns; keeping each value on one
      line is what makes them scannable, and the body scrolls sideways when the
      window is narrower than the set. */
@@ -1446,6 +1450,25 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 .event-table .kind { white-space: nowrap; }
 .event-table .height { white-space: nowrap; color: var(--ink-dim); }
 .event-table .detail { color: var(--ink-dim); white-space: normal; min-width: 16em; }
+.event-col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+.event-col-resize::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  right: 3px;
+  width: 1px;
+  background: var(--line);
+}
+.event-table thead th { position: sticky; }
 .event-window-empty {
   padding: 28px 16px;
   text-align: center;

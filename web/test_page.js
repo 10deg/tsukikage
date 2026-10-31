@@ -60,7 +60,9 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'openCurve', 'closeCurve',
   'saveCurvePng', 'drawCurve',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
-  'manualHitTest', 'clearManualMarks', 'overlay'];
+  'manualHitTest', 'clearManualMarks', 'overlay',
+  'drawDisk', 'drawSelection', 'drawGlobeSelection',
+  'regionMarksWanted', 'drawRegionMarks', 'handleLabelDoubleClick'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
 
@@ -2218,6 +2220,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     annotationCalls2.length > annotationsBefore &&
     annotationCalls2[annotationCalls2.length - 1].body.frame === 'region',
     JSON.stringify(annotationCalls2.map((c) => c.body.frame)));
+  /* 100% is a detent: one drag stops there, a second deliberate drag passes. */
+  set('label-density', 1.2);
+  fire('label-density', 'input');
+  check('the first density drag stops at 100%',
+    document.getElementById('label-density').value === '1');
+  fire('label-density', 'change');
+  set('label-density', 1.2);
+  fire('label-density', 'input');
+  check('a second density drag goes past 100%',
+    document.getElementById('label-density').value === '1.2');
+  fire('label-density', 'change');
+  set('label-density', 0.5);
+  fire('label-density', 'input');
+  fire('label-density', 'change');
   /* 事件预报: the second tab of the processing column. */
   // The stub's registry keeps what createElement made, and the page builds the
   // chips once at init and again here, so count the distinct ids.
@@ -2233,11 +2249,47 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 11 event kinds plus 极低照明度, which shares the range boxes and the list
+  /* 12 event kinds plus 极低照明度, which shares the range boxes and the list
      but is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 12 && T.state.eventKind === 'full_moon',
+    kindChips().length === 13 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
+  check('年度之最 and the two named phenomena have their own pills',
+    kindChips().some((chip) => chip.id === 'event-chip-annual_extremes')
+    && kindChips().some((chip) => chip.id === 'event-chip-eyes_of_clavius')
+    && kindChips().some((chip) => chip.id === 'event-chip-cheshire_moon')
+    && kindChips().some((chip) => chip.id === 'event-chip-libration_target'));
+  check('the old separate min/high/low moons are gone from the pills',
+    !kindChips().some((chip) => /event-chip-(micromoon|highest_moon|lowest_moon)/.test(chip.id)));
+  check('年度之最 has its own table columns',
+    T.eventColumnsFor('annual_extremes').includes('label'));
+  {
+    const columns = T.eventColumnsFor('libration_target');
+    check('libration targets have their own window/angle columns',
+      columns.includes('label') && columns.includes('grade')
+      && columns.includes('margin') && columns.includes('solarIncidence'),
+      columns.join(','));
+    check('libration target cells carry the target, grade and margin',
+      T.eventCellText({ metrics: { grade_zh: '完全可见' } }, 'grade', 8) === '完全可见'
+      && T.eventCellText({ metrics: { margin_deg: 8.66 } }, 'margin', 8) === '8.7°'
+      && T.eventCellText({ metrics: { solar_incidence_deg: 71.2 } },
+        'solarIncidence', 8) === '71.2°');
+  }
+  {
+    const columns = T.eventColumnsFor('cheshire_moon');
+    check('Cheshire has separate rise, illumination and equator columns',
+      columns.join(',') === 'date,time,label,rise,illumination,ecliptic,equator',
+      columns.join(','));
+    check('Cheshire has no prose 备注 column', !columns.includes('detail'));
+    check('the Cheshire rise cell says 月升 or 月落',
+      T.eventCellText({ metrics: { rise: true } }, 'rise', 8) === '月升'
+      && T.eventCellText({ metrics: { rise: false } }, 'rise', 8) === '月落');
+    check('the Cheshire angles are their own numeric cells',
+      T.eventCellText({ metrics: { ecliptic_horizon_angle_deg: 82.4 } },
+        'ecliptic', 8) === '82.4°'
+      && T.eventCellText({ metrics: { moon_equator_horizon_angle_deg: 80.9 } },
+        'equator', 8) === '80.9°');
+  }
   /* 极低照明度: same range boxes, a different report -- sessions ranked by how
      thin they are, not instants ranked by date. */
   {
@@ -2320,6 +2372,29 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       `${before} -> ${document.getElementById('when').value}`);
     document.getElementById('when').value = before;
   }
+  {
+    document.getElementById('event-list').innerHTML = '';
+    T.renderEvents([
+      { kind: 'jewelled_handle', label: 'Jewelled Handle',
+        when_utc: '2026-05-02T20:00:00+00:00', detail: '高度 18.0°',
+        observable: true },
+      { kind: 'eyes_of_clavius', label: 'Eyes of Clavius',
+        when_utc: '2026-05-03T20:00:00+00:00', detail: '高度 22.0°',
+        observable: true },
+      { kind: 'cheshire_moon', label: 'Cheshire Moon（Wet Moon）',
+        when_utc: '2026-05-04T20:00:00+00:00', detail: '',
+        observable: true },
+    ]);
+    const rows = [...new Set(document.querySelectorAll('.event-row'))].slice(-3);
+    const previewText = (row) => String((row.children[1] || {}).textContent || '');
+    check('the three window forecasts do not repeat their names in the preview',
+      rows.every((row) => !previewText(row).includes('Jewelled')
+        && !previewText(row).includes('Clavius')
+        && !previewText(row).includes('Cheshire')), previewText(rows[0]));
+    check('the preview still carries the detail that is not the name',
+      previewText(rows[0]).includes('高度 18.0°'), previewText(rows[0]));
+  }
+
   console.log('');
   console.log('the event table window and its CSV');
   {
@@ -2789,10 +2864,23 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     button.fire('click');
     check('the 3D button is an independent latch',
       T.state.view3d === true && button.getAttribute('aria-pressed') === 'true');
-    check('the 2D selection and name layers are hidden',
-      document.getElementById('overlay').hidden === true &&
+    check('the 3D globe keeps the selection layer and hides the flat names',
+      document.getElementById('overlay').hidden === false &&
       document.getElementById('labels-disk').hidden === true);
     await new Promise((resolve) => setTimeout(resolve, 200));
+    {
+      const overlayCtx = document.getElementById('overlay').getContext('2d');
+      const savedSelection = T.state.selection;
+      overlayCtx.drawn.strokes.length = 0;
+      T.state.selection = {
+        lon: 0, lat: 0, radiusFraction: 0.1, rotationDeg: 0, aspect: 1,
+      };
+      T.drawDisk();
+      check('the globe carries the selection outline',
+        overlayCtx.drawn.strokes.length > 0,
+        String(overlayCtx.drawn.strokes.length));
+      T.state.selection = savedSelection;
+    }
     check('the low-resolution globe texture is loaded once',
       Boolean(T.state.globeTexture) &&
       fetchCalls.filter((call) => call.url.startsWith('/api/globe-texture')).length === 1,
@@ -2969,6 +3057,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('清空手动标记 removes them all',
       T.state.manualMarks.length === 0 && T.state.manualSeq === 0,
       JSON.stringify(T.state.manualMarks));
+    T.state.labelsOn = false;
+    T.addManualMark('disk', { clientX: 280, clientY: 280,
+                              preventDefault() {} });
+    check('a manual anchor cannot be added while the labels are off',
+      T.state.manualMarks.length === 0);
+    T.state.labelsOn = true;
   }
   /* The A/a switch and 针对选框标注 are latches, not form fields. */
   {
@@ -3123,7 +3217,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   fire('noise-gaussian', 'input');
   await new Promise((resolve) => setTimeout(resolve, 150));
   const grainy = fetchCalls.filter((c) => c.url === '/api/process').pop().body.processing;
-  check('the Gaussian slider becomes a sigma', Math.abs(grainy.noise_sigma - 0.03) < 1e-9,
+  check('the Gaussian slider becomes a sigma', Math.abs(grainy.noise_sigma - 0.01) < 1e-9,
     grainy.noise_sigma);
   // The noise sliders are left at zero for the checks that follow: the Poisson
   // count is drawn from a seeded generator, and a frame with grain in it is not
@@ -4195,6 +4289,33 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   }
 
   console.log('');
+  console.log('the observer caption reads south and west from signed numbers');
+  {
+    const lat = document.getElementById('lat');
+    const lon = document.getElementById('lon');
+    const oldLat = lat.value;
+    const oldLon = lon.value;
+    lat.value = '-33.9';
+    fire('lat', 'input');
+    lon.value = '-70.6';
+    fire('lon', 'input');
+    check('a negative latitude says S and a negative longitude says W',
+      document.getElementById('lat-hemi').textContent === 'S'
+      && document.getElementById('lon-hemi').textContent === 'W');
+    lat.value = '12.3';
+    fire('lat', 'input');
+    lon.value = '45.6';
+    fire('lon', 'input');
+    check('positive values go back to N/E',
+      document.getElementById('lat-hemi').textContent === 'N'
+      && document.getElementById('lon-hemi').textContent === 'E');
+    lat.value = oldLat;
+    lon.value = oldLon;
+    fire('lat', 'input');
+    fire('lon', 'input');
+  }
+
+  console.log('');
   console.log('the sky position window');
   {
     const canvas = document.getElementById('sky-canvas');
@@ -4224,6 +4345,16 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         `${document.getElementById('sky-date').value} ` +
         `${document.getElementById('sky-time').value} ` +
         `${document.getElementById('sky-tz').value}`);
+
+      check('the time-step buttons start folded away',
+        document.getElementById('sky-nudge').hidden === true
+        && document.getElementById('sky-nudge-toggle')
+          .getAttribute('aria-expanded') === 'false');
+      fire('sky-nudge-toggle', 'click');
+      check('时间步长 unfolds them',
+        document.getElementById('sky-nudge').hidden === false
+        && document.getElementById('sky-nudge-toggle')
+          .getAttribute('aria-expanded') === 'true');
 
       const before = fetchCalls.filter((call) => call.url === '/api/sky').length;
       set('sky-time', '21:45');
@@ -4327,6 +4458,18 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       document.getElementById('sky-mode').textContent === '地平线视图'
       && ctx.drawn.texts.some((text) => text.text === '地平线'),
       document.getElementById('sky-mode').textContent);
+
+    // 取主界面时刻: the opposite direction from 同步到主界面.
+    set('sky-time', '20:00');
+    fire('sky-from-main', 'click');
+    await tick();
+    check('取主界面时刻 copies the page date, time and zone into the sky window',
+      document.getElementById('sky-date').value
+        === document.getElementById('when').value.slice(0, 10)
+      && document.getElementById('sky-time').value
+        === document.getElementById('when').value.slice(11, 16)
+      && Number(document.getElementById('sky-tz').value)
+        === Number(document.getElementById('tz').value));
 
     // 同步到主界面: both the wall clock and the offset have to move.
     const savedMain = document.getElementById('when').value;

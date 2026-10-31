@@ -62,11 +62,13 @@
       </div>
 
       <div class="grid2">
-        <label>纬度 °N <span class="en">Latitude</span>
-          <input type="number" id="lat" value="30" step="0.0001">
+        <label>纬度 °<span id="lat-hemi">N</span> <span class="en">Latitude</span>
+          <input type="number" id="lat" value="30" step="0.0001"
+                 title="正数北纬，负数南纬">
         </label>
-        <label>经度 °E <span class="en">Longitude</span>
-          <input type="number" id="lon" value="120" step="0.0001">
+        <label>经度 °<span id="lon-hemi">E</span> <span class="en">Longitude</span>
+          <input type="number" id="lon" value="120" step="0.0001"
+                 title="正数东经，负数西经">
         </label>
       </div>
       <div class="settings-row">
@@ -282,12 +284,11 @@
                       title="清除全部手动标记（Ctrl / ⌘ + 点击添加的锚点）">清空手动标记</button>
             </div>
 
-          <!-- 左边是几何标注，右边是分类开关；搜索已经搬到上面那一行。 -->
-          <div class="find-bar">
-            <div class="find-left">
-              <!-- 几何标注：只画在全月面上。它们不需要地名库，页面自己按正射投影算
-                   得出来——这些恰好是模拟确切知道的东西。 -->
-              <div class="mark-bar" id="mark-bar">
+          <!-- 几何标注独占一排，地貌分类在分界线下方。 -->
+          <div class="mark-row">
+            <!-- 几何标注：只画在全月面上。它们不需要地名库，页面自己按正射投影算
+                 得出来——这些恰好是模拟确切知道的东西。 -->
+            <div class="mark-bar" id="mark-bar">
                 <label class="mark-chip" data-on="false" title="太阳高度为 0 的那条曲线">
                   <input type="checkbox" id="mark-terminator">
                   <span>阴影带</span>
@@ -322,9 +323,12 @@
                   <input type="checkbox" id="mark-ruler">
                   <span>标尺</span>
                 </label>
-              </div>
             </div>
-            <!-- 分类开关由 app.js 按 FEATURE_CLASSES 生成，颜色就是图上用的颜色 -->
+            <button class="ghost mini" id="marks-all">全选/全不选</button>
+          </div>
+          <hr class="label-divider">
+          <!-- 分类开关由 app.js 按 FEATURE_CLASSES 生成，颜色就是图上用的颜色 -->
+          <div class="class-row">
             <div class="class-bar" id="label-classes"></div>
             <button class="ghost mini" id="classes-all">全选</button>
           </div>
@@ -412,7 +416,7 @@
             </label>
           </div>
           <button class="ghost mini view-3d" id="view-3d" aria-pressed="false"
-                  title="把全月面预览切换为可旋转的低倍 3D 球面">3D</button>
+                  title="把全月面预览切换为可旋转的低倍 3D 球面；在球面上按住 Alt 拖动可画选框">3D</button>
           </div>
 
           <!-- 图窗右上角：缩放。 -->
@@ -619,9 +623,13 @@
           </label>
           <span class="unit" id="save-info"
                 title="保存文件里一个像素对应天上的多少角秒、月面上的多少公里">px</span>
-          <label class="check inline" title="保存时把月面地貌标注与几何标注一并画进文件">
+          <label class="check inline" title="保存时把月面地貌标注画进文件">
             <input type="checkbox" id="download-annotated" checked>
             <span>地貌</span>
+          </label>
+          <label class="check inline" title="在高分辨率模拟与后期处理上画出几何标注：阴影带、赤道、极点、日下点、天平动点">
+            <input type="checkbox" id="download-marks">
+            <span>几何</span>
           </label>
           <label class="check inline" title="保存时加入地照模拟的效果">
             <input type="checkbox" id="region-earthshine" checked>
@@ -920,8 +928,8 @@
 
           <div class="slider-row wide">
             <span class="slider-label" title="模糊强度：把当前视宁度对应的模糊按比例施加。">模糊强度</span>
-            <input type="range" id="blur-strength" min="0" max="1" step="0.01" value="1">
-            <output id="blur-strength-out">1.00</output>
+            <input type="range" id="blur-strength" min="0" max="1" step="0.01" value="0.5">
+            <output id="blur-strength-out">0.50</output>
           </div>
           <!-- 衍射环: the label itself is the fold.  The triangle sits to its
                right (衍射环 ▸), the slider stays on the same row, and the PSF
@@ -1436,6 +1444,8 @@
         <input type="number" id="sky-tz" step="0.5" min="-12" max="14" value="8">
         <span class="unit">h</span>
       </label>
+      <button class="ghost mini" id="sky-from-main"
+              title="把主界面的日期、时刻和时区取到这张图">取主界面时刻</button>
       <button class="ghost mini" id="sky-sync-main">将时间同步到主界面</button>
       <label title="以当前时刻为中心，向前后各展开多少小时">时间跨度 ±
         <input type="number" id="sky-span" value="6" min="0.25" max="24" step="0.25">
@@ -1487,9 +1497,10 @@
         <span class="unit">px</span>
         <button class="gold" id="sky-save">保存 PNG</button>
       </span>
-      <!-- 步长按钮仍是“拨钟”的手指，放在这一排设置的最后，独占一行：
-           它不是显示选项，挪到「将时间同步到主界面」右边会和“看什么”混在一起。 -->
-      <span class="sky-nudge" id="sky-nudge">
+      <button class="ghost mini" id="sky-nudge-toggle"
+              aria-expanded="false" title="展开或收起逐级时间步进按钮">时间步长</button>
+      <!-- 步长按钮仍是“拨钟”的手指，展开后独占一行。 -->
+      <span class="sky-nudge" id="sky-nudge" hidden>
         <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
         <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
         <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
@@ -1938,6 +1949,7 @@
     </header>
     <div class="event-window-body">
       <table class="event-table">
+        <colgroup id="event-window-cols"></colgroup>
         <thead>
           <!-- The columns are per event kind; renderEventHeader() fills this
                row from EVENT_COLUMN_SETS.  Keeping it empty in the markup is

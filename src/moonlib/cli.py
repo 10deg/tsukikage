@@ -665,7 +665,7 @@ def _cmd_sunpoint(args: argparse.Namespace) -> int:
             f"  {row.when_utc.isoformat(timespec='minutes'):<17}"
             f"  高度 {row.altitude_deg:+7.2f}°"
             f"  方位 {row.azimuth_deg:7.2f}°"
-            f"  {'阳光' if row.illuminated else '阴影'}"
+            f"  {'受光' if row.illuminated else '阴影'}"
         )
     _print(_RULE)
     return 0

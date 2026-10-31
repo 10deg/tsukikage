@@ -248,7 +248,9 @@ function buildDom(source) {
     for (const node of all) add(node);
     return out;
   };
+  const body = new El('body', {});
   const document = {
+    body,
     documentElement,
     getElementById: (id) => byId[id] || null,
     querySelector: (selector) => universe().find((node) => matches(node, selector)) || null,
@@ -278,7 +280,7 @@ function context2d() {
     getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(Math.max(4, w * h * 4)), width: w, height: h }),
     putImageData() {},
     measureText: (text) => ({ width: String(text).length * 7 }),
-    fillText(text) { drawn.texts.push(String(text)); },
+    fillText(text, x, y) { drawn.texts.push({ text: String(text), x, y }); },
     strokeText() {},
     createLinearGradient: () => ({ addColorStop() {} }),
     createRadialGradient: () => ({ addColorStop() {} }),
@@ -319,6 +321,7 @@ function fakeFetch(url) {
   });
   if (url.startsWith('/api/map/health')) {
     return respond({
+      version: '1.0.0',
       dem: { name: 'dem', level0_km_per_pixel: 0.118 },
       albedo: { name: 'albedo', level0_km_per_pixel: 0.5 },
       feature_count: 9000, sources: [{ name: 'dem', km_per_px: 0.118 }],
@@ -327,6 +330,15 @@ function fakeFetch(url) {
   if (url.startsWith('/api/map/layers')) return respond(LAYERS);
   if (url.startsWith('/api/map/lighting')) return respond(LIGHTING);
   if (url.startsWith('/api/map/features')) return respond({ features: [], total: 0 });
+  if (url.startsWith('/api/map/photos')) return respond({ photos: [] });
+  if (url.startsWith('/api/map/data/download')) {
+    return respond({ ok: true, dem: 'ldem_64.tif', fallback: false,
+      download: { running: true, last_line: '准备下载…' } });
+  }
+  if (url.startsWith('/api/map/data')) {
+    return respond({ ok: true, dem: 'ldem_64.tif', fallback: false,
+      download: { running: false, last_line: '', error: '' } });
+  }
   if (url.startsWith('/api/map/point')) return respond({ elevation_km: 1.2 });
   if (url.startsWith('/api/map/search')) {
     return respond({ results: [{
@@ -370,7 +382,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -387,9 +399,46 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const chips = dom.document.querySelectorAll('.cls-chip');
   check('one chip per feature class is built',
     chips.length === 2, String(chips.length));
-  check('and the base raster stays in the layer list',
-    dom.document.querySelectorAll('.layer-item').length === 1,
+  check('the base raster is a display switch, not a layer row',
+    dom.document.querySelectorAll('.layer-item').length === 0
+    && Boolean(dom.byId['base-on']),
     String(dom.document.querySelectorAll('.layer-item').length));
+  check('the map starts at 20% label density',
+    dom.byId['label-density'].value === '0.2'
+    && dom.byId['density-value'].textContent === '20%',
+    `${dom.byId['label-density'].value} / ${dom.byId['density-value'].textContent}`);
+  check('the moon readout starts folded to its basic rows',
+    dom.byId['moon-info'].dataset.collapsed === 'true'
+    && dom.byId['moon-info-toggle'].getAttribute('aria-expanded') === 'false');
+  dom.byId['moon-info-toggle'].fire('click');
+  check('and it can be expanded',
+    dom.byId['moon-info'].dataset.collapsed === 'false'
+    && dom.byId['moon-info-toggle'].getAttribute('aria-expanded') === 'true');
+  check('display has base brightness, shadow bias and earthshine controls',
+    ['base-brightness', 'shadow-bias', 'earthshine-on']
+      .every((id) => Boolean(dom.byId[id])));
+  check('they start at 1, 0 and on',
+    T.state.brightness === 1 && T.state.shadowBias === 0
+    && T.state.earthshine === true);
+  dom.byId['base-brightness'].value = '1.5';
+  dom.byId['base-brightness'].fire('input');
+  check('base brightness reaches the canvas state',
+    T.state.brightness === 1.5, String(T.state.brightness));
+  dom.byId['shadow-bias'].value = '0.12';
+  dom.byId['shadow-bias'].fire('input');
+  check('shadow bias reaches the canvas state',
+    T.state.shadowBias === 0.12, String(T.state.shadowBias));
+  dom.byId['earthshine-on'].checked = false;
+  dom.byId['earthshine-on'].fire('change');
+  check('earthshine can be switched off', T.state.earthshine === false);
+  dom.byId['earthshine-on'].checked = true;
+  dom.byId['earthshine-on'].fire('change');
+  dom.byId['base-brightness'].value = '1';
+  dom.byId['base-brightness'].fire('input');
+  dom.byId['shadow-bias'].value = '0';
+  dom.byId['shadow-bias'].fire('input');
+  check('the map version sits under the title',
+    dom.byId['map-version'].textContent === '1.0.0');
   check('all of them start on, as the server says',
     T.state.active.has('mare') && T.state.active.has('crater'));
   T.setAllLayers(false);
@@ -460,7 +509,8 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   check('and opens them again', T.state.labels === true);
   dom.byId['marks-toggle'].fire('click');
   check('几何标注 has its own master switch', T.state.marksOn === false &&
-    dom.byId['marks-toggle'].getAttribute('aria-pressed') === 'false');
+    dom.byId['marks-toggle'].getAttribute('aria-pressed') === 'false'
+    && dom.byId['marks-toggle'].tagName === 'H2');
   dom.byId['marks-toggle'].fire('click');
   check('and it comes back without touching the labels',
     T.state.marksOn === true && T.state.labels === true);
@@ -478,8 +528,19 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         jump = Math.max(jump, Math.abs(segment[index].x - segment[index - 1].x));
       }
     }
-    check('each arc stays on one side of the seam',
-      !!rim && jump < T.state.width / 2, `${jump} px`);
+    check('the seam-crossing rim is one continuous ring, not two halves',
+      !!rim && rim.segments.length === 1 && rim.closed === true
+      && jump < T.state.width / 2,
+      `${rim ? rim.segments.length : 0} segments, jump ${jump} px`);
+    T.state.projection = 'mercator';
+    T.state.centerLat = 0;
+    T.state.mercY = 0;
+    const mercatorRim = T.featureRimSegments({
+      lon: 180, lat: 0, diameter_km: 3000 });
+    check('Mercator uses the same one-ring rule at the seam',
+      !!mercatorRim && mercatorRim.segments.length === 1
+      && mercatorRim.closed === true,
+      `${mercatorRim ? mercatorRim.segments.length : 0} segments`);
     Object.assign(T.state, saved);
   }
 
@@ -508,6 +569,27 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   splitter.fire('pointerup', { clientX: 380, pointerId: 1 });
   const width = dom.document.documentElement.style.getPropertyValue('--left-w');
   check('dragging the left edge sets the left column', width === '318px', width);
+  splitter.fire('pointerdown', { clientX: 300, pointerId: 2 });
+  splitter.fire('pointermove', { clientX: 0, pointerId: 2 });
+  splitter.fire('pointerup', { clientX: 0, pointerId: 2 });
+  check('dragging the left splitter past the edge hides the left column',
+    dom.byId['map-left'].dataset.collapsed === 'true'
+    && dom.document.documentElement.style.getPropertyValue('--left-w') === '0px',
+    dom.document.documentElement.style.getPropertyValue('--left-w'));
+  check('the hidden edge grows a restore handle',
+    splitter.dataset.collapsed === 'true'
+    && splitter.getAttribute('role') === 'button'
+    && /点击显示左栏/.test(splitter.title),
+    `${splitter.dataset.collapsed} / ${splitter.getAttribute('role')} / ${splitter.title}`);
+  splitter.fire('pointerdown', { clientX: 2, pointerId: 3 });
+  splitter.fire('pointerup', { clientX: 2, pointerId: 3 });
+  check('clicking the edge handle restores the collapsed column',
+    dom.byId['map-left'].dataset.collapsed === 'false'
+    && parseFloat(dom.document.documentElement.style.getPropertyValue('--left-w')) > 0,
+    dom.document.documentElement.style.getPropertyValue('--left-w'));
+  check('and the restore handle goes away',
+    splitter.dataset.collapsed === 'false'
+    && splitter.getAttribute('role') === 'separator');
 
   console.log('');
   console.log('the annotation settings fold away');
@@ -559,6 +641,340 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   T.state.projection = 'mercator';
   check('the Mercator scale is not capped at the old 8x either',
     T.state.scale <= 16, String(T.state.scale));
+
+  console.log('');
+  console.log('a registered photo projects onto the map');
+  const photoProject = {
+    geometry: {
+      observer: [1, 0, 0], right: [0, 1, 0], north: [0, 0, 1],
+      sun: [1, 0, 0], distance_km: 384400,
+    },
+    matrix: [[40, 0, 50], [0, 40, 50]],
+    image_size: [100, 100],
+  };
+  const centre = T.moonToPhoto(photoProject, 0, 0);
+  check('the sub-observer point lands at the photo centre',
+    centre && Math.abs(centre.x - 50) < 1e-9 && Math.abs(centre.y - 50) < 1e-9,
+    JSON.stringify(centre));
+  const east = T.moonToPhoto(photoProject, 0, 45);
+  check('east maps with the matrix, without an extra north rotation',
+    east && Math.abs(east.x - 78.375) < 1e-3
+    && Math.abs(east.y - 50) < 1e-9,
+    JSON.stringify(east));
+  check('the far side is not projected',
+    T.moonToPhoto(photoProject, 0, 180) === null);
+  const back = T.photoToSphere(photoProject, 50, 50);
+  check('the inverse mapping returns the sub-observer point',
+    back && Math.abs(back.lon) < 1e-6 && Math.abs(back.lat) < 1e-6,
+    JSON.stringify(back));
+  T.state.projection = 'equirect';
+  T.state.photoActive.add('0000000000000000');
+  T.drawPhotoOverlay();
+  check('a selected photo does not break an equirect redraw', true);
+  T.state.photoActive.clear();
+
+  console.log('');
+  console.log('captions are laid out by weight tier');
+  {
+    const feature = (cls, diameter, name) => ({ class: cls, diameter_km: diameter, name_en: name });
+    check('basins, Lunar 100 and libration targets are tier 0',
+      T.labelTier(feature('basin', 200)) === 0
+      && T.labelTier(feature('lunar100', 1)) === 0
+      && T.labelTier(feature('libration', 1)) === 0);
+    check('maria are tier 1 and the named terrain families tier 2',
+      T.labelTier(feature('mare', 200)) === 1
+      && T.labelTier(feature('lacus', 30)) === 2
+      && T.labelTier(feature('crater', 120, 'Ptolemaeus')) === 2);
+    check('ordinary craters are tier 3 and small satellites tier 4',
+      T.labelTier(feature('crater', 60, 'Arago')) === 3
+      && T.labelTier(feature('crater', 10, 'Arago A')) === 4);
+    check('large satellites are promoted to tier 3, other classes are tier 5',
+      T.labelTier(feature('crater', 40, 'Arago B')) === 3
+      && T.labelTier(feature('dome', 20)) === 5);
+  }
+
+  console.log('');
+  console.log('the map repeats east-west and stops at the poles');
+  {
+    const saved = { ...T.state };
+    T.state.projection = 'equirect';
+    T.state.centerLon = 179;
+    T.state.centerLat = 89;
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.scale = 1;
+    T.state.zoom = 0;
+    T.state.mercY = 0;
+    const west = T.screenToLonLat(600, 400);
+    check('the centre of an equirect view is the stored coordinate',
+      west && Math.abs(west.lon - 179) < 1e-6 && Math.abs(west.lat - 89) < 1e-6,
+      JSON.stringify(west));
+    T.state.centerLon = -179;
+    const east = T.screenToLonLat(600, 400);
+    check('longitude wraps across the date line',
+      east && Math.abs(east.lon + 179) < 1e-6, JSON.stringify(east));
+    T.state.projection = 'mercator';
+    T.state.centerLon = 0;
+    T.state.centerLat = 0;
+    T.state.mercY = 0;
+    const merc = T.screenToLonLat(600, 400);
+    check('mercator keeps its centre under the pointer',
+      merc && Math.abs(merc.lat) < 1e-6 && Math.abs(merc.lon) < 1e-6,
+      JSON.stringify(merc));
+    const beyond = T.lonlatToScreen(0, 84);
+    check('a point near the pole projects in front of the camera',
+      Number.isFinite(beyond.x) && Number.isFinite(beyond.y),
+      JSON.stringify(beyond));
+    T.state.projection = 'equirect';
+    T.state.centerLon = 0;
+    T.state.centerLat = 89;
+    T.state.width = 1200;
+    T.state.height = 200;
+    T.state.scale = 1;
+    T.state.zoom = 0;
+    T.clampCenter();
+    check('vertical panning stops at the top edge, it does not wrap',
+      T.state.centerLat < 89 && T.state.centerLat > 0,
+      String(T.state.centerLat));
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('mercantor has no mirrored poles and photos select without showing');
+  {
+    const saved = { ...T.state };
+    T.state.projection = 'mercator';
+    T.state.centerLon = 0;
+    T.state.centerLat = 0;
+    T.state.mercY = 0;
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.scale = 1;
+    T.state.zoom = 0;
+    check('the empty band above the Mercator edge is background, not a smear',
+      T.screenToLonLat(600, 0) === null,
+      JSON.stringify({ projection: T.state.projection,
+        lat: T.state.centerLat, mercY: T.state.mercY,
+        scale: T.state.scale, height: T.state.height,
+        result: T.screenToLonLat(600, 0) }));
+    Object.assign(T.state, saved);
+    const photo = { id: 'c000000000000000', name: 'p', project: {} };
+    T.state.photos = [photo];
+    T.state.photoOrder = [photo.id];
+    T.state.photoActive.clear();
+    T.state.photo = null;
+    T.state.photoFilters = { dateStart: '', dateEnd: '', ageMin: null,
+                             ageMax: null, features: [], query: '' };
+    T.selectPhoto(photo);
+    check('selecting a photo does not put it on the map',
+      T.state.photo === photo && T.state.photoActive.size === 0);
+    check('the selected row gets its own highlight',
+      dom.byId['photo-list'].children.some((node) => node.classes.has('selected')));
+    T.state.photos = [];
+    T.state.photoOrder = [];
+    T.state.photo = null;
+    T.state.photoActive.clear();
+  }
+
+  console.log('');
+  console.log('a landform caption is clickable like its marker');
+  {
+    const savedLayers = T.state.layers;
+    const feature = { id: 1, name_en: 'Clavius', name_zh: '克拉维斯',
+                      class: 'crater', lon: 0, lat: 0, diameter_km: 231 };
+    T.state.layers = { feature_classes: ['crater'] };
+    T.state.active.add('crater');
+    T.state.features = [];
+    T.state.labelHits = [{
+      feature, left: 10, top: 10, right: 90, bottom: 26,
+    }];
+    const hit = T.featureAt(30, 18);
+    check('clicking the caption selects the feature it names',
+      hit === feature, JSON.stringify(hit));
+    T.state.labelHits = [];
+    T.state.active.delete('crater');
+    T.state.layers = savedLayers;
+  }
+
+  console.log('');
+  console.log('the map layout controls');
+  {
+    check('the search box now searches landforms',
+      dom.byId['search-input'].attrs.placeholder === '搜索地貌',
+      dom.byId['search-input'].attrs.placeholder);
+    check('every geometry switch starts on',
+      dom.byId['mark-equator'].checked === true
+      && T.state.marks.equator === true
+      && ['mark-terminator', 'mark-poles', 'mark-subsolar',
+          'mark-libration', 'mark-graticule'].every((id) => dom.byId[id].checked));
+    const savedProjection = T.state.projection;
+    const savedGlobe = T.state.globe.zoom;
+    T.state.projection = 'globe';
+    T.state.globe.zoom = 1;
+    const coarse = T.graticuleStep();
+    T.state.globe.zoom = 4;
+    const fine = T.graticuleStep();
+    check('the globe graticule adapts to the globe zoom, not the tile zoom',
+      coarse === 60 && fine === 15, `${coarse} / ${fine}`);
+    T.state.projection = savedProjection;
+    T.state.globe.zoom = savedGlobe;
+    T.state.marksOn = true;
+    T.state.marks.graticule = true;
+    T.state.width = 1200;
+    T.state.height = 800;
+    const mapCtx = dom.byId['map-canvas'].getContext('2d');
+    mapCtx.drawn.texts.length = 0;
+    T.state.projection = 'equirect';
+    T.drawGraticule();
+    check('flat-map latitude ticks stay on the left frame edge',
+      mapCtx.drawn.texts.some((item) => item.x === 5),
+      JSON.stringify(mapCtx.drawn.texts.slice(0, 3).map((i) => i.text)));
+    check('flat-map longitude ticks stay on the bottom frame edge',
+      mapCtx.drawn.texts.some((item) => item.y === 786),
+      JSON.stringify(mapCtx.drawn.texts.slice(-3).map((i) => i.text)));
+    T.state.projection = savedProjection;
+    const start = dom.byId['photo-filter-date-start'].value;
+    const end = dom.byId['photo-filter-date-end'].value;
+    const now = new Date();
+    const expectedStart = new Date(Date.UTC(now.getUTCFullYear() - 50,
+      now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10);
+    check('the photo date filter opens on the past fifty years',
+      start === expectedStart && end === now.toISOString().slice(0, 10),
+      `${start} .. ${end}`);
+  }
+
+  console.log('');
+  console.log('the whole page can become just the map');
+  {
+    T.setMapFullscreen(true);
+    check('全屏 hides the chrome and shows the exit control',
+      T.state.fullscreen === true
+      && dom.document.body.classes.has('map-fullscreen')
+      && dom.byId['map-exit-fullscreen'].hidden === false);
+    T.setMapFullscreen(false);
+    check('退出全屏 puts the page back', T.state.fullscreen === false
+      && !dom.document.body.classes.has('map-fullscreen')
+      && dom.byId['map-exit-fullscreen'].hidden === true);
+  }
+
+  console.log('');
+  console.log('density has a 100% detent and turns avoidance off above it');
+  {
+    T.state.avoidOverlap = true;
+    const density = dom.byId['label-density'];
+    density.value = '1.2';
+    density.fire('input');
+    check('the first drag stops at 100%',
+      density.value === '1' && T.state.density.mare === 1);
+    density.fire('change');
+    check('avoidance is still on at 100%', T.labelAvoidanceEnabled() === true);
+    density.value = '1.2';
+    density.fire('input');
+    check('a second drag passes 100%',
+      density.value === '1.2' && T.state.density.mare === 1.2,
+      `${density.value} / ${T.state.density.mare}`);
+    check('and avoidance turns itself off above 100%',
+      T.labelAvoidanceEnabled() === false);
+    density.fire('change');
+    density.value = '1';
+    density.fire('input');
+    density.fire('change');
+  }
+
+  console.log('');
+  console.log('manual anchors live on the map');
+  {
+    T.state.labels = true;
+    const saved = T.state.manualMarks.length;
+    const mark = T.addManualMarkAt({ lon: 12.3, lat: -4.5 });
+    check('Ctrl-click drops a numbered anchor', Boolean(mark)
+      && T.state.manualMarks.length === saved + 1
+      && mark.text === '标记点1', mark && mark.text);
+    const item = T.state.manualLayout[0];
+    check('the anchor can be hit-tested',
+      Boolean(item) && T.manualAt(item.x, item.y) === item,
+      JSON.stringify(T.state.manualLayout));
+    T.clearManualMarks();
+    check('清空标记 removes them', T.state.manualMarks.length === 0);
+  }
+
+  console.log('');
+  console.log('the photo library filters by date, age and covered features');
+  {
+    const first = {
+      id: 'a000000000000000', name: 'a', date: '2023-03-04', age_days: 12.2,
+      covered_features: [{ name_en: 'Clavius', name_zh: '克拉维斯' }],
+    };
+    const second = {
+      id: 'b000000000000000', name: 'b', date: '2023-11-02', age_days: 18.3,
+      covered_features: [{ name_en: 'Tycho', name_zh: '第谷' }],
+    };
+    T.state.photos = [first, second];
+    T.state.photoOrder = [first.id, second.id];
+    T.state.photoFilters = { dateStart: '2023-06-01', dateEnd: '',
+                             ageMin: null, ageMax: null, features: [], query: '' };
+    check('a date window keeps the matching photo',
+      T.filteredPhotos().map((entry) => entry.id).join(',') === second.id,
+      T.filteredPhotos().map((entry) => entry.id).join(','));
+    T.state.photoFilters.dateStart = '';
+    T.state.photoFilters.features = ['Clavius'];
+    check('a covered feature keeps the photo that reaches it',
+      T.filteredPhotos().map((entry) => entry.id).join(',') === first.id);
+    T.state.photoFilters.features = [];
+    T.state.photoFilters.query = '第谷';
+    check('typing a Chinese feature name searches the coverage',
+      T.filteredPhotos().map((entry) => entry.id).join(',') === second.id);
+    T.state.photoFilters.query = '';
+    T.state.photoFilters.ageMin = 15;
+    check('an age window keeps the older moon',
+      T.filteredPhotos().map((entry) => entry.id).join(',') === second.id);
+    T.reorderPhoto(first.id, second.id, true);
+    check('drag order puts the dragged photo after its target',
+      T.orderedPhotos().map((entry) => entry.id).join(',') ===
+      `${second.id},${first.id}`,
+      T.orderedPhotos().map((entry) => entry.id).join(','));
+    T.state.photos = [];
+    T.state.photoOrder = [];
+    T.state.photoFilters = { dateStart: '', dateEnd: '', ageMin: null,
+                             ageMax: null, features: [], query: '' };
+  }
+
+  console.log('');
+  console.log('the photo library is a right-column tab with layer order');
+  {
+    const first = { id: 'a000000000000000', name: 'a' };
+    const second = { id: 'b000000000000000', name: 'b' };
+    T.state.photos = [first, second];
+    T.state.photoOrder = [first.id, second.id];
+    T.setRightTab('photos');
+    check('the photo library tab shows its own pane',
+      dom.byId['right-photos'].hidden === false
+      && dom.byId['right-selection'].hidden === true
+      && dom.byId['tab-photos'].getAttribute('aria-pressed') === 'true');
+    T.movePhoto(first, 1);
+    check('moving a photo down changes the layer order',
+      T.orderedPhotos().map((entry) => entry.id).join(',')
+      === `${second.id},${first.id}`,
+      T.orderedPhotos().map((entry) => entry.id).join(','));
+    T.setRightTab('selection');
+    check('the selection tab comes back',
+      dom.byId['right-selection'].hidden === false
+      && dom.byId['right-photos'].hidden === true);
+    T.setRightTab('settings');
+    await wait(20);
+    check('其他设置 is a third right-column tab',
+      dom.byId['right-settings'].hidden === false
+      && dom.byId['right-selection'].hidden === true
+      && dom.byId['right-photos'].hidden === true
+      && dom.byId['tab-settings'].getAttribute('aria-pressed') === 'true');
+    check('the settings tab reports the current DEM and download state',
+      dom.byId['data-dem'].textContent === 'ldem_64.tif'
+      && dom.byId['data-state'].textContent === '本地 DEM'
+      && dom.byId['data-download'].disabled === false);
+    T.setRightTab('selection');
+    T.state.photos = [];
+    T.state.photoOrder = [];
+  }
 
   console.log('');
   console.log('no unexpected exceptions');

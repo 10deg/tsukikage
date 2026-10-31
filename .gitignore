@@ -104,3 +104,7 @@ AGENTS.md
 # copy a clone needs is the code itself.
 /backups/
 *.log
+
+# Photos imported into the map's personal library are local user data, not
+# repository content.  The server recreates this directory when needed.
+/web/map_photos/

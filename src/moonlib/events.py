@@ -1,6 +1,6 @@
 """Event forecasts: what is worth putting in a diary.
 
-Eleven things, all of them answers to "when should I look?":
+Every kind is an answer to "when should I look?":
 
 ``new_moon`` / ``first_quarter`` / ``full_moon`` / ``last_quarter``
     The four principal phase instants, from :mod:`moonlib.phases`.
@@ -48,6 +48,21 @@ is why the umbra radius carries the conventional 2% allowance.
     the rising Sun first clears the Montes Jura, near Promontorium Laplace.
     The anchor is 36.60°W, 43.39°N and the solar altitude band is -2.5°–2.0°
     with -2.0° as the best moment.  First described by Patrick Moore.
+
+``eyes_of_clavius``
+    Two bright points inside Clavius at sunrise, the "Eyes of Clavius".  The
+    anchor is the crater centre (14.4°W, 58.4°S) and the solar altitude band is
+    0.5°–1.4° with 1.0° as the best moment.
+
+``cheshire_moon``
+    A moonrise or moonset while the ecliptic is nearly perpendicular to the
+    horizon: the crescent's horns point upward and the Moon reads as a grin.
+    The forecast reports the rise/set instant and the ecliptic-horizon angle.
+
+``annual_extremes``
+    The year's superlative full moons in one list: largest, smallest, highest
+    and lowest.  This is deliberately not the same as 超级月亮 / 最小月亮,
+    which are threshold bands that can contain several moons.
 """
 
 from __future__ import annotations
@@ -60,7 +75,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .errors import MoonlibError
-from .frames import az_el, direction_in_moon_frame
+from .frames import (az_el, direction_in_moon_frame, j2000_from_body_fixed,
+                     observer_bf)
 from .kernels import kernel_session
 from .lunardate import chinese_lunar_date
 from .moon import geocentric_phase_angle_deg, moon_state
@@ -150,6 +166,23 @@ JEWELLED_HANDLE_SUN_ALTITUDE_MIN_DEG = -2.5
 JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG = 2.0
 JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = -2.0
 
+#: The Eyes of Clavius: sunlight first reaching two points on the crater floor.
+#: The anchor is the crater centre; the band is the one the observer supplied
+#: for this release, with 1.0° as the best moment.
+EYES_OF_CLAVIUS_ANCHOR_LON_DEG = -14.4
+EYES_OF_CLAVIUS_ANCHOR_LAT_DEG = -58.4
+EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG = 0.5
+EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG = 1.4
+EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG = 1.0
+
+#: The Cheshire Moon is the "boat" orientation: the Moon's north-south axis
+#: lies nearly parallel to the horizon, so the disc looks tipped on its side.
+#: The ecliptic angle is only a cheap pre-filter -- the lunar axis is inclined
+#: 1.5° to the ecliptic normal -- and the deciding number is the angle between
+#: that axis and the horizon.
+CHESHIRE_ECLIPTIC_ANGLE_MIN_DEG = 75.0
+CHESHIRE_AXIS_HORIZON_MAX_DEG = 10.0
+
 KIND_LABELS = {
     "full_moon": "满月",
     "new_moon": "朔月",
@@ -162,6 +195,10 @@ KIND_LABELS = {
     "lunar_eclipse": "月食",
     "xvl": "月面 X/V/L",
     "jewelled_handle": "the jewelled handle",
+    "eyes_of_clavius": "Eyes of Clavius",
+    "cheshire_moon": "Cheshire Moon（Wet Moon）",
+    "annual_extremes": "年度之最",
+    "libration_target": "极端天平动目标",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -177,6 +214,8 @@ EVENT_KINDS: Tuple[str, ...] = (
     "new_moon", "first_quarter", "full_moon", "last_quarter",
     "supermoon", "micromoon", "highest_moon", "lowest_moon",
     "lunar_eclipse", "xvl", "jewelled_handle",
+    "eyes_of_clavius", "cheshire_moon", "annual_extremes",
+    "libration_target",
 )
 
 #: Old names kept as aliases so a bookmarked settings file or a saved request
@@ -417,6 +456,9 @@ _LXV_ANCHOR_NORMAL = _anchor_normal(LXV_ANCHOR_LON_DEG, LXV_ANCHOR_LAT_DEG)
 _JEWELLED_HANDLE_ANCHOR_NORMAL = _anchor_normal(
     JEWELLED_HANDLE_ANCHOR_LON_DEG, JEWELLED_HANDLE_ANCHOR_LAT_DEG
 )
+_EYES_OF_CLAVIUS_ANCHOR_NORMAL = _anchor_normal(
+    EYES_OF_CLAVIUS_ANCHOR_LON_DEG, EYES_OF_CLAVIUS_ANCHOR_LAT_DEG
+)
 
 
 def _sun_altitude_at(normal: np.ndarray, et: float) -> float:
@@ -439,6 +481,66 @@ def _lxv_sun_altitude_deg(et: float) -> float:
 def _jewelled_handle_sun_altitude_deg(et: float) -> float:
     """The Sun's altitude above the Jewelled Handle anchor, degrees."""
     return _sun_altitude_at(_JEWELLED_HANDLE_ANCHOR_NORMAL, et)
+
+
+def _eyes_of_clavius_sun_altitude_deg(et: float) -> float:
+    """The Sun's altitude above the Clavius anchor, degrees."""
+    return _sun_altitude_at(_EYES_OF_CLAVIUS_ANCHOR_NORMAL, et)
+
+
+def _ecliptic_horizon_angle_deg(et: float, observer: Observer) -> float:
+    """Angle between the ecliptic and the horizon, 0–90°.
+
+    The two planes meet at the angle between their normals: the ecliptic pole
+    and the local zenith.  A value near 90° is the Cheshire Moon geometry --
+    the ecliptic stands upright over the horizon and a crescent's horns point
+    upward.  The pole is carried from ``ECLIPJ2000`` into the Earth-fixed frame
+    with the same high-precision orientation the Moon's own rise and set use.
+    """
+    try:
+        nep = np.asarray(spice.mxv(
+            spice.pxform("ECLIPJ2000", "J2000", float(et)), [0.0, 0.0, 1.0]
+        ), dtype=float)
+        fixed = np.asarray(spice.mxv(
+            spice.pxform("J2000", "IAU_EARTH", float(et)), nep
+        ), dtype=float)
+        up = np.asarray(observer_bf(observer), dtype=float)
+    except Exception:
+        return float("nan")
+    length = float(np.linalg.norm(up))
+    if not (length > 0.0):
+        return float("nan")
+    up = up / length
+    cosine = float(np.clip(abs(np.dot(fixed, up)), 0.0, 1.0))
+    return math.degrees(math.acos(cosine))
+
+
+def _moon_axis_horizon_angle_deg(et: float, observer: Observer) -> float:
+    """Angle between the Moon's north-south axis and the horizon, 0–90°.
+
+    The axis is a *line*: a pole at altitude +5° and the opposite pole at -5°
+    are the same orientation, so the absolute altitude is what enters.  The
+    Moon's body-fixed +Z is carried into J2000 and compared with the local
+    zenith; a value near 0 is the "boat" Cheshire Moon.
+    """
+    try:
+        pole = np.asarray(spice.mxv(
+            spice.pxform("IAU_MOON", "J2000", float(et)), [0.0, 0.0, 1.0]
+        ), dtype=float)
+        fixed = np.asarray(j2000_from_body_fixed(float(et), "IAU_EARTH"),
+                           dtype=float)
+        up = np.asarray(fixed @ np.asarray(observer_bf(observer), dtype=float),
+                        dtype=float)
+    except Exception:
+        return float("nan")
+    length = float(np.linalg.norm(up))
+    if not (length > 0.0):
+        return float("nan")
+    up = up / length
+    altitude = math.degrees(math.asin(float(np.clip(np.dot(pole, up), -1.0, 1.0))))
+    # The axis is a line, so the elevation of either pole is the angle it makes
+    # with the horizon plane: ±15° is 15°, not 75°.
+    return abs(altitude)
 
 
 def _xvl_colongitude_deg(et: float) -> float:
@@ -631,6 +733,244 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
     return events
 
 
+def _eyes_of_clavius_events(observer: Observer, window) -> List[MoonEvent]:
+    """The Eyes of Clavius windows inside *window*.
+
+    A single solar-altitude scan at the crater centre, exactly the shape of the
+    Jewelled Handle: only the rising crossing of the lower edge is reported,
+    because the eyes are a sunrise phenomenon.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    events: List[MoonEvent] = []
+    for root, finish, best in _altitude_windows(
+        _eyes_of_clavius_sun_altitude_deg, start, end,
+        EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG,
+        EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG,
+        EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG,
+        limit_hours=24.0,
+    ):
+        metrics = event_metrics(observer, best)
+        metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
+        moon_altitude = float(metrics["altitude_deg"])
+        minutes = (finish - root) / 60.0
+        events.append(MoonEvent(
+            kind="eyes_of_clavius",
+            when_utc=to_utc(best),
+            altitude_deg=moon_altitude,
+            title="Eyes of Clavius",
+            detail=(
+                f"持续 {minutes:.0f} min　"
+                f"锚点 {abs(EYES_OF_CLAVIUS_ANCHOR_LON_DEG):g}°W / "
+                f"{abs(EYES_OF_CLAVIUS_ANCHOR_LAT_DEG):g}°S　"
+                f"太阳高度 "
+                f"{EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG:g}–"
+                f"{EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG:g}°，"
+                f"最佳 {EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG:.1f}°　"
+                f"{_altitude_text(moon_altitude)}"
+            ),
+            observable=moon_altitude > 0.0,
+            window_start_utc=to_utc(root),
+            window_end_utc=to_utc(finish),
+            metrics=metrics,
+        ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
+def _cheshire_moon_events(observer: Observer, window) -> List[MoonEvent]:
+    """Moonrises and moonsets with the ecliptic nearly upright.
+
+    The scan is deliberately coarser than a rise/set table: the Moon moves
+    about a quarter of a degree per minute, so a 30-minute grid cannot step
+    over a crossing, and each crossing is refined by bisection.  The ecliptic
+    angle is evaluated only at those crossings.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    if end <= start + 60.0:
+        return []
+    step = 1800.0
+    moments = np.arange(start, end + step, step)
+    heights = [_altitude(float(moment), observer)
+               for moment in moments]
+    threshold = 0.125
+    events: List[MoonEvent] = []
+    for index in range(1, len(moments)):
+        before = heights[index - 1] - threshold
+        after = heights[index] - threshold
+        if not (before <= 0.0 < after or before >= 0.0 > after):
+            continue
+        root = bisect_root(
+            lambda et: _altitude(et, observer) - threshold,
+            float(moments[index - 1]), float(moments[index]), tol=1e-3,
+        )
+        ecliptic_angle = _ecliptic_horizon_angle_deg(root, observer)
+        if not (math.isfinite(ecliptic_angle)
+                and ecliptic_angle >= CHESHIRE_ECLIPTIC_ANGLE_MIN_DEG):
+            continue
+        axis_angle = _moon_axis_horizon_angle_deg(root, observer)
+        if not (math.isfinite(axis_angle)
+                and axis_angle <= CHESHIRE_AXIS_HORIZON_MAX_DEG):
+            continue
+        rising = after > before
+        metrics = event_metrics(observer, root)
+        metrics["ecliptic_horizon_angle_deg"] = ecliptic_angle
+        metrics["moon_axis_horizon_angle_deg"] = axis_angle
+        # The equatorial plane is perpendicular to the pole axis: when the
+        # axis is 9° above the horizon the equator stands 81° to it.  The
+        # table reports the equator angle the reader asked for; the event is
+        # still selected by the small axis angle.
+        metrics["moon_equator_horizon_angle_deg"] = 90.0 - axis_angle
+        metrics["rise"] = bool(rising)
+        altitude = float(metrics["altitude_deg"])
+        events.append(MoonEvent(
+            kind="cheshire_moon",
+            when_utc=to_utc(root),
+            altitude_deg=altitude,
+            title="Cheshire Moon（Wet Moon）",
+            # The sidebar has no event-name column for this kind, so the detail
+            # line carries the facts a reader needs there; the table shows the
+            # same fields as columns.  No altitude note.
+            detail=(
+                f"{'月升' if rising else '月落'}　"
+                f"照亮 {float(metrics.get('illumination_percent') or 0.0):.1f}%　"
+                f"黄道 {ecliptic_angle:.1f}°　"
+                f"赤道 {90.0 - axis_angle:.1f}°"
+            ),
+            observable=True,
+            metrics=metrics,
+        ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
+def _libration_target_events(observer: Observer, window) -> List[MoonEvent]:
+    """One row per observable limb target in the requested period.
+
+    The limb catalogue already answers the geometry; this forecast asks it for
+    the target's windows, excludes the marginal edge-only windows (CENTER or
+    better), and keeps the target's single best window.  Within that window the sample
+    farthest from the outer limb circle (largest margin) is the best moment.
+    """
+    from .libration import load_targets, sweep, window_groups
+
+    targets = load_targets()
+    samples = sweep(targets, window, observer, step_minutes=30.0)
+    events: List[MoonEvent] = []
+    for target in targets:
+        groups = [group for group in window_groups(
+            samples, target, min_grade="center") if group]
+        if not groups:
+            continue
+        # A long range can contain many limb passages for the same target.
+        # The forecast is a "when should I look" list, so keep the single
+        # best window per target rather than every passage; edge-only
+        # passages were already removed by the CENTER threshold above.
+        group = max(groups, key=lambda item: max(
+            (sample.grade.rank, sample.margin_deg) for sample in item))
+        best = max(group, key=lambda item: (item.grade.rank, item.margin_deg))
+        metrics = event_metrics(observer, to_et(best.when_utc))
+        metrics.update({
+            "target_en": target.english_name,
+            "target_zh": target.name_zh or target.english_name,
+            "region": target.region,
+            "feature_type": target.feature_type,
+            "gamma_deg": best.gamma_deg,
+            "margin_deg": best.margin_deg,
+            "grade": best.grade.value,
+            "grade_zh": best.grade.name_zh,
+            "solar_incidence_deg": best.solar_incidence_deg,
+            "window_start_utc": group[0].when_utc.isoformat(),
+            "window_end_utc": group[-1].when_utc.isoformat(),
+            "duration_minutes": (
+                group[-1].when_utc - group[0].when_utc
+            ).total_seconds() / 60.0,
+        })
+        start = group[0].when_utc
+        end = group[-1].when_utc
+        detail = (
+            f"{target.region or target.feature_type}"
+            f"　离外缘 {best.margin_deg:.1f}°　{best.grade.name_zh}"
+        )
+        events.append(MoonEvent(
+            kind="libration_target",
+            when_utc=best.when_utc,
+            altitude_deg=float(metrics["altitude_deg"]),
+            title=target.name_zh or target.english_name,
+            detail=detail,
+            observable=bool(best.is_observable),
+            window_start_utc=start,
+            window_end_utc=end,
+            metrics=metrics,
+        ))
+    return events
+
+
+def _annual_extreme_events(observer: Observer, window) -> List[MoonEvent]:
+    """The year's largest, smallest, highest and lowest full moons.
+
+    Unlike 超级月亮 / 最小月亮 these are single winners, not threshold bands:
+    the list answers "which full moon was the biggest of the range" rather than
+    "which ones were above a line".  The highest and lowest are judged at the
+    upper transit, the same quantity the old separate categories used.
+    """
+    phases = list(find_phase_events(window, (PhaseKind.FULL_MOON,)))
+    if not phases:
+        return []
+    rows = []
+    for phase in phases:
+        distance, radius_deg, _ = _geometry(phase.et)
+        altitude = _altitude(phase.et, observer)
+        metrics = event_metrics(observer, phase.et)
+        rows.append({
+            "phase": phase, "distance": distance, "radius": radius_deg,
+            "altitude": altitude, "metrics": metrics,
+        })
+    winners = [
+        ("最大月亮", max(rows, key=lambda row: row["radius"])),
+        ("最小月亮", min(rows, key=lambda row: row["radius"])),
+    ]
+    events: List[MoonEvent] = []
+    for title, row in winners:
+        at = float(row["phase"].et)
+        height = float(row["altitude"])
+        detail = (
+            f"视直径 {_diameter_text(row['radius'])}　"
+            f"地心距 {row['distance']:,.0f} km　"
+            f"{_altitude_text(height)}"
+        )
+        metrics = event_metrics(observer, at)
+        events.append(MoonEvent(
+            kind="annual_extremes",
+            when_utc=to_utc(at),
+            altitude_deg=height,
+            title=title,
+            detail=detail,
+            observable=height > 0.0,
+            metrics=metrics,
+        ))
+    # The old 最高/最低 categories had one row per principal phase, not just
+    # the full moon.  Merging them into 年度之最 keeps those winners; only the
+    # *size* winners are new.
+    for kind, title in ((PhaseKind.NEW_MOON, "最高朔月"),
+                        (PhaseKind.FIRST_QUARTER, "最高上弦月"),
+                        (PhaseKind.FULL_MOON, "最高满月"),
+                        (PhaseKind.LAST_QUARTER, "最高下弦月")):
+        found = _extreme_phase_event(observer, window, kind, title, lowest=False)
+        if found is not None:
+            events.append(replace(found, kind="annual_extremes"))
+    for kind, title in ((PhaseKind.NEW_MOON, "最低朔月"),
+                        (PhaseKind.FIRST_QUARTER, "最低上弦月"),
+                        (PhaseKind.FULL_MOON, "最低满月"),
+                        (PhaseKind.LAST_QUARTER, "最低下弦月")):
+        found = _extreme_phase_event(observer, window, kind, title, lowest=True)
+        if found is not None:
+            events.append(replace(found, kind="annual_extremes"))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
 def _altitude(et: float, observer: Observer) -> float:
     return float(az_el("MOON", et, observer).elevation_deg)
 
@@ -668,6 +1008,10 @@ def _with_daylight(observer: Observer, event: MoonEvent) -> MoonEvent:
     """
     start = to_et(event.window_start_utc or event.when_utc)
     end = to_et(event.window_end_utc or event.when_utc)
+    # The Cheshire Moon table carries its own rise/set and illumination
+    # columns; a prose 白昼 note would be the only thing left in 备注.
+    if event.kind == "cheshire_moon":
+        return event
     fraction = _daylight_fraction(observer, start, end)
     if fraction <= 0.5:
         return event
@@ -866,6 +1210,14 @@ def moon_events(
         events.extend(_xvl_events(observer, window))
     if "jewelled_handle" in wanted_set:
         events.extend(_jewelled_handle_events(observer, window))
+    if "eyes_of_clavius" in wanted_set:
+        events.extend(_eyes_of_clavius_events(observer, window))
+    if "cheshire_moon" in wanted_set:
+        events.extend(_cheshire_moon_events(observer, window))
+    if "annual_extremes" in wanted_set:
+        events.extend(_annual_extreme_events(observer, window))
+    if "libration_target" in wanted_set:
+        events.extend(_libration_target_events(observer, window))
     keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)

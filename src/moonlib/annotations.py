@@ -323,6 +323,38 @@ _SITE_CLASS = "statio"
 #: The kind the IAU gives a landing site.
 _SITE_KIND = "Statio"
 
+#: Label weights.  Tier 0 is an overlay list that is always painted in full;
+#: the ordinary layout gives higher tiers their captions before lower ones.
+_LABEL_TIER0 = frozenset({"basin", "lunar100", "libration"})
+_LABEL_TIER1 = frozenset({"mare"})
+_LABEL_TIER2 = frozenset({
+    "lacus", "sinus", "palus", "rima", "vallis", "mons", "dorsum",
+    "rupes", "catena", "promontorium", "albedo",
+})
+#: A crater this size is a major landmark, not an ordinary background crater.
+_LARGE_CRATER_KM = 100.0
+#: A lettered satellite this size is promoted to the ordinary-crater tier.
+_LARGE_SATELLITE_KM = 30.0
+
+
+def label_weight(feature: Any, group: Optional[str] = None) -> int:
+    """The priority tier of one landform's caption (0 = always on top)."""
+    group = group or feature_class(feature.kind, feature.diameter_km)
+    if group in _LABEL_TIER0:
+        return 0
+    if group in _LABEL_TIER1:
+        return 1
+    if group in _LABEL_TIER2:
+        return 2
+    diameter = float(getattr(feature, "diameter_km", 0.0) or 0.0)
+    if group == "crater":
+        satellite = _satellite_letter(str(getattr(feature, "name_en", "")))
+        if satellite:
+            return 3 if diameter >= _LARGE_SATELLITE_KM else 4
+        return 2 if diameter >= _LARGE_CRATER_KM else 3
+    return 5
+
+
 #: What a *landing site* is called, as opposed to the landmarks inside one.
 #:
 #: The IAU files both under ``Statio, stationes``: 静海基地 and 天河基地 are the
@@ -1802,6 +1834,7 @@ def plan_annotations(
 
     candidates: List[Tuple[float, int, str]] = []
     groups: Dict[int, str] = {}
+    weights: Dict[int, int] = {}
     unlit = too_small = in_frame = 0
     for index, feature in enumerate(features):
         if not inside[index]:
@@ -1833,7 +1866,11 @@ def plan_annotations(
         # it into names.
         focus_here = bool(in_focus[index])
         floor = min_radius_px * (0.35 if focus_here else 1.0)
-        exempt = is_landing_site(feature) or group == "lunar100"
+        weight = label_weight(feature, group)
+        # Tier 0 is an overlay list: it is shown even when the ordinary size
+        # floor would drop it.
+        exempt = (is_landing_site(feature) or group == "lunar100"
+                  or weight == 0)
         if not exempt and (
             feature.diameter_km < min_diameter_km or radius[index] < floor
         ):
@@ -1856,6 +1893,7 @@ def plan_annotations(
             + (0.0 if luminous else -8.0)
         )
         groups[index] = group
+        weights[index] = weight
         family = _family(feature.kind, group)
         # Only the sites themselves are exempt: a landmark inside one is a name
         # like any other.  `_family` cannot tell them apart -- both are `Statio`
@@ -1865,7 +1903,37 @@ def plan_annotations(
         candidates.append((score, index, family))
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    chosen, over_budget = _select_by_family(candidates, max_labels)
+    # The ordinary layout spends its budget from the highest tier down.  Tier 0
+    # is not part of this budget: it is an overlay and is placed after the rest,
+    # without collision tests, so the ordinary labels it lands on stay put.
+    forced_indices: Set[int] = set()
+    forced_candidates: List[Tuple[float, int, str]] = []
+    if max_labels <= 0:
+        # Zero density still keeps the IAU landing sites and the tier-zero
+        # overlay list: "no names" cannot mean hiding the landmarks the reader
+        # explicitly asked to keep.
+        chosen, over_budget = _select_by_family(candidates, max_labels)
+        forced_candidates = [item for item in candidates
+                             if weights.get(item[1]) == 0]
+        forced_indices = {item[1] for item in forced_candidates}
+    else:
+        forced_candidates = [item for item in candidates
+                             if weights.get(item[1]) == 0]
+        forced_indices = {item[1] for item in forced_candidates}
+        normal = [item for item in candidates if weights.get(item[1]) != 0]
+        chosen = []
+        remaining = max_labels
+        over_budget = 0
+        for tier in range(1, 6):
+            bucket = [item for item in normal if weights.get(item[1]) == tier]
+            if not bucket or remaining <= 0:
+                over_budget += len(bucket)
+                continue
+            picked, left = _select_by_family(bucket, remaining)
+            chosen.extend(picked)
+            over_budget += left
+            remaining -= len(picked)
+        chosen.sort(key=lambda item: (weights.get(item[1], 5), -item[0], item[1]))
     # 针对选框标注: a second budget spent only inside the box, so the box can be
     # denser without changing how many names the rest of the Moon gets.
     if focus is not None:
@@ -1873,24 +1941,11 @@ def plan_annotations(
         focus_candidates = [
             item for item in candidates
             if in_focus[item[1]] and item[1] not in already
+            and weights.get(item[1]) != 0
         ]
         focus_budget = max(8, int(round(max_labels * 0.8)))
         focus_chosen, _focus_over = _select_by_family(focus_candidates, focus_budget)
         chosen.extend(focus_chosen)
-    # The Lunar 100 is a checklist, not a density setting: every active list
-    # entry is chosen, even beyond the label budget.  Its captions are placed by
-    # the same layout, but a list entry that cannot find a free slot still gets
-    # its own overlapping slot below, so "全部显示" really means all of them.
-    forced_indices: Set[int] = set()
-    if lunar100_active:
-        already = {index for _score, index, _family in chosen}
-        forced = [
-            item for item in candidates
-            if groups.get(item[1]) == "lunar100" and item[1] not in already
-        ]
-        chosen.extend(forced)
-        forced_indices = {index for _score, index, _family in forced}
-        over_budget = max(0, over_budget - len(forced))
     # Sites were taken first and are not counted against the budget.
     over_budget = max(0, over_budget)
     # Landmarks first: the highlighted showpieces, and each family's leader.
@@ -1910,6 +1965,9 @@ def plan_annotations(
     # The Lunar 100 entries are the reason the switch was turned on; give their
     # captions the first claim on the layout.
     important_indices.update(forced_indices)
+    # Tier 0 is painted on top of the ordinary result: keep its markers and
+    # captions, but do not feed it back into the collision grid.
+    chosen.extend(forced_candidates)
 
     if center_on_rim and terrain is not None:
         # The catalogue centre projects onto the ground under it; the rim the
@@ -1978,6 +2036,8 @@ def plan_annotations(
     gap = 2.0 * unit          # proportional, so a plan scales with the frame
     wanted = []
     for order, (_score, index, _family_name) in enumerate(chosen):
+        if index in forced_indices:
+            continue
         wanted.append({
             "key": index,
             "anchor": (float(x[index]), float(y[index])),
@@ -2016,21 +2076,32 @@ def plan_annotations(
             )
             if box is not None:
                 placements[entry["key"]] = box
-    # A forced Lunar 100 caption is allowed to overlap when the free-slot search
-    # finds nothing: the list is a reference sheet, and hiding half of it would
-    # defeat the switch.  The fallback still clamps to the frame.
-    for entry in wanted:
-        key = entry["key"]
-        if key not in forced_indices or key in placements:
+    # Tier 0 is the overlay list.  Give every member a slot without testing it
+    # against the ordinary captions; if even the frame has no free slot, clamp a
+    # centered caption into the frame so "全部显示" remains true.
+    for _score, index, _family_name in forced_candidates:
+        if index in placements:
             continue
-        box = _place_label(
-            float(entry["anchor"][0]), float(entry["anchor"][1]),
-            float(entry["radius_px"]), float(entry["width"]),
-            float(entry["height"]), frame.width, frame.height,
-            (), 0.0, unit=1.0,
-        )
-        if box is not None:
-            placements[key] = box
+        text = _display_label(features[index], language, satellite)
+        width = estimate_text_width(text, font_px) + 2.0 * padding
+        height = label_height
+        box = None
+        if region and groups.get(index) in _REGION_CLASSES:
+            box = _centred_label((float(x[index]), float(y[index])),
+                                 width, height, frame.width, frame.height)
+        if box is None:
+            box = _place_label(
+                float(x[index]), float(y[index]),
+                min(float(radius[index]), max_marker), width, height,
+                frame.width, frame.height, (), 0.0, unit=1.0,
+            )
+        if box is None:
+            left = min(max(2.0, float(x[index]) - width / 2.0),
+                       max(2.0, frame.width - width - 2.0))
+            top = min(max(2.0, float(y[index]) - height / 2.0),
+                      max(2.0, frame.height - height - 2.0))
+            box = (left, top, width, height)
+        placements[index] = box
 
     items: List[Annotation] = []
     unplaced = 0
@@ -2048,17 +2119,22 @@ def plan_annotations(
         else:
             label_x, label_y = placement
             boxes.append((label_x, label_y, width, label_height))
-            # A leader is only worth drawing when the text had to move far
-            # enough that the reader could not pair it with its marker.
+            # A leader belongs to every caption that is not sitting on its
+            # own marker.  The old rule only drew one after the text had moved
+            # by more than the marker radius, which is exactly the dense-label
+            # case where the reader most needs the pointer: two names a few
+            # pixels apart looked equally close to both dots.  A region name
+            # set across its formation covers its anchor and still gets none.
             near_x = min(max(float(x[index]), label_x), label_x + width)
             near_y = min(max(float(y[index]), label_y), label_y + label_height)
             leader = (
                 math.hypot(float(x[index]) - near_x, float(y[index]) - near_y)
-                > marker + 4.0 * unit
+                > 0.5 * unit
             )
         outline = None
         if (
-            groups.get(index) in _OUTLINE_CLASSES
+            index not in forced_indices
+            and groups.get(index) in _OUTLINE_CLASSES
             and float(radius[index]) >= outline_min_radius_px
         ):
             outline = rim_outline(

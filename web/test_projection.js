@@ -903,16 +903,16 @@ console.log('');
   poisson.value = '0.5';
   const photons = T.poissonPhotons();
   check('half way up the Poisson slider is a full well of order 10^4 e-',
-    photons > 5000 && photons < 60000, photons);
+    photons > 20000 && photons < 60000, photons);
   check('the shot noise it implies is a small percentage',
     100 / Math.sqrt(photons) > 0.1 && 100 / Math.sqrt(photons) < 2,
     100 / Math.sqrt(photons));
   poisson.value = '1';
-  check('the top of the slider is genuinely noisy',
-    T.poissonPhotons() < 200, T.poissonPhotons());
+  check('the top of the slider is 5% shot noise',
+    T.poissonPhotons() === 398, T.poissonPhotons());
   gaussian.value = '0.5';
-  check('the Gaussian slider is a fraction of full scale',
-    Math.abs(T.gaussianSigma() - 0.03) < 1e-9, T.gaussianSigma());
+  check('the Gaussian slider tops out at 2% of full scale',
+    Math.abs(T.gaussianSigma() - 0.01) < 1e-9, T.gaussianSigma());
   poisson.value = '0'; gaussian.value = '0';
   T.updateNoiseInfo();
   check('the readout says off when both are off',
