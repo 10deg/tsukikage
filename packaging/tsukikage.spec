@@ -34,7 +34,14 @@ PACKAGING = ROOT / "packaging"
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-BUILD_DIR = Path(os.environ.get("TSUKIKAGE_BUILD_DIR", ROOT / "out" / "windows-service"))
+BUILD_DIR = Path(
+    os.environ.get("TSUKIKAGE_BUILD_DIR", ROOT / "out" / "windows-service")
+).expanduser()
+if not BUILD_DIR.is_absolute():
+    # PyInstaller resolves ``EXE(version=...)`` relative to this spec file, not
+    # the shell's cwd.  Normalise once so a workflow setting such as
+    # ``TSUKIKAGE_BUILD_DIR=out/windows-service`` writes and reads the same file.
+    BUILD_DIR = (ROOT / BUILD_DIR).resolve()
 VERSION_FILE = ROOT / "src" / "moonlib" / "_version.py"
 VERSION = "1.6.4"
 try:
