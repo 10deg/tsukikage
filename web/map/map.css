@@ -198,6 +198,17 @@ button.caret[aria-expanded="true"]::before {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
+/* 测量 is a mode, not a one-shot: once armed, the button turns gold. */
+#map-measure[aria-pressed="true"] {
+  border-color: #ffd666;
+  background: rgba(255, 214, 102, .16);
+  color: #ffe6a3;
+  font-weight: 600;
+}
+#map-measure[aria-pressed="true"]:hover {
+  border-color: #ffe28a;
+  background: rgba(255, 214, 102, .24);
+}
 .annot-detail {
   flex: 1 0 100%;
   display: flex;
@@ -899,6 +910,27 @@ body.map-fullscreen .map-stage { grid-column: 1; }
   color: var(--muted);
   font-size: 11px;
   pointer-events: none;
+}
+
+/* 测量工具's profile: white curve on a translucent black panel, units on both
+   axes, no axes drawn.  It is a reading, not a control. */
+.map-measure-chart {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 7;
+  pointer-events: none;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .58);
+  line-height: 0;
+}
+.map-measure-chart[hidden] { display: none; }
+.map-measure-chart canvas {
+  display: block;
+  width: 248px;
+  height: 96px;
 }
 
 .map-tooltip {

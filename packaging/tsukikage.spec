@@ -43,7 +43,7 @@ if not BUILD_DIR.is_absolute():
     # ``TSUKIKAGE_BUILD_DIR=out/windows-service`` writes and reads the same file.
     BUILD_DIR = (ROOT / BUILD_DIR).resolve()
 VERSION_FILE = ROOT / "src" / "moonlib" / "_version.py"
-VERSION = "1.6.5"
+VERSION = "1.6.6"
 try:
     match = re.search(r'__version__\s*=\s*"([^"]+)"', VERSION_FILE.read_text(encoding="utf-8"))
     if match:

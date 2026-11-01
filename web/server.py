@@ -212,6 +212,19 @@ DEFAULT_LANGUAGE = "zh"
 #: Apparent radius at which a round feature also gets its rim drawn.
 DEFAULT_OUTLINE_RADIUS_PX = 9.0
 
+#: 测量工具's height profile: how many heights a line or a radius carries, and
+#: how many azimuths are averaged into each ring of a circle.  The numbers and
+#: their ceilings live in the library -- the map service asks the same questions
+#: of the same DEM -- and are re-exported here as the page's defaults.
+PROFILE_SAMPLES_DEFAULT = moonlib.terrain.PROFILE_SAMPLES
+PROFILE_SAMPLES_MAX = moonlib.terrain.PROFILE_SAMPLES_MAX
+PROFILE_AZIMUTHS_DEFAULT = moonlib.terrain.PROFILE_AZIMUTHS
+PROFILE_AZIMUTHS_MAX = moonlib.terrain.PROFILE_AZIMUTHS_MAX
+#: The radius the page measures distances on.  The Moon's surface radius varies
+#: by a few kilometres, and a measurement stated against the reference sphere is
+#: the one the reader can check against the angle the renderer reports.
+PROFILE_RADIUS_KM = moonlib.terrain.MOON_REFERENCE_RADIUS_KM
+
 
 # ---------------------------------------------------------------------------
 # request parsing
@@ -1831,7 +1844,36 @@ class MoonService:
             # has to know when the body is inside the Earth's shadow.  The
             # state is at the chart's own instant, not at the main page's.
             "eclipse": moonlib.eclipse_state(anchor_et).to_dict(),
+            # One point and a name per planet: the chart draws them itself, so
+            # the server only has to say where and how big.
+            "planets": moonlib.planet_sky_positions(anchor_et, site),
         }
+
+    # -- the planet's path across the Moon, for 显示掩星 ----------------
+    def planet_track(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """The apparent track of one planet across the disc, for one instant.
+
+        ``when`` is the instant the page is showing; the track itself is drawn
+        by projecting the returned sky directions through the page's own camera,
+        so the two can never disagree about where a point lands.  ``start`` and
+        ``end`` are the caller's range: 显示掩星 pads the contact window by ten
+        minutes on each side for the time scale along the track.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        key = str(request.get("planet") or "").strip()
+        if not key:
+            raise moonlib.MoonlibError("显示掩星需要指定行星。")
+        start = str(request.get("start") or "").strip()
+        end = str(request.get("end") or "").strip()
+        if not start or not end:
+            raise moonlib.MoonlibError("显示掩星需要掩星事件的起止时间。")
+        at = when.get("at") or None
+        display = at or moonlib.utc_now().isoformat()
+        samples = int(max(8, min(721, _f(request, "samples", 181.0))))
+        return moonlib.planet_track(
+            key, site, start, end, display, samples=samples,
+        )
 
     # -- experimental: the Sun from a lunar surface point ---------------
     def surface_sun(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -4005,6 +4047,37 @@ class MoonService:
                 self._feature_index = index
         return index
 
+    # -- 测量工具 ---------------------------------------------------------
+    def profile(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Heights under a drawn line, or across a drawn circle's radius.
+
+        The page's 测量工具 draws on the *sky* picture, so every request carries
+        ground lon/lat and the sampling happens in the library, on the DEM: a
+        line is the great circle between its endpoints, and a circle is the mean
+        of each ring between its centre and its rim -- the radial profile a
+        reader asks for by drawing a circle, not one arbitrary spoke of it.
+        """
+        started = time.time()
+        kind = str(request.get("kind") or "line").strip().lower()
+        if kind not in ("line", "circle"):
+            raise moonlib.MoonlibError("测量剖面只支持 line 或 circle。")
+        samples = int(round(_f(request, "samples", PROFILE_SAMPLES_DEFAULT)))
+        terrain = self.terrain()
+        if kind == "line":
+            a = _ground_pair(request.get("a"), "a")
+            b = _ground_pair(request.get("b"), "b")
+            body = moonlib.terrain.ground_profile(
+                terrain, line=(a, b), samples=samples)
+        else:
+            centre = _ground_pair(request.get("center"), "center")
+            radius_km = _f(request, "radius_km", 0.0)
+            azimuths = int(round(_f(request, "azimuths", PROFILE_AZIMUTHS_DEFAULT)))
+            body = moonlib.terrain.ground_profile(
+                terrain, circle=(centre, radius_km), samples=samples,
+                azimuths=azimuths)
+        body["seconds"] = round(time.time() - started, 3)
+        return body
+
     def cached_region_frame(self, render_id: Optional[Any] = None):
         """Camera of the close-up on screen, or an error saying to render first."""
         wanted = "先生成模拟图像，再添加月面地貌。"
@@ -4035,6 +4108,22 @@ class MoonService:
             terrain=terrain or self.terrain(),
             target_elevation_km=region.get("target_elevation_km"),
         )
+
+
+# ---------------------------------------------------------------------------
+# 测量工具: the ground under a line, and the ground around a circle
+# ---------------------------------------------------------------------------
+def _ground_pair(value: Any, label: str) -> Tuple[float, float]:
+    """One selenographic point from ``{"lon": ..., "lat": ...}``."""
+    if not isinstance(value, dict):
+        raise moonlib.MoonlibError(f"{label} must be an object with lon and lat.")
+    lon = _opt_f(value, "lon")
+    lat = _opt_f(value, "lat")
+    if lon is None or lat is None:
+        raise moonlib.MoonlibError(f"{label} needs both lon and lat, in degrees.")
+    if not (-90.0 <= lat <= 90.0):
+        raise moonlib.MoonlibError(f"{label}.lat must lie in -90 to 90 degrees.")
+    return float(lon), float(lat)
 
 
 class StaleRender(moonlib.MoonlibError):
@@ -4967,6 +5056,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Samples, not a picture: the window draws, re-ranges and
                 # labels the same tracks without another round trip.
                 return self._json(200, self.service.sky(request))
+            if path == "/api/planet-track":
+                return self._json(200, self.service.planet_track(request))
             if path == "/api/curve":
                 return self._json(200, self.service.curve(request))
             if path == "/api/surface-sun":
@@ -4996,6 +5087,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, body)
             if path == "/api/annotations":
                 return self._json(200, self.service.annotations(request))
+            if path == "/api/profile":
+                return self._json(200, self.service.profile(request))
             if path == "/api/features":
                 return self._json(200, self.service.features())
             if path == "/api/crescents":

@@ -126,3 +126,5 @@ jobs:
         with:
           files: out/windows-service/Tsukikage-windows-x64.zip
           overwrite_files: true
+          body: |
+            一些界面调整与 bug 修复；新增测量工具；新增月合/掩行星预报；修复月面地图在球面投影下的缩放。

@@ -60,11 +60,13 @@ from moonlib.annotations import (  # noqa: E402
     feature_class,
 )
 
-MAP_VERSION = "1.0.1"
+MAP_VERSION = "1.0.2"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
-MAX_ZOOM = 8
+#: The globe may fetch regional windows far past the flat map's z8; the tile
+#: endpoint and the catalogue query share this ceiling.
+MAX_ZOOM = 12
 PHOTO_DIR_DEFAULT = Path(__file__).resolve().parent / "map_photos"
 PHOTO_DIR_CONFIG = Path(__file__).resolve().parent / "map_photos_dir.json"
 PHOTO_LIMIT_BYTES = 64 * 1024 * 1024
@@ -94,7 +96,10 @@ DETAIL_ZOOM = 5
 DETAIL_CACHE = 8
 #: The map's own "largest useful" catalogue density, by zoom.  Below this the
 #: payload is all labels and no picture; above it the page is a wall of text.
-_MIN_DIAMETER_BY_ZOOM = {0: 40.0, 1: 25.0, 2: 15.0, 3: 8.0, 4: 4.0, 5: 2.0, 6: 1.0, 7: 0.5, 8: 0.0}
+_MIN_DIAMETER_BY_ZOOM = {
+    0: 40.0, 1: 25.0, 2: 15.0, 3: 8.0, 4: 4.0, 5: 2.0, 6: 1.0,
+    7: 0.5, 8: 0.0, 9: 0.0, 10: 0.0, 11: 0.0, 12: 0.0,
+}
 #: Classes that are meaningful even when the feature is a point, so the size
 #: filter above must not drop them.
 _POINT_CLASSES = frozenset({"statio", "lunar100", "libration", "impact", "albedo", "imp", "other"})
@@ -113,6 +118,17 @@ def _finite(value: Any, default: float = float("nan")) -> float:
     except (TypeError, ValueError):
         return default
     return number if math.isfinite(number) else default
+
+
+def _ground_pair(value: Any, label: str) -> Tuple[float, float]:
+    """One selenographic point from ``{"lon": ..., "lat": ...}``."""
+    if not isinstance(value, dict):
+        raise moonlib.MoonlibError(f"{label} must be an object with lon and lat.")
+    lon = _finite(value.get("lon"))
+    lat = _finite(value.get("lat"))
+    if not (math.isfinite(lon) and math.isfinite(lat) and -90.0 <= lat <= 90.0):
+        raise moonlib.MoonlibError(f"{label} needs finite lon and lat, lat in -90..90.")
+    return float(lon), float(lat)
 
 
 def _tile_counts(zoom: int) -> Tuple[int, int]:
@@ -509,7 +525,7 @@ class LunarMapService:
         zoom = int(_finite(query.get("zoom"), 0.0))
         zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
         min_diameter = _MIN_DIAMETER_BY_ZOOM.get(zoom, 0.0)
-        limit = int(max(1, min(6000, _finite(query.get("limit"), 2000.0))))
+        limit = int(max(1, min(12000, _finite(query.get("limit"), 2000.0))))
 
         def in_lon(lon: float) -> bool:
             if west <= east:
@@ -575,6 +591,39 @@ class LunarMapService:
             "radius_km": float(terrain.reference_radius_km + height),
             "level": level,
         }
+
+    # -- 测量工具 ---------------------------------------------------------
+    def profile(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Heights along a measured line, or across a measured circle.
+
+        The map's 测量 writes its value beside the shape; the profile is what
+        the page plots under that value -- the same question the simulator's
+        full-disk page asks of the same DEM, so the sampling lives in the
+        library and both services only parse the request.
+        """
+        started = time.time()
+        kind = str(payload.get("kind") or "line").strip().lower()
+        if kind not in ("line", "circle"):
+            raise moonlib.MoonlibError("测量剖面只支持 line 或 circle。")
+        samples = int(round(_finite(payload.get("samples"),
+                                     float(moonlib.terrain.PROFILE_SAMPLES))))
+        terrain = self.terrain()
+        if kind == "line":
+            a = _ground_pair(payload.get("a"), "a")
+            b = _ground_pair(payload.get("b"), "b")
+            body = moonlib.terrain.ground_profile(
+                terrain, line=(a, b), samples=samples)
+        else:
+            centre = _ground_pair(payload.get("center"), "center")
+            radius_km = _finite(payload.get("radius_km"), 0.0)
+            azimuths = int(round(_finite(
+                payload.get("azimuths"),
+                float(moonlib.terrain.PROFILE_AZIMUTHS))))
+            body = moonlib.terrain.ground_profile(
+                terrain, circle=(centre, radius_km), samples=samples,
+                azimuths=azimuths)
+        body["seconds"] = round(time.time() - started, 3)
+        return body
 
     # -- lighting --------------------------------------------------------
     def lighting(self, query: Dict[str, Any]) -> Dict[str, Any]:
@@ -1843,7 +1892,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.0.1"
+    server_version = "TsukikageMap/1.0.2"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -2010,6 +2059,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/map/data/download":
                 return self._json(200, self.service.start_data_download())
+            if path == "/api/map/profile":
+                payload = self._read_json_body()
+                return self._json(200, self.service.profile(payload))
             match = re.fullmatch(
                 r"/api/map/photos/([0-9a-f]{16})/mask", path)
             if match:

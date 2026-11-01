@@ -29,6 +29,7 @@ __all__ = [
     "RaDec",
     "Spherical",
     "geometric_position",
+    "apparent_position",
     "geometric_state",
     "observer_bf",
     "observer_j2000",
@@ -246,6 +247,26 @@ def geometric_position(
 ) -> np.ndarray:
     """Geometric (light-time free) position vector of *body* (km)."""
     position, _ = spice.spkpos(body, et, frame, "NONE", center)
+    return np.asarray(position, dtype=float)
+
+
+def apparent_position(
+    body: str,
+    et: float,
+    center: str = "EARTH",
+    frame: str = "J2000",
+    *,
+    abcorr: str = "LT+S",
+) -> np.ndarray:
+    """Apparent position vector of *body* (km), light time and aberration on.
+
+    The companion to :func:`geometric_position`: callers that difference this
+    with an observer's own position (the scanning code that looks for Moon-
+    planet passages, for one) get the same apparent geometry
+    :func:`topocentric_vector` would give, without repeating the observer's
+    frame rotation for every body.
+    """
+    position, _ = spice.spkpos(body, et, frame, abcorr, center)
     return np.asarray(position, dtype=float)
 
 

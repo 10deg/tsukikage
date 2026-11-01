@@ -488,7 +488,7 @@ console.log('landform labels');
    the call counts, since a painter in the wrong space is the bug to catch. */
 function recordingContext() {
   const calls = { arcs: [], texts: [], lines: 0, strokes: 0, moves: 0, closes: 0,
-                  dashes: [], marks: [], alphas: [], fonts: [] };
+                  dashes: [], marks: [], alphas: [], fonts: [], widths: [] };
   const ctx = {
     calls,
     _fill: '', _stroke: '', _alpha: 1,
@@ -505,7 +505,8 @@ function recordingContext() {
     set fillStyle(value) { ctx._fill = value; },
     set strokeStyle(value) { ctx._stroke = value; },
     get strokeStyle() { return ctx._stroke; },
-    set lineWidth(_v) {}, set textAlign(_v) {}, set textBaseline(_v) {},
+    set lineWidth(value) { calls.widths.push(value); },
+    set textAlign(_v) {}, set textBaseline(_v) {},
     set globalAlpha(value) { ctx._alpha = value; calls.alphas.push(value); },
     get globalAlpha() { return ctx._alpha; },
   };
@@ -699,6 +700,60 @@ check('“do not draw rims” still draws the marker and the name',
   bareCtx.calls.strokes === 1 && bareCtx.calls.arcs.length === 1 &&
   bareCtx.calls.texts.length === 1,
   JSON.stringify([bareCtx.calls.strokes, bareCtx.calls.arcs.length]));
+
+/* A selected crater's satellites are locator dots and nothing else.  The
+   regression: every highlighted family member carried a halo ring around its
+   dot, so selecting a crater with twenty lettered neighbours painted twenty
+   yellow circles over the ground it was trying to point at.  The chosen crater
+   keeps its own rim; its satellites get neither that nor a ring. */
+const familyPlan = {
+  frame: labelPlan.frame,
+  font_px: 12,
+  related: '克拉维斯',
+  items: [
+    { x: 300, y: 300, name_en: '克拉维斯', label: '克拉维斯', label_x: 360,
+      label_y: 294, label_w: 60, label_h: 15, labelled: true, leader: false,
+      radius_px: 60, outline: ring, highlight: true, class: 'crater' },
+    ...['A', 'B', 'C'].map((letter, index) => ({
+      x: 120 + index * 60, y: 420, name_en: `克拉维斯 ${letter}`, label: '',
+      label_x: null, label_y: null, label_w: 0, label_h: 0, labelled: false,
+      leader: false, radius_px: 2, outline: null, highlight: true,
+      class: 'crater',
+    })),
+  ],
+};
+const familyCtx = recordingContext();
+T.paintLabels(familyCtx, familyPlan);
+check('a highlighted satellite is a dot with no ring around it',
+  familyCtx.calls.arcs.length === 4,
+  JSON.stringify(familyCtx.calls.arcs.map((arc) => arc[2])));
+check('the chosen crater keeps its rim, its satellites draw none',
+  familyCtx.calls.closes === 2 && familyCtx.calls.strokes === 6,
+  JSON.stringify([familyCtx.calls.closes, familyCtx.calls.strokes]));
+
+/* A locator is read off the screen: its two-pixel floor is frame pixels unless
+   the painter is told what a screen pixel is, which made every dot and every
+   leader grow with the zoom. */
+const familyZoom = recordingContext();
+T.paintLabels(familyZoom, familyPlan, { scale: 4 });
+check('a dot keeps its size on screen instead of growing with the zoom',
+  familyZoom.calls.arcs[0][2] < familyCtx.calls.arcs[0][2],
+  `${familyZoom.calls.arcs[0][2]} / ${familyCtx.calls.arcs[0][2]}`);
+const leaderPlan = {
+  frame: labelPlan.frame,
+  font_px: 12,
+  items: [{ x: 400, y: 300, label: '第谷', label_x: 300, label_y: 320,
+            label_w: 40, label_h: 15, labelled: true, leader: true,
+            radius_px: 3 }],
+};
+const leaderPlain = recordingContext();
+T.paintLabels(leaderPlain, leaderPlan);
+const leaderZoom = recordingContext();
+T.paintLabels(leaderZoom, leaderPlan, { scale: 4 });
+check('and so does the leader line, at a hairline width',
+  Math.abs(leaderPlain.calls.widths[2] - 0.8) < 1e-9 &&
+  Math.abs(leaderZoom.calls.widths[2] - 0.384) < 1e-9,
+  JSON.stringify([leaderPlain.calls.widths, leaderZoom.calls.widths]));
 
 console.log('');
 console.log('settings files');

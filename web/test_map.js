@@ -315,14 +315,22 @@ const LIGHTING = {
 };
 
 const fetchCalls = [];
-function fakeFetch(url) {
+const fetchBodies = [];
+function fakeFetch(url, options) {
   fetchCalls.push(String(url));
+  if (options && options.body) {
+    try {
+      fetchBodies.push({ url: String(url), body: JSON.parse(options.body) });
+    } catch (error) {
+      fetchBodies.push({ url: String(url), body: null });
+    }
+  }
   const respond = (body) => Promise.resolve({
     ok: true, json: async () => body, text: async () => JSON.stringify(body),
   });
   if (url.startsWith('/api/map/health')) {
     return respond({
-      version: '1.0.1',
+      version: '1.0.2',
       dem: { name: 'dem', level0_km_per_pixel: 0.118 },
       albedo: { name: 'albedo', level0_km_per_pixel: 0.5 },
       feature_count: 9000, sources: [{ name: 'dem', km_per_px: 0.118 }],
@@ -341,6 +349,18 @@ function fakeFetch(url) {
       download: { running: false, last_line: '', error: '' } });
   }
   if (url.startsWith('/api/map/point')) return respond({ elevation_km: 1.2 });
+  if (url.startsWith('/api/map/profile')) {
+    const samples = 32;
+    const heights = Array.from({ length: samples },
+      (_, index) => Math.sin(index / 5) * 1.2 + 0.4);
+    return respond({
+      kind: 'line', samples,
+      distance_km: heights.map((_, index) => index * 4),
+      heights_km: heights,
+      min_km: Math.min(...heights), max_km: Math.max(...heights),
+      mean_km: 0.4, level: 2, seconds: 0.002,
+    });
+  }
   if (url.startsWith('/api/map/search')) {
     return respond({ results: [{
       id: 1, name: '静海', name_en: 'Mare Tranquillitatis', name_zh: '静海',
@@ -383,7 +403,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -437,6 +457,21 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   dom.byId['shadow-bias'].fire('input');
   check('shadow bias reaches the canvas state',
     T.state.shadowBias === 0.12, String(T.state.shadowBias));
+  check('base brightness can go brighter than the old 180% ceiling',
+    Number(dom.byId['base-brightness'].getAttribute('max')) >= 3,
+    dom.byId['base-brightness'].getAttribute('max'));
+  dom.byId['base-brightness'].value = '2.5';
+  dom.byId['base-brightness'].fire('input');
+  check('and the slider actually reaches it',
+    T.state.brightness === 2.5, String(T.state.brightness));
+  dom.byId['base-brightness'].fire('dblclick');
+  check('double-clicking base brightness restores 100%',
+    dom.byId['base-brightness'].value === '1' && T.state.brightness === 1,
+    `${dom.byId['base-brightness'].value} / ${T.state.brightness}`);
+  dom.byId['shadow-bias'].fire('dblclick');
+  check('double-clicking shadow bias restores zero',
+    dom.byId['shadow-bias'].value === '0' && T.state.shadowBias === 0,
+    `${dom.byId['shadow-bias'].value} / ${T.state.shadowBias}`);
   dom.byId['earthshine-on'].checked = false;
   dom.byId['earthshine-on'].fire('change');
   check('earthshine can be switched off', T.state.earthshine === false);
@@ -447,7 +482,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   dom.byId['shadow-bias'].value = '0';
   dom.byId['shadow-bias'].fire('input');
   check('the map version sits under the title',
-    dom.byId['map-version'].textContent === '1.0.1');
+    dom.byId['map-version'].textContent === '1.0.2');
   check('all of them start on, as the server says',
     T.state.active.has('mare') && T.state.active.has('crater'));
   T.setAllLayers(false);
@@ -656,6 +691,67 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   T.state.projection = 'mercator';
   check('the Mercator scale is not capped at the old 8x either',
     T.state.scale <= 16, String(T.state.scale));
+
+  console.log('');
+  console.log('the globe asks for the catalogue at the magnification on screen');
+  {
+    const saved = {
+      projection: T.state.projection, zoom: T.state.zoom, globe: T.state.globe,
+      width: T.state.width, height: T.state.height, active: T.state.active,
+    };
+    T.state.projection = 'globe';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.zoom = 1;                 // stale equirectangular level
+    T.state.globe = { lon: 0, lat: 0, zoom: 8 };
+    T.state.active = new Set(['crater']);
+    check('the globe magnification translates to a detail level',
+      Math.abs(T.viewZoom() - 6.0) < 1e-9 && T.viewZoom() > T.state.zoom,
+      String(T.viewZoom()));
+    await T.refreshFeatures();
+    const call = fetchCalls.filter((url) => url.startsWith('/api/map/features')).pop();
+    const params = new URLSearchParams(String(call).split('?')[1] || '');
+    check('the feature request carries the globe detail level',
+      params.get('zoom') === '6',
+      String(params.get('zoom')));
+    const west = Number(params.get('west'));
+    const east = Number(params.get('east'));
+    const span = west <= east ? east - west : 360 - west + east;
+    check('and asks for the visible cap, not the whole catalogue',
+      span > 0 && span < 120, `${west} .. ${east} (${span})`);
+    const source = T.projectionSourceWindow();
+    check('the globe base asks for a regional high-zoom source window',
+      !!source && source.z >= 6 && source.east - source.west < 120,
+      source ? `z${source.z} ${source.west}..${source.east}` : 'none');
+    T.state.globe.zoom = 512;
+    const detail = T.projectionSourceWindow();
+    check('and reaches the high-resolution tile levels at extreme zoom',
+      !!detail && detail.z >= 10 && detail.east - detail.west < 10,
+      detail ? `z${detail.z} ${detail.west}..${detail.east}` : 'none');
+    T.state.globe.zoom = 8;
+    T.state.projection = 'equirect';
+    T.state.density = { crater: 4 };
+    await T.refreshFeatures();
+    const maxCall = fetchCalls.filter((url) => url.startsWith('/api/map/features')).pop();
+    const maxParams = new URLSearchParams(String(maxCall).split('?')[1] || '');
+    check('MAX drops the diameter floor and raises the request ceiling',
+      maxParams.get('zoom') === '8' && maxParams.get('limit') === '12000'
+      && T.densityIsMax() === true,
+      `${maxParams.get('zoom')} / ${maxParams.get('limit')}`);
+    // A small crater at high globe magnification must be named even though the
+    // equirectangular tile level is still z1: the old gate read state.zoom and
+    // kept every sub-45 km caption off the sphere.
+    T.state.projection = 'globe';
+    T.state.density = {};
+    const small = {
+      feature: { class: 'crater', name_en: 'Tiny', name_zh: '小坑',
+                 lon: 0, lat: 0, diameter_km: 2 },
+      screen: { x: 600, y: 400 }, radius: 12, marker: 3, tier: 3,
+    };
+    check('a small crater is captioned once the globe is magnified',
+      !!T.placeFeatureLabel(small, []));
+    Object.assign(T.state, saved);
+  }
 
   console.log('');
   console.log('a registered photo projects onto the map');
@@ -901,7 +997,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   console.log('');
-  console.log('a caption sits just to the left of its marker');
+  console.log('a caption sits just to the right of its marker');
   {
     const saved = { ...T.state };
     T.state.language = 'en';
@@ -922,19 +1018,19 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const item = {
       feature, screen: { x: 600, y: 400 }, radius: 48, marker: 3, tier: 2,
     };
-    const left = T.placeFeatureLabel(item, []);
-    check('a point feature name is set to the left of the marker',
-      left && left.right < 600 && 600 - left.right <= 16,
-      JSON.stringify(left));
+    const right = T.placeFeatureLabel(item, []);
+    check('a point feature name is set to the right of the marker',
+      right && right.left > 600 && right.left - 600 <= 16,
+      JSON.stringify(right));
     const wide = {
       ...item,
       radius: 8,
       feature: { ...feature, name_en: 'A Very Long Crater Name' },
     };
-    const wideLeft = T.placeFeatureLabel(wide, []);
-    check('a long point name still starts on the left',
-      wideLeft && wideLeft.right < 600,
-      JSON.stringify(wideLeft));
+    const wideRight = T.placeFeatureLabel(wide, []);
+    check('a long point name still starts on the right',
+      wideRight && wideRight.left > 600,
+      JSON.stringify(wideRight));
     const region = {
       ...item,
       feature: { ...feature, class: 'mare', name_en: 'Big Sea' },
@@ -1087,6 +1183,71 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     density.value = '1';
     density.fire('input');
     density.fire('change');
+    // 300% is the top of the slider and the value the head shows.
+    density.value = '3';
+    density.fire('input');
+    check('density reaches 300%',
+      density.value === '3' && T.state.density.mare === 3
+      && dom.byId['density-value'].textContent === '300%',
+      `${density.value} / ${T.state.density.mare} / `
+      + dom.byId['density-value'].textContent);
+    density.fire('change');
+    // Pulling past 300% pauses on the 300% line, then continues to MAX.
+    density.value = '3.2';
+    density.fire('input');
+    check('300% is a detent, not the top',
+      density.value === '3' && T.state.density.mare === 3
+      && dom.byId['density-value'].textContent === '300%',
+      `${density.value} / ${T.state.density.mare}`);
+    const featureCallsBeforeMax = fetchCalls.filter(
+      (url) => String(url).startsWith('/api/map/features')).length;
+    density.value = '3.6';
+    density.fire('input');
+    await wait(250);
+    check('MAX re-asks the catalogue, not just the painter',
+      fetchCalls.filter((url) => String(url).startsWith('/api/map/features')).length
+      > featureCallsBeforeMax);
+    check('past the detent the slider reads MAX and asks for everything',
+      density.value === '4' && T.state.density.mare === 4
+      && dom.byId['density-value'].textContent === 'MAX'
+      && T.densityIsMax() === true,
+      `${density.value} / ${T.state.density.mare} / `
+      + dom.byId['density-value'].textContent);
+    density.fire('change');
+    density.fire('dblclick');
+    check('double-clicking the density returns it to 100%',
+      density.value === '1' && T.state.density.mare === 1
+      && dom.byId['density-value'].textContent === '100%'
+      && T.densityIsMax() === false,
+      `${density.value} / ${T.state.density.mare} / `
+      + dom.byId['density-value'].textContent);
+    density.value = '1';
+    density.fire('input');
+    density.fire('change');
+  }
+
+  console.log('');
+  console.log('an edge feature keeps its name');
+  {
+    const savedZoom = T.state.zoom;
+    const savedDensity = JSON.stringify(T.state.density);
+    T.state.zoom = 4;
+    T.state.density = {};
+    const feature = {
+      class: 'crater', name_zh: '测试环形坑', name_en: 'Test', lon: 12, lat: 34,
+      diameter_km: 120,
+    };
+    const item = {
+      feature, radius: 6, marker: 3, tier: 2,
+      screen: { x: T.state.width - 3, y: 4 },
+    };
+    const box = T.placeFeatureLabel(item, [], false);
+    check('a name with no room beside its marker is clamped into the frame',
+      !!box && box.left >= 0 && box.right <= T.state.width
+      && box.top >= 0 && box.bottom <= T.state.height,
+      JSON.stringify(box));
+    T.state.zoom = savedZoom;
+    T.state.density = JSON.parse(savedDensity);
   }
 
   console.log('');
@@ -1182,6 +1343,121 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     T.setRightTab('selection');
     T.state.photos = [];
     T.state.photoOrder = [];
+  }
+
+  console.log('');
+  console.log('测量工具：线、圆与数值');
+  {
+    const button = dom.byId['map-measure'];
+    check('the top bar carries a measuring button', Boolean(button));
+    const topBar = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+    check('and it lives in the header', /id="map-measure"/.test(topBar));
+    const densityAt = html.indexOf('id="label-density"');
+    const measureAt = html.indexOf('id="map-measure"');
+    const fullAt = html.indexOf('id="map-fullscreen"');
+    check('the measure button sits to the right of the density slider',
+      densityAt > 0 && measureAt > densityAt && measureAt < fullAt,
+      `${densityAt} -> ${measureAt} < ${fullAt}`);
+    check('the density slider allows 300% and the MAX notch',
+      /id="label-density"[^>]*max="4"/.test(html));
+    check('the coordinate pair reads latitude first',
+      /^34\.50°N\s+1\.20°W$/.test(T.formatCoord(-1.2, 34.5)),
+      T.formatCoord(-1.2, 34.5));
+    check('and arming it turns the button gold',
+      /#map-measure\[aria-pressed="true"\]/.test(mapStyle));
+    button.fire('click');
+    check('arming it latches the button',
+      button.getAttribute('aria-pressed') === 'true' && T.measure.on === true);
+
+    const stage = dom.byId['map-stage'];
+    const gesture = (type, x, y, extra) => stage.fire(type, Object.assign({
+      button: 0, pointerId: 3, clientX: x, clientY: y, target: stage,
+    }, extra || {}));
+    gesture('pointerdown', 400, 400);
+    gesture('pointermove', 800, 400);
+    gesture('pointerup', 800, 400);
+    check('a drag draws a line on the ground',
+      T.measure.shape && T.measure.shape.kind === 'line',
+      JSON.stringify(T.measure.shape));
+    const km = T.measureDistanceKm(T.measure.shape.a, T.measure.shape.b);
+    check('the line has a great-circle length',
+      km > 100 && km < 6000, String(km));
+    check('the value is written in kilometres',
+      /^\d+(\.\d+)? (km|m)$/.test(T.measureText(T.measure.shape)),
+      T.measureText(T.measure.shape));
+    await wait(40);
+    {
+      const call = fetchBodies.filter((entry) => entry.url === '/api/map/profile').pop();
+      check('the line asks the server for its profile',
+        !!call && call.body.kind === 'line' && !!call.body.a && !!call.body.b,
+        JSON.stringify(call && call.body));
+      check('and the chart appears in the map stage',
+        dom.byId['map-measure-chart'].hidden === false,
+        String(dom.byId['map-measure-chart'].hidden));
+      check('with units on both axes',
+        drawn.texts.some((entry) => entry.text === '高程 km')
+        && drawn.texts.some((entry) => entry.text === '距离 km'),
+        JSON.stringify(drawn.texts.slice(-4).map((entry) => entry.text)));
+      check('on a translucent black panel',
+        /\.map-measure-chart \{[^}]*background: rgba\(0, 0, 0, \.\d+\)/.test(mapStyle));
+    }
+    {
+      const last = drawn.texts[drawn.texts.length - 1];
+      check('and painted on the map beside the line',
+        last && / km$| m$/.test(last.text), JSON.stringify(last));
+    }
+
+    const end = T.measure.shape.b;
+    const endAt = T.lonlatToScreen(end.lon, end.lat);
+    gesture('pointerdown', endAt.x, endAt.y);
+    gesture('pointermove', endAt.x + 60, endAt.y + 20);
+    gesture('pointerup', endAt.x + 60, endAt.y + 20);
+    check('an endpoint can be moved after the line is drawn',
+      T.measure.shape.b.lon !== end.lon,
+      JSON.stringify(T.measure.shape));
+
+    gesture('pointerdown', 500, 300, { ctrlKey: true });
+    gesture('pointermove', 560, 340, { ctrlKey: true });
+    gesture('pointerup', 560, 340, { ctrlKey: true });
+    check('Ctrl-drag draws a circle', T.measure.shape.kind === 'circle'
+      && T.measure.shape.radiusKm > 0, JSON.stringify(T.measure.shape));
+    const rim = [0, 1, 2, 3].map((index) => T.measureCirclePoint(
+      T.measure.shape.lon, T.measure.shape.lat, T.measure.shape.radiusKm,
+      index * Math.PI / 2));
+    const centre = T.measure.shape;
+    const spread = Math.max(...rim.map((point) => T.measureDistanceKm(centre, point)))
+      - Math.min(...rim.map((point) => T.measureDistanceKm(centre, point)));
+    check('and every rim point is the same ground radius away',
+      spread < 0.05, String(spread));
+    check('the circle reads as a radius',
+      /^\d+(\.\d+)? (km|m)$/.test(T.measureText(T.measure.shape)),
+      T.measureText(T.measure.shape));
+    await wait(40);
+    {
+      const call = fetchBodies.filter((entry) => entry.url === '/api/map/profile').pop();
+      check('the circle asks for its radial mean profile',
+        !!call && call.body.kind === 'circle' && call.body.radius_km > 0,
+        JSON.stringify(call && call.body));
+    }
+
+    // The middle button pans even while 测量 owns the left one.
+    {
+      const before = { lon: T.state.centerLon, lat: T.state.centerLat };
+      const shapeBefore = JSON.stringify(T.measure.shape);
+      gesture('pointerdown', 400, 400, { button: 1 });
+      gesture('pointermove', 470, 430, { button: 1 });
+      gesture('pointerup', 470, 430, { button: 1 });
+      check('the middle button pans the map while measuring',
+        (T.state.centerLon !== before.lon || T.state.centerLat !== before.lat)
+        && JSON.stringify(T.measure.shape) === shapeBefore,
+        JSON.stringify({ before, after: { lon: T.state.centerLon, lat: T.state.centerLat } }));
+    }
+
+    button.fire('click');
+    check('pressing it again clears the tool and its chart',
+      button.getAttribute('aria-pressed') === 'false'
+      && T.measure.on === false && T.measure.shape === null
+      && dom.byId['map-measure-chart'].hidden === true);
   }
 
   console.log('');

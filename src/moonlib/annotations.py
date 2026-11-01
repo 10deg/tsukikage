@@ -2055,7 +2055,21 @@ def plan_annotations(
             "region": bool(region) and groups.get(index) in _REGION_CLASSES,
         })
     region_keys = {entry["key"] for entry in wanted if entry["region"]}
+    #: A caption this far from its marker earns a leader line.  Below it the
+    #: name is simply beside its dot, and a line there is ink with no job.
+    leader_threshold = max(8.0 * unit, _LEADER_DISTANCE * font_px)
     if avoid_overlap:
+        placements, _arranged_leaders, _omitted = arrange_labels(
+            wanted, frame.width, frame.height, gap=gap, obstacles=obstacles or ())
+        # Decide the lines from the *arranged* picture, then lay it out once
+        # more with that decision: the captions that do not need a line stop
+        # reserving its corridor, which is room for the ones that do.  One
+        # further pass is the whole adjustment -- repeating it would chase the
+        # layout around a loop with no fixed point.
+        for entry in wanted:
+            rect = placements.get(entry["key"])
+            entry["leader"] = rect is not None and (
+                label_distance(entry["anchor"], rect) > leader_threshold)
         placements, _arranged_leaders, _omitted = arrange_labels(
             wanted, frame.width, frame.height, gap=gap, obstacles=obstacles or ())
     else:
@@ -2123,17 +2137,14 @@ def plan_annotations(
         else:
             label_x, label_y = placement
             boxes.append((label_x, label_y, width, label_height))
-            # A leader belongs to every caption that is not sitting on its
-            # own marker.  The old rule only drew one after the text had moved
-            # by more than the marker radius, which is exactly the dense-label
-            # case where the reader most needs the pointer: two names a few
-            # pixels apart looked equally close to both dots.  A region name
-            # set across its formation covers its anchor and still gets none.
-            near_x = min(max(float(x[index]), label_x), label_x + width)
-            near_y = min(max(float(y[index]), label_y), label_y + label_height)
+            # The line is a re-attachment, not decoration: it appears only when
+            # the caption had to step away from its marker by more than the
+            # threshold above.  A name set beside its dot -- and a region name
+            # set across its own formation -- gets none.
             leader = (
-                math.hypot(float(x[index]) - near_x, float(y[index]) - near_y)
-                > 0.5 * unit
+                label_distance((float(x[index]), float(y[index])),
+                               (label_x, label_y, width, label_height))
+                > leader_threshold
             )
         outline = None
         if (
@@ -2366,13 +2377,13 @@ def annotate_frame(
 # ---------------------------------------------------------------------------
 # label placement: the pieces the layout is built from
 # ---------------------------------------------------------------------------
-#: Candidate directions, left first: the page's captions sit just to the left of
-#: their locator, so the name reads as attached to the point rather than
-#: floating on top of it.  The left diagonals follow, then the other sides for
-#: the crowded cases.
-_LABEL_ANGLES = (180.0, 135.0, -135.0, 157.5, -157.5, 112.5, -112.5,
-                 90.0, -90.0, 45.0, -45.0, 0.0,
-                 22.5, -22.5, 67.5, -67.5)
+#: Candidate directions, right first: the page's captions sit just to the right
+#: of their locator, so the first character of the name is the one nearest the
+#: point and the name reads outward from it.  The right diagonals follow, then
+#: the other sides for the crowded cases.
+_LABEL_ANGLES = (0.0, 45.0, -45.0, 22.5, -22.5, 67.5, -67.5,
+                 90.0, -90.0, 135.0, -135.0, 157.5, -157.5,
+                 112.5, -112.5, 180.0)
 
 #: Three local distances per direction: against the feature, one gap out, and a
 #: last resort further out -- enough reach to escape a crowded limb, not enough
@@ -2382,6 +2393,14 @@ _LABEL_REACH = (0.0, 1.0, 2.5)
 #: far positions when every compact one is taken.  Only they pay for it, and
 #: only after the compact search has failed.
 _LABEL_REACH_EXTENDED = (4.0, 7.0, 11.0)
+
+#: How far a caption may sit from its locator before the plan gives it a leader
+#: line, in multiples of the type size.  The nearest legal slot is a marker
+#: radius plus one gap away -- about 8 px at the default 13 px type -- and a
+#: line drawn across that only doubled the ink around every dot: the name was
+#: already beside the point it named.  A caption that had to step out further
+#: is the one that needs to be re-attached.
+_LEADER_DISTANCE = 1.2
 
 #: An obstacle is the marker, not the whole feature.  A crater a hundred pixels
 #: across would otherwise forbid captions everywhere inside it, which on a
@@ -2545,7 +2564,7 @@ def candidate_rects(
 
     A *region* caption -- a mare's name, say -- may be set across the middle of
     its own formation, so that centred box is tried before any of the positions
-    beside the feature.  A point feature's caption starts to its left; the
+    beside the feature.  A point feature's caption starts to its right; the
     centred box is still only a candidate for regions, and if another caption is
     already there, the ordinary positions follow.
     """
@@ -2605,6 +2624,16 @@ def leader_line(anchor: Tuple[float, float],
     return (ax, ay, cx, cy)
 
 
+def label_distance(anchor: Tuple[float, float],
+                   rect: Tuple[float, float, float, float]) -> float:
+    """How far a caption box's nearest edge is from the point it names."""
+    ax, ay = anchor
+    left, top, width, height = rect
+    cx = min(max(ax, left), left + width)
+    cy = min(max(ay, top), top + height)
+    return math.hypot(ax - cx, ay - cy)
+
+
 def _line_rect(line: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
     x = min(line[0], line[2])
     y = min(line[1], line[3])
@@ -2624,8 +2653,11 @@ def arrange_labels(
 
     Each request is a mapping with ``key``, ``anchor`` (x, y), ``radius_px``,
     ``width``, ``height`` and optionally ``outline``, ``priority`` (lower goes
-    first), ``important`` and ``region``.  Returns ``(placements, leaders,
-    omitted)``.
+    first), ``important``, ``region`` and ``leader``.  ``leader`` says whether
+    the caption is far enough from its marker to be re-attached by a line; it
+    defaults to true, and a false caption leaves the corridor that line would
+    have reserved free for the captions after it.  Returns ``(placements,
+    leaders, omitted)``.
 
     Two tiers, and the order between them is the point.  A landmark is placed
     against an **empty** picture: while it is being arranged, the only markers
@@ -2686,8 +2718,11 @@ def arrange_labels(
         leaders[key] = line
         text.put(key, rect, rect)
         # A zero-length leader is not a line on the picture -- a region caption
-        # covering its own anchor has none -- so it must not reserve space.
-        if line[0] != line[2] or line[1] != line[3]:
+        # covering its own anchor has none -- so it must not reserve space.  A
+        # caption the caller has already decided is close enough to its locator
+        # draws nothing either, and the corridor it would have held is free for
+        # the captions after it.
+        if request.get("leader", True) and (line[0] != line[2] or line[1] != line[3]):
             lines.put(key, _line_rect(line), line)
         else:
             lines.remove(key)
@@ -2715,19 +2750,24 @@ def arrange_labels(
                 continue
             if any(_rects_intersect(rect, marker, gap * 0.3) for marker in other_marks):
                 continue
-            if any(_segment_hits_rect(line, other, 1.0) for other in others):
+            draws_line = bool(request.get("leader", True))
+            if draws_line and any(_segment_hits_rect(line, other, 1.0)
+                                  for other in others):
                 continue
-            if any(_segment_hits_rect(other, rect, 1.0) or _segments_cross(line, other)
+            if any(_segment_hits_rect(other, rect, 1.0) or
+                   (draws_line and _segments_cross(line, other))
                    for other in other_lines):
                 continue
-            if any(_segment_hits_rect(line, marker) for marker in other_marks):
+            if draws_line and any(_segment_hits_rect(line, marker)
+                                  for marker in other_marks):
                 continue
             score = score_candidate(rect, line, others, other_marks, gap, conflicts=0)
-            # A point caption belongs on the left of its locator.  Among free
-            # candidates, prefer any box wholly to the left; distance then picks
-            # the closest one.  Regions keep their centred/across-the-patch rule.
+            # A point caption belongs on the right of its locator: the first
+            # character then sits nearest the point.  Among free candidates,
+            # prefer any box wholly to the right; distance picks the closest.
+            # Regions keep their centred/across-the-patch rule.
             anchor_x, _anchor_y = request["anchor"]
-            if not request.get("region") and rect[0] + rect[2] <= anchor_x + 0.5:
+            if not request.get("region") and rect[0] >= anchor_x - 0.5:
                 score -= 1.0e3
             yield (score, rect, line)
 

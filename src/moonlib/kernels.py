@@ -65,6 +65,7 @@ __all__ = [
     "is_initialized",
     "loaded_kernels",
     "describe",
+    "body_radii_km",
 ]
 
 _BASE_FRAME = "J2000"
@@ -268,6 +269,17 @@ def _read_constants() -> SpiceConstants:
         earth_gm_km3_s2=earth_gm,
         moon_gm_km3_s2=moon_gm,
     )
+
+
+def body_radii_km(body: str, count: int = 3) -> Tuple[float, ...]:
+    """Radii of *body* (km) from the loaded planetary-constants kernel.
+
+    The kernel pool belongs to this module; a caller that needs a planet's
+    radius asks here rather than reaching for ``bodvrd`` itself.
+    """
+    kernel_session()
+    _, values = spice.bodvrd(str(body), "RADII", int(count))
+    return tuple(float(value) for value in values)
 
 
 def _bsp_coverage(paths: Iterable[Path]) -> Optional[Tuple[float, float]]:

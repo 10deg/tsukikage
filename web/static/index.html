@@ -18,7 +18,7 @@
       <h2>观测信息 <span class="en">Observer</span></h2>
       <div class="grid2 time-row">
         <label>日期时间 <span class="en">Date and time</span>
-          <input type="datetime-local" id="when" step="60">
+          <input type="datetime-local" id="when" step="1">
         </label>
         <label>时区 <span class="en">Time zone</span>
           <span class="tz-field">
@@ -161,11 +161,11 @@
           <div class="disk-title-row">
             <span class="view-title">全月面 <span class="en">Full disk</span></span>
             <!-- 视角不是常用功能，所以它不占左栏的常驻行：只在全月面标题栏
-                 最右侧留一个小按钮。按下＝月背（假想地心），弹起＝近地侧。
+                 最右侧留一个小按钮。按下＝月背模式（假想地心），弹起＝近地侧。
                  该视角与观测地点无关；从月背看，月面东侧在画面左边。 -->
             <button class="ghost mini viewpoint-toggle" id="viewpoint"
                     aria-pressed="false"
-                    title="月背视角：把相机放在与真实地球关于月心对称的假想地球上（地心），从那一侧看月背。太阳照明仍按真实星历；地照来自同一颗假想地球，相位与真实地球互补。与观测地点无关；从月背看，月面东侧在画面左边。">月背 <span class="en">Far side</span></button>
+                    title="月背模式：把相机放在与真实地球关于月心对称的假想地球上（地心），从那一侧看月背。太阳照明仍按真实星历；地照来自同一颗假想地球，相位与真实地球互补。与观测地点无关；从月背看，月面东侧在画面左边。">月背模式 <span class="en">Far side</span></button>
           </div>
 
           <!-- ── 月面地貌标注：名字与几何标注都画在全月面上，控件就放在这张图
@@ -189,6 +189,10 @@
             <!-- 刷新字体不属于可折叠的外观设置：它是"放大看"时最常按的那一下，
                  而且它不改变布局，只把字号按当前视口重新算一遍。 -->
             <button class="ghost" id="label-refresh-font" title="视野缩放后重新适配字号">适配字号</button>
+            <!-- 测量工具：一条线或一个圆，量的是月面上的地面距离；线还会取回
+                 沿线的高程剖面，画在图窗左上角的小图里。 -->
+            <button class="ghost" id="measure-tool" aria-pressed="false"
+                    title="在全月面上拖一条线量距离并显示沿线高程；按住 Ctrl / ⌘ 拖动画圆，量半径与沿半径的平均高程">测量工具</button>
             <button class="ghost icon reset" id="label-reset" title="将所有标注设置复位"></button>
             <button class="ghost caret" id="label-more" aria-expanded="false" title="更多标注设置">▸</button>
             <!-- 地貌搜索住在这一行的最右，和「月面地貌标注」开关同级：它不是一个
@@ -415,8 +419,22 @@
               </select>
             </label>
           </div>
+          <!-- 隐藏选框：选框是一个控件，不是画面的一部分；看得见地面时它还留在
+               原来的位置，只是不画出来。 -->
+          <button class="ghost mini view-select" id="selection-visible"
+                  aria-pressed="false" title="在月面上隐藏选框，只看画面">隐藏选框</button>
+          <!-- 显示掩星：只有在事件预报里算过「月掩行星」，且当前时刻落在
+               某次掩星的时间段内，才会画出那条轨迹；没有掩星时按了也看不到东西。 -->
+          <button class="ghost mini view-occultation" id="occultation-track"
+                  aria-pressed="false"
+                  title="在全月面与高分辨率模拟上画出掩星时行星的轨迹与真实视直径，并在全月面沿轨迹标注时间刻度（入掩前 10 分钟到出掩后 10 分钟）；需要先在事件预报里计算过「月掩行星」，且当前时刻在某次掩星的时间段内">显示掩星</button>
           <button class="ghost mini view-3d" id="view-3d" aria-pressed="false"
                   title="把全月面预览切换为可旋转的低倍 3D 球面；在球面上按住 Alt 拖动可画选框">3D</button>
+          </div>
+
+          <!-- 测量工具的高程剖面：黑底白线，出现在预览工具栏下方。 -->
+          <div class="measure-chart" id="measure-chart" hidden>
+            <canvas id="measure-chart-canvas"></canvas>
           </div>
 
           <!-- 图窗右上角：缩放。 -->
@@ -462,7 +480,7 @@
           </label>
           <span class="unit" id="disk-scale"
                 title="这个分辨率下，一个像素对应月面上的多少公里">px</span>
-          <label class="check inline" title="保存时把月面地貌标注与几何标注一并画进文件">
+          <label class="check inline" title="保存时把月面地貌标注与几何标注（含显示掩星轨迹）一并画进文件">
             <input type="checkbox" id="disk-annotated" checked>
             <span>地貌</span>
           </label>
@@ -627,7 +645,7 @@
             <input type="checkbox" id="download-annotated" checked>
             <span>地貌</span>
           </label>
-          <label class="check inline" title="在高分辨率模拟与后期处理上画出几何标注：阴影带、赤道、极点、日下点、天平动点">
+          <label class="check inline" title="在高分辨率模拟与后期处理上画出几何标注：阴影带、赤道、极点、日下点、天平动点；保存时也画入显示掩星轨迹">
             <input type="checkbox" id="download-marks">
             <span>几何</span>
           </label>
@@ -1150,8 +1168,10 @@
       </div>
 
       <!-- 两栏参数之间的分隔条：拖它改变「模拟设置」那一栏的宽度（--w-pane-a），
-           右边那一栏跟着变。 -->
-      <div class="splitter" data-target="panes"></div>
+           右边那一栏跟着变；向左拉到底可把整个模拟设置栏收起，留下的事件/动画
+           栏占满宽度，点击留下的箭头恢复。 -->
+      <div class="splitter" data-target="panes"
+           title="拖动调整两栏宽度；向左拉到底隐藏模拟设置栏"></div>
 
       <div class="pane pane-b">
 
@@ -1178,6 +1198,8 @@
             <span class="mark-bar" id="event-kinds"></span>
             <div class="event-actions">
               <button class="ghost mini" id="event-window-open" title="在更大的窗口中浏览表格">在新窗口查看表格</button>
+              <button class="ghost mini" id="event-visible-only" aria-pressed="false"
+                      title="只列出地平线以上、当前观测地点可见的事件">筛选可见</button>
               <span class="event-count" id="event-count">—</span>
             </div>
             <div class="event-list" id="event-list"></div>
@@ -1478,6 +1500,10 @@
         <input type="checkbox" id="sky-sun-track" checked>
         <span>太阳轨迹</span>
       </label>
+      <label class="check inline" title="在图上标出各行星的位置与名称">
+        <input type="checkbox" id="sky-planets" checked>
+        <span>行星</span>
+      </label>
       <label class="check inline" title="月相模拟图外侧的圆框">
         <input type="checkbox" id="sky-phase-frame" checked>
         <span>月相边框</span>
@@ -1486,6 +1512,22 @@
         <input type="checkbox" id="sky-closeup">
         <span>轨迹特写</span>
       </label>
+      <!-- 步长按钮仍是“拨钟”的手指；展开后直接排在按钮右边，不换行。 -->
+      <span class="sky-step">
+        <button class="ghost mini" id="sky-nudge-toggle"
+                aria-expanded="false" title="展开或收起逐级时间步进按钮">时间步长</button>
+        <span class="sky-nudge" id="sky-nudge" hidden>
+          <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
+          <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
+          <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
+          <button class="ghost mini" id="sky-nudge-back-minute" data-nudge="-1m" data-range="sky">-1m</button>
+          <button class="ghost mini" id="sky-now" title="跳到主界面当前的时刻">此刻</button>
+          <button class="ghost mini" id="sky-nudge-fwd-minute" data-nudge="+1m" data-range="sky">+1m</button>
+          <button class="ghost mini" id="sky-nudge-fwd-quarter" data-nudge="+15m" data-range="sky">+15m</button>
+          <button class="ghost mini" id="sky-nudge-fwd-hour" data-nudge="+1h" data-range="sky">+1h</button>
+          <button class="ghost mini" id="sky-nudge-fwd-day" data-nudge="+1d" data-range="sky">+1d</button>
+        </span>
+      </span>
       <span class="sky-save">
         <label title="按长边或短边指定保存图片的分辨率，长宽比不变">保存
           <select id="sky-save-ref">
@@ -1496,20 +1538,6 @@
         <input type="number" id="sky-save-px" value="2400" min="320" max="10000" step="10">
         <span class="unit">px</span>
         <button class="gold" id="sky-save">保存 PNG</button>
-      </span>
-      <button class="ghost mini" id="sky-nudge-toggle"
-              aria-expanded="false" title="展开或收起逐级时间步进按钮">时间步长</button>
-      <!-- 步长按钮仍是“拨钟”的手指，展开后独占一行。 -->
-      <span class="sky-nudge" id="sky-nudge" hidden>
-        <button class="ghost mini" id="sky-nudge-back-day" data-nudge="-1d" data-range="sky">-1d</button>
-        <button class="ghost mini" id="sky-nudge-back-hour" data-nudge="-1h" data-range="sky">-1h</button>
-        <button class="ghost mini" id="sky-nudge-back-quarter" data-nudge="-15m" data-range="sky">-15m</button>
-        <button class="ghost mini" id="sky-nudge-back-minute" data-nudge="-1m" data-range="sky">-1m</button>
-        <button class="ghost mini" id="sky-now" title="跳到主界面当前的时刻">此刻</button>
-        <button class="ghost mini" id="sky-nudge-fwd-minute" data-nudge="+1m" data-range="sky">+1m</button>
-        <button class="ghost mini" id="sky-nudge-fwd-quarter" data-nudge="+15m" data-range="sky">+15m</button>
-        <button class="ghost mini" id="sky-nudge-fwd-hour" data-nudge="+1h" data-range="sky">+1h</button>
-        <button class="ghost mini" id="sky-nudge-fwd-day" data-nudge="+1d" data-range="sky">+1d</button>
       </span>
     </div>
 
@@ -1938,6 +1966,9 @@
         <span class="event-window-count" id="event-window-count">—</span>
       </div>
       <div class="event-window-tools">
+        <button class="ghost event-tool" id="event-window-visible-only"
+                aria-pressed="false"
+                title="只列出地平线以上、当前观测地点可见的事件">筛选可见</button>
         <button class="ghost event-tool" id="event-window-export"
                 title="把表格里的行导出为 CSV（UTF-8，首行是列名）">导出 CSV</button>
         <label class="event-tool" for="event-window-import"

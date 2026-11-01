@@ -14,7 +14,17 @@ const TILE = 256;
 //: tile after a restart.
 const TILE_VERSION = '182';
 const MIN_ZOOM = 0;
+//: Highest tile level the equirectangular map asks for.  The server can cut
+//: regional windows from the full-resolution DEM above the old z8 ceiling.
 const MAX_ZOOM = 8;
+//: Highest tile level a globe source window may use.  The sphere is allowed to
+//: magnify far past the flat map's z8; its source is a regional window, not the
+//: small global pyramid.
+const MAX_TILE_ZOOM = 12;
+//: The globe's own magnification ceiling.  At 512 the visible cap is a small
+//: patch of ground, so the source window is a handful of z12 tiles rather than
+//: an upscaled z4 world texture.
+const GLOBE_MAX_ZOOM = 512;
 //: Pixel budget for the globe's base while the camera is moving.  A full
 //: 1200x800 globe costs tens of milliseconds per repaint; a buffer this size
 //: keeps the drag responsive and is stretched over the stage until the camera
@@ -231,6 +241,22 @@ function worldToScreen(x, y) {
 
 function globeRadius() {
   return Math.min(state.width, state.height) * 0.44 * state.globe.zoom;
+}
+
+/** The zoom level whose detail rules the current view.
+ *
+ * The globe's wheel changes ``globe.zoom`` rather than ``state.zoom``: the
+ * latter is the equirectangular tile level, and using it while the sphere was
+ * magnified kept asking the server for z0's catalogue (only features above
+ * 40 km) and kept the caption-size gate at z0.  The sphere's own magnification
+ * is translated to the same scale the tile pyramid uses, so one number answers
+ * "how much detail is on screen" for all three projections.
+ */
+function viewZoom() {
+  if (state.projection === 'globe') {
+    return Math.log2(Math.max(0.45, state.globe.zoom)) + 3.0;
+  }
+  return state.zoom;
 }
 
 //: The globe basis is shared by the base painter, every marker, caption and
@@ -480,7 +506,8 @@ function recenterAfterZoom(geo, pivot) {
 
 function zoomTo(nextZoom, anchor) {
   if (state.projection === 'globe') {
-    state.globe.zoom = clamp(state.globe.zoom * 2 ** (nextZoom - state.zoom), 0.45, 16.0);
+    state.globe.zoom = clamp(
+      state.globe.zoom * 2 ** (nextZoom - state.zoom), 0.45, GLOBE_MAX_ZOOM);
     state.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
     render();
     scheduleFeatures();
@@ -498,7 +525,7 @@ function zoomTo(nextZoom, anchor) {
 
 function zoomBy(factor, anchor, defer) {
   if (state.projection === 'globe') {
-    state.globe.zoom = clamp(state.globe.zoom * factor, 0.45, 16.0);
+    state.globe.zoom = clamp(state.globe.zoom * factor, 0.45, GLOBE_MAX_ZOOM);
     if (defer) renderSoon();
     else render();
     scheduleFeatures();
@@ -543,6 +570,9 @@ function resizeCanvas() {
   } else {
     clampCenter();
     render();
+    // The globe's catalogue request is bounded by the visible cap, which the
+    // window size just changed; a resize has to ask again as well as repaint.
+    scheduleFeatures();
   }
 }
 
@@ -2378,6 +2408,7 @@ function render() {
   drawLightingOverlay();
   drawFeatures();
   drawManualMarks();
+  drawMapMeasure();
   drawScaleBar();
   const zoomLabel = $('zoom-label');
   if (zoomLabel) {
@@ -2767,43 +2798,45 @@ async function loadLighting() {
  */
 function projectionSourceWindow() {
   if (state.projection === 'equirect') return null;
-  // The globe's wheel changes globe.zoom, not state.zoom; both have to decide
-  // when the equirect texture stops being detailed enough.
-  const viewZoom = state.projection === 'globe'
-    // One screen pixel is about 6.8 Z screen px per degree on the globe, and a
-    // z tile carries 1.42 * 2^z px per degree: z ~ log2(Z) + 2.3.  Using the
-    // stale equirect level instead kept the sphere on the whole-world z4
-    // texture at every magnification.
-    ? Math.log2(Math.max(0.45, state.globe.zoom)) + 3.0
-    : state.zoom;
-  if (viewZoom < 5) return null;
-  let west = 180;
-  let east = -180;
+  // The globe's wheel changes globe.zoom, not state.zoom.  The source texture
+  // has to follow the magnification the reader is actually looking at.
+  const zoomLevel = viewZoom();
+  if (zoomLevel < 5) return null;
   let south = 90;
   let north = -90;
   let valid = 0;
+  // Longitudes are circular: measure the visible span around the globe's own
+  // centre, then keep the resulting interval unwrapped.  The old code never
+  // assigned west/east at all, so the test below always fell back to the whole
+  // world and every globe magnification stayed on a z4 texture.
+  const centre = state.globe.lon;
+  let low = Infinity;
+  let high = -Infinity;
   for (let row = 0; row <= 6; row += 1) {
     for (let col = 0; col <= 6; col += 1) {
       const geo = screenToLonLat(
         state.width * col / 6, state.height * row / 6);
       if (!geo) continue;
       valid += 1;
-      west = Math.min(west, geo.lon);
-      east = Math.max(east, geo.lon);
       south = Math.min(south, geo.lat);
       north = Math.max(north, geo.lat);
+      const delta = ((geo.lon - centre + 540) % 360) - 180;
+      low = Math.min(low, delta);
+      high = Math.max(high, delta);
     }
   }
-  if (valid < 5 || !(east > west) || !(north > south)
-      || east - west > 300) return null;
-  const lonPad = Math.max(0.3, (east - west) * 0.08);
+  const span = high - low;
+  if (valid < 5 || !(north > south) || !(span > 0) || span > 330) {
+    return null;
+  }
+  const lonPad = Math.max(0.3, span * 0.08);
   const latPad = Math.max(0.3, (north - south) * 0.08);
-  west = Math.max(-180, west - lonPad);
-  east = Math.min(180, east + lonPad);
+  const west = centre + low - lonPad;
+  const east = centre + high + lonPad;
   south = Math.max(-85, south - latPad);
   north = Math.min(85, north + latPad);
 
-  let z = Math.min(8, Math.max(5, Math.round(viewZoom)));
+  let z = Math.min(MAX_TILE_ZOOM, Math.max(5, Math.round(zoomLevel)));
   while (z >= 5) {
     const cols = 2 ** (z + 1);
     const rows = 2 ** z;
@@ -2813,8 +2846,6 @@ function projectionSourceWindow() {
     let x1 = Math.floor((east + 180 - 1e-9) / tw);
     let y0 = Math.floor((90 - north) / th);
     let y1 = Math.floor((90 - south - 1e-9) / th);
-    x0 = clamp(x0, 0, cols - 1);
-    x1 = clamp(x1, x0, cols - 1);
     y0 = clamp(y0, 0, rows - 1);
     y1 = clamp(y1, y0, rows - 1);
     const across = x1 - x0 + 1;
@@ -2840,6 +2871,7 @@ function ensureProjectionSource() {
   const y0 = window ? window.y0 : 0;
   const cols = window ? window.x1 - window.x0 + 1 : 2 ** (sourceZoom + 1);
   const rows = window ? window.y1 - window.y0 + 1 : 2 ** sourceZoom;
+  const globalCols = 2 ** (sourceZoom + 1);
   const key = [
     tileLightKey() || 'plain', tileToneKey(), state.projection, sourceZoom,
     window ? `${window.x0},${window.y0},${window.x1},${window.y1}` : 'world',
@@ -2882,7 +2914,10 @@ function ensureProjectionSource() {
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
       const image = new Image();
-      const url = `/api/map/tile/${sourceZoom}/${x0 + col}/${y0 + row}.png${query}`;
+      // A window that crosses the dateline keeps unwrapped x indices so the
+      // columns stay in order; the tile itself still has the wrapped address.
+      const tileX = ((x0 + col) % globalCols + globalCols) % globalCols;
+      const url = `/api/map/tile/${sourceZoom}/${tileX}/${y0 + row}.png${query}`;
       let attempts = 0;
       image.onload = () => {
         source.drawImage(image, col * TILE, row * TILE);
@@ -2936,8 +2971,6 @@ function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
   const invDeg = 180 / Math.PI;
   const uSpan = bounds ? Math.max(1e-9, bounds.east - bounds.west) : 360;
   const vSpan = bounds ? Math.max(1e-9, bounds.north - bounds.south) : 180;
-  const uScale = bounds ? 1 / uSpan : 1 / 360;
-  const uOffset = bounds ? -bounds.west / uSpan : 0.5;
   const vScale = bounds ? -1 / vSpan : -1 / 180;
   const vOffset = bounds ? bounds.north / vSpan : 0.5;
   const lastX = sourceWidth - 1;
@@ -2955,7 +2988,13 @@ function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
       const vx = nx * east[0] + ny * north[0] + nz * up[0];
       const vy = nx * east[1] + ny * north[1] + nz * up[1];
       const vz = nx * east[2] + ny * north[2] + nz * up[2];
-      const u = Math.atan2(vy, vx) * invDeg * uScale + uOffset;
+      const lon = Math.atan2(vy, vx) * invDeg;
+      // The source window may cross the dateline; measure from its west edge
+      // circularly, so a window 170°..190° still maps 185° into the middle
+      // instead of rejecting the whole far side.
+      const u = bounds
+        ? ((((lon - bounds.west + 540) % 360) - 180) / uSpan)
+        : (lon + 180) / 360;
       if (u < 0 || u > 1) continue;
       const z = vz > 1 ? 1 : vz < -1 ? -1 : vz;
       const v = Math.asin(z) * invDeg * vScale + vOffset;
@@ -3022,7 +3061,8 @@ function drawProjectedBase() {
     for (let x = 0; x < width; x += 1) {
       const lon = wrapLon(state.centerLon + (x + 0.5 - width / 2) / pxPerDeg);
       const u = bounds
-        ? (lon - bounds.west) / Math.max(1e-9, bounds.east - bounds.west)
+        ? ((((lon - bounds.west + 540) % 360) - 180)
+          / Math.max(1e-9, bounds.east - bounds.west))
         : (lon + 180) / 360;
       if (u >= 0 && u <= 1) {
         uValid[x] = 1;
@@ -3204,6 +3244,17 @@ function labelAvoidanceEnabled() {
   return !Object.values(state.density || {}).some((value) => Number(value) > 1);
 }
 
+/** Is the density slider at its MAX notch: every catalogue feature, no size floor?
+ *
+ * 300% is already "every class on"; the MAX notch goes one step further and
+ * also drops the server's per-zoom diameter floor and the caption's own
+ * "big enough to be worth naming" gate.  It is a deliberate, expensive mode:
+ * the whole visible catalogue is asked for and labelled.
+ */
+function densityIsMax() {
+  return Object.values(state.density || {}).some((value) => Number(value) >= 3.5);
+}
+
 /** A deterministic per-class density gate, so a class does not flicker. */
 function densityPasses(feature) {
   const density = state.density[feature.class] ?? 1;
@@ -3211,6 +3262,58 @@ function densityPasses(feature) {
   if (density <= 0) return false;
   const hash = ((Number(feature.id) + 1) * 2654435761) >>> 0;
   return (hash % 1000) < density * 1000;
+}
+
+/** The lon/lat box the globe currently shows, for the catalogue request.
+ *
+ * A whole-sphere request returned the 5 000 largest features on the Moon and
+ * then let the page draw whichever of them fell in view: at close zoom the
+ * small craters inside the visible patch had never been sent at all.  The
+ * sphere's visible cap is bounded by sampling the stage; when the cap is so
+ * wide that the box would be most of the world, the whole catalogue is the
+ * honest answer again.
+ */
+function globeFeatureBounds() {
+  const centre = state.globe.lon;
+  let south = 90, north = -90;
+  let low = Infinity, high = -Infinity;
+  let valid = 0;
+  const rows = 8;
+  const cols = 8;
+  for (let row = 0; row <= rows; row += 1) {
+    for (let col = 0; col <= cols; col += 1) {
+      const geo = screenToLonLat(state.width * col / cols,
+        state.height * row / rows);
+      if (!geo) continue;
+      valid += 1;
+      south = Math.min(south, geo.lat);
+      north = Math.max(north, geo.lat);
+      // Longitudes are circular: measure the visible span around the globe's
+      // own centre, then wrap the ends back into [-180, 180).  A plain min/max
+      // would read a 10° patch straddling the dateline as 350° and fall back
+      // to the whole world exactly where the request most needs to be local.
+      const delta = ((geo.lon - centre + 540) % 360) - 180;
+      low = Math.min(low, delta);
+      high = Math.max(high, delta);
+    }
+  }
+  const whole = { west: -180, east: 180, south: -90, north: 90 };
+  if (valid < 4 || !(north > south)) return whole;
+  const span = high - low;
+  const southOut = Math.max(-89.5, south - 2);
+  const northOut = Math.min(89.5, north + 2);
+  if (!(span > 0) || northOut - southOut > 178) return whole;
+  // A polar cap sees every longitude, so the wrapped range is the full circle;
+  // the latitude band is then what makes the request local.  Falling back to
+  // the whole catalogue there would undo the point of this box.
+  if (span > 330) {
+    return { west: -180, east: 180, south: southOut, north: northOut };
+  }
+  const pad = Math.max(0.5, Math.min(6, span * 0.08));
+  const wrap = (value) => ((value + 180) % 360 + 360) % 360 - 180;
+  const westOut = wrap(centre + low - pad);
+  const eastOut = wrap(centre + high + pad);
+  return { west: westOut, east: eastOut, south: southOut, north: northOut };
 }
 
 function scheduleFeatures() {
@@ -3232,12 +3335,11 @@ async function refreshFeatures() {
   let north;
   let south;
   if (state.projection === 'globe') {
-    // A corner of the canvas is outside the sphere, so there is no single
-    // lon/lat rectangle to ask for; the whole globe is the safe viewport.
-    west = -180;
-    east = 180;
-    south = -90;
-    north = 90;
+    const bounds = globeFeatureBounds();
+    west = bounds.west;
+    east = bounds.east;
+    south = bounds.south;
+    north = bounds.north;
   } else {
     const westPoint = screenToLonLat(0, 0);
     const eastPoint = screenToLonLat(state.width, state.height);
@@ -3250,12 +3352,15 @@ async function refreshFeatures() {
     // the painter choose the visible copy.
     if (north < south) { north = 90; south = -90; }
   }
+  const max = densityIsMax();
   const query = new URLSearchParams({
     west: String(west), east: String(east),
     south: String(south), north: String(north),
     classes: classes.join(','),
-    zoom: String(state.zoom),
-    limit: '5000',
+    // The tile zoom stays the flat map's; the catalogue's size floor follows
+    // the *magnification* the reader is actually looking at.
+    zoom: String(max ? 8 : Math.floor(viewZoom())),
+    limit: String(max ? 12000 : 5000),
   });
   const seq = ++state.featureSeq;
   try {
@@ -3361,7 +3466,10 @@ function drawFeatures() {
   // tier, so one weight class does not erase the rest of its own class.
   for (const item of items) {
     if (item.tier === 0) continue;
-    const box = placeFeatureLabel(item, occupied);
+    // The selected feature's name is part of the selection, so it is placed
+    // even when the avoidance pass would have skipped it.
+    const chosen = item.feature === state.selected;
+    const box = placeFeatureLabel(item, occupied, chosen);
     if (!box) continue;
     state.labelHits.push({
       feature: item.feature,
@@ -3532,9 +3640,10 @@ function placeFeatureLabel(item, occupied, force = false) {
   const colour = labelColourFor(feature);
   const text = featureName(feature);
   if (!text) return null;
-  const pointVisible = POINT_CLASSES.has(feature.class) && state.zoom >= 2;
-  const visible = force || state.zoom >= 3 || feature.diameter_km >= 45
-    || pointVisible;
+  const zoom = viewZoom();
+  const pointVisible = POINT_CLASSES.has(feature.class) && zoom >= 2;
+  const visible = force || densityIsMax() || zoom >= 3
+    || feature.diameter_km >= 45 || pointVisible;
   if (!visible) return null;
   const fontPx = labelFontPx() + (feature.class === 'mare' ? 2 : 0);
   const highlight = state.selected === feature;
@@ -3549,23 +3658,24 @@ function placeFeatureLabel(item, occupied, force = false) {
   // ring is off pushed names of large maria a whole feature away from their
   // point.
   const ringDrawn = state.diameters && radius > 3 && state.outlineStyle !== 'none';
-  // Point features put their name immediately to the left of the locator; the
-  // ring, when drawn, is context rather than a no-go zone, so it no longer
-  // pushes the name a full radius away.  A region's name still belongs across
-  // the formation, so that branch keeps its centred first choice.
+  // Point features put their name immediately to the right of the locator, so
+  // the first character is the one nearest the point.  The ring, when drawn, is
+  // context rather than a no-go zone, so it no longer pushes the name a full
+  // radius away.  A region's name still belongs across the formation, so that
+  // branch keeps its centred first choice.
   const gap = Math.max(3, item.marker || 4);
   const attempts = REGION_LABEL_CLASSES.has(feature.class)
     ? [
       { x: screen.x, y: screen.y, align: 'center' },
       { x: screen.x, y: screen.y - height * 0.9, align: 'center' },
       { x: screen.x, y: screen.y + height * 0.9, align: 'center' },
-      { x: screen.x - gap - 6, y: screen.y, align: 'right' },
+      { x: screen.x + gap + 6, y: screen.y, align: 'left' },
     ]
     : [
-      { x: screen.x - gap - 6, y: screen.y, align: 'right' },
-      { x: screen.x - gap - 6, y: screen.y - height * 0.9, align: 'right' },
-      { x: screen.x - gap - 6, y: screen.y + height * 0.9, align: 'right' },
       { x: screen.x + gap + 6, y: screen.y, align: 'left' },
+      { x: screen.x + gap + 6, y: screen.y - height * 0.9, align: 'left' },
+      { x: screen.x + gap + 6, y: screen.y + height * 0.9, align: 'left' },
+      { x: screen.x - gap - 6, y: screen.y, align: 'right' },
       { x: screen.x, y: screen.y - gap - height * 0.7, align: 'center' },
       { x: screen.x, y: screen.y + gap + height * 0.7, align: 'center' },
     ];
@@ -3631,6 +3741,56 @@ function placeFeatureLabel(item, occupied, force = false) {
     ctx.restore();
     return box;
   }
+  // Last resort: every preferred spot was outside the frame -- a feature at
+  // the edge with a name longer than the room beside it.  Clamp a centred
+  // caption into the frame instead of silently dropping the name; avoidance
+  // still applies when it is on, because this is a worse position, not a
+  // licence to overlap.
+  {
+    const left = Math.min(Math.max(2, screen.x - width / 2),
+      Math.max(2, state.width - width - 2));
+    const top = Math.min(Math.max(2, screen.y - gap - height),
+      Math.max(2, state.height - height - 2));
+    const box = { left, top, right: left + width, bottom: top + height };
+    const collision = labelAvoidanceEnabled() && occupied.some((other) =>
+      !(box.right < other.left || box.left > other.right
+        || box.bottom < other.top || box.top > other.bottom));
+    if (!collision) {
+      const nearX = Math.min(Math.max(screen.x, box.left), box.right);
+      const nearY = Math.min(Math.max(screen.y, box.top), box.bottom);
+      if (Math.hypot(nearX - screen.x, nearY - screen.y) > 2.5) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(screen.x, screen.y);
+        ctx.lineTo(nearX, nearY);
+        ctx.strokeStyle = 'rgba(3, 5, 9, .78)';
+        ctx.lineWidth = Math.max(2.4, fontPx * 0.20);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(screen.x, screen.y);
+        ctx.lineTo(nearX, nearY);
+        ctx.strokeStyle = highlight ? '#ffffff' : colour;
+        ctx.lineWidth = Math.max(1, fontPx * 0.075);
+        ctx.stroke();
+        ctx.restore();
+      }
+      const strokeWidth = Number(state.textStrokeWidth) || 0;
+      ctx.textAlign = 'center';
+      if (strokeWidth > 0) {
+        ctx.lineWidth = Math.min(6, strokeWidth);
+        ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
+        ctx.strokeText(text, left + width / 2, top + height / 2);
+      }
+      ctx.fillStyle = highlight ? '#ffffff' : colour;
+      if (highlight) {
+        ctx.shadowColor = colour;
+        ctx.shadowBlur = 8;
+      }
+      ctx.fillText(text, left + width / 2, top + height / 2);
+      ctx.restore();
+      return box;
+    }
+  }
   if (force) {
     // The overlay list may have nowhere collision-free; clamp a centered
     // caption into the frame anyway, because the whole point is all of them.
@@ -3685,7 +3845,8 @@ function featureAt(sx, sy) {
 function formatCoord(lon, lat) {
   const ew = lon < 0 ? 'W' : lon > 0 ? 'E' : '';
   const ns = lat < 0 ? 'S' : lat > 0 ? 'N' : '';
-  return `${Math.abs(lon).toFixed(2)}°${ew}  ${Math.abs(lat).toFixed(2)}°${ns}`;
+  // Latitude first: the readout in the map's corner is one pair, in that order.
+  return `${Math.abs(lat).toFixed(2)}°${ns}  ${Math.abs(lon).toFixed(2)}°${ew}`;
 }
 
 function formatKm(value) {
@@ -3693,6 +3854,561 @@ function formatKm(value) {
   if (!Number.isFinite(number)) return '—';
   if (Math.abs(number) < 1) return `${(number * 1000).toFixed(0)} m`;
   return `${number.toFixed(number < 10 ? 3 : 2)} km`;
+}
+
+/* ── 测量工具 ───────────────────────────────────────────────────────────────
+ *
+ * A line or a circle drawn on the map, with its ground length in kilometres
+ * beside it.  The shapes are kept in lon/lat and re-projected on every frame, so
+ * they survive a pan, a zoom and a change of projection; the distance is the
+ * great-circle arc, which is the only length that means the same thing on the
+ * globe and on the flat world.  There is no height profile here: the map has
+ * the ground, not a camera to hang a chart under.
+ */
+const measure = {
+  on: false,
+  shape: null,        // {kind:'line', a, b} | {kind:'circle', lon, lat, radiusKm, angle}
+  drag: null,
+  profile: null,      // the last /api/map/profile answer
+  token: 0,           // only the newest answer may replace the chart
+  timer: null,
+};
+
+/** Radius distances are measured on. */
+const MEASURE_RADIUS_KM = 1737.4;
+/** Handles are screen-sized, like every control on this map. */
+const MEASURE_HANDLE_PX = 4.5;
+const MEASURE_GRAB_PX = 12;
+/** Points drawn along a line or round a rim. */
+const MEASURE_POINTS = 96;
+
+function measureAngle(a, b) {
+  const u = unitVector(a.lon, a.lat), v = unitVector(b.lon, b.lat);
+  const cross = cross3(u, v);
+  return Math.atan2(Math.hypot(cross[0], cross[1], cross[2]),
+    clamp(dot3(u, v), -1, 1));
+}
+
+function measureDistanceKm(a, b) {
+  return measureAngle(a, b) * MEASURE_RADIUS_KM;
+}
+
+/** The tangent frame a circle about one point is drawn in. */
+function measureBasis(lonDeg, latDeg) {
+  const pole = unitVector(lonDeg, latDeg);
+  const helper = Math.abs(pole[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const raw = cross3(pole, helper);
+  const norm = Math.hypot(raw[0], raw[1], raw[2]) || 1;
+  const east = raw.map((value) => value / norm);
+  return { pole, east, north: cross3(pole, east) };
+}
+
+function measureCirclePoint(lonDeg, latDeg, radiusKm, theta) {
+  const { pole, east, north } = measureBasis(lonDeg, latDeg);
+  const turn = Math.max(0, radiusKm) / MEASURE_RADIUS_KM;
+  const c = Math.cos(turn), s = Math.sin(turn);
+  const ct = Math.cos(theta), st = Math.sin(theta);
+  const v = [
+    c * pole[0] + s * (ct * east[0] + st * north[0]),
+    c * pole[1] + s * (ct * east[1] + st * north[1]),
+    c * pole[2] + s * (ct * east[2] + st * north[2]),
+  ];
+  return {
+    lon: Math.atan2(v[1], v[0]) * 180 / Math.PI,
+    lat: Math.asin(clamp(v[2], -1, 1)) * 180 / Math.PI,
+  };
+}
+
+function measureAzimuth(lonDeg, latDeg, point) {
+  const { pole, east, north } = measureBasis(lonDeg, latDeg);
+  const v = unitVector(point.lon, point.lat);
+  const along = dot3(v, pole);
+  const t = [v[0] - along * pole[0], v[1] - along * pole[1], v[2] - along * pole[2]];
+  const norm = Math.hypot(t[0], t[1], t[2]) || 1;
+  return Math.atan2(dot3(t, north) / norm, dot3(t, east) / norm);
+}
+
+/** A point *t* of the way along the ground line from a to b. */
+function measureLinePoint(a, b, t) {
+  const u = unitVector(a.lon, a.lat), v = unitVector(b.lon, b.lat);
+  const angle = measureAngle(a, b);
+  const wa = angle > 1e-9 ? Math.sin((1 - t) * angle) / Math.sin(angle) : 1 - t;
+  const wb = angle > 1e-9 ? Math.sin(t * angle) / Math.sin(angle) : t;
+  const x = [
+    wa * u[0] + wb * v[0], wa * u[1] + wb * v[1], wa * u[2] + wb * v[2],
+  ];
+  return {
+    lon: Math.atan2(x[1], x[0]) * 180 / Math.PI,
+    lat: Math.asin(clamp(x[2], -1, 1)) * 180 / Math.PI,
+  };
+}
+
+function measureText(shape) {
+  if (!shape) return '';
+  const km = shape.kind === 'line'
+    ? measureDistanceKm(shape.a, shape.b) : shape.radiusKm;
+  return measureTextKm(km);
+}
+
+function measureTextKm(km) {
+  if (!(km > 0)) return '—';
+  if (km >= 100) return `${Math.round(km)} km`;
+  if (km >= 10) return `${km.toFixed(1)} km`;
+  if (km >= 1) return `${km.toFixed(2)} km`;
+  return `${Math.round(km * 1000)} m`;
+}
+
+/** Unwrapped longitude for a flat map: one continuous shape, no seam jump. */
+function measureFlatLon(lon, previous) {
+  if (state.projection === 'globe' || previous === undefined || previous === null) {
+    return lon;
+  }
+  let value = lon;
+  while (value - previous > 180) value -= 360;
+  while (value - previous < -180) value += 360;
+  return value;
+}
+
+/** Project a ground path for this view, broken where the sphere hides it. */
+function measurePath(points) {
+  const globe = state.projection === 'globe';
+  const segments = [];
+  let current = [];
+  let previousLon = null;
+  let previousPoint = null;
+  const finish = () => { if (current.length >= 2) segments.push(current); current = []; };
+  for (const point of points) {
+    const lon = measureFlatLon(point.lon, previousLon);
+    const at = globe ? lonlatToScreen(lon, point.lat) : lonlatToScreenRaw(lon, point.lat);
+    if (at.visible === false) { finish(); previousLon = null; previousPoint = null; continue; }
+    if (globe && previousPoint && Math.abs(at.x - previousPoint.x) > state.width * 0.5) {
+      finish();
+    }
+    current.push(at);
+    previousLon = lon;
+    previousPoint = at;
+  }
+  finish();
+  return segments;
+}
+
+/** The shape in screen pixels: its paths, handles and the caption anchor. */
+function measureScreen(shape) {
+  if (!shape) return null;
+  if (shape.kind === 'line') {
+    const points = [];
+    for (let index = 0; index <= MEASURE_POINTS; index += 1) {
+      points.push(measureLinePoint(shape.a, shape.b, index / MEASURE_POINTS));
+    }
+    const a = lonlatToScreen(shape.a.lon, shape.a.lat);
+    const b = lonlatToScreen(shape.b.lon, shape.b.lat);
+    const handles = [];
+    if (a.visible !== false) handles.push({ kind: 'a', at: a });
+    if (b.visible !== false) handles.push({ kind: 'b', at: b });
+    if (!handles.length) return null;
+    return {
+      kind: 'line', segments: measurePath(points), handles,
+      caption: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      away: (() => {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const length = Math.hypot(dx, dy);
+        return length > 1e-6 ? { x: -dy / length, y: dx / length } : { x: 0, y: -1 };
+      })(),
+    };
+  }
+  const rim = [];
+  for (let index = 0; index <= MEASURE_POINTS; index += 1) {
+    rim.push(measureCirclePoint(shape.lon, shape.lat, shape.radiusKm,
+      2 * Math.PI * index / MEASURE_POINTS));
+  }
+  const centre = lonlatToScreen(shape.lon, shape.lat);
+  if (centre.visible === false) return null;
+  const edge = measureCirclePoint(shape.lon, shape.lat, shape.radiusKm, shape.angle);
+  const handleAt = lonlatToScreen(edge.lon, edge.lat);
+  const handles = [{ kind: 'centre', at: centre }];
+  if (handleAt.visible !== false) handles.push({ kind: 'radius', at: handleAt });
+  const anchor = handleAt.visible !== false ? handleAt : centre;
+  const dx = anchor.x - centre.x, dy = anchor.y - centre.y;
+  const length = Math.hypot(dx, dy);
+  return {
+    kind: 'circle', segments: measurePath(rim), handles,
+    caption: anchor,
+    away: length > 1e-6 ? { x: dx / length, y: dy / length } : { x: 0, y: -1 },
+  };
+}
+
+function drawMapMeasure() {
+  if (!measure.on || !measure.shape) return;
+  const screen = measureScreen(measure.shape);
+  if (!screen) return;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const stroke = (width, colour) => {
+    ctx.lineWidth = width;
+    ctx.strokeStyle = colour;
+    ctx.stroke();
+  };
+  for (const segment of screen.segments) {
+    ctx.beginPath();
+    segment.forEach((point, index) => {
+      if (index) ctx.lineTo(point.x, point.y);
+      else ctx.moveTo(point.x, point.y);
+    });
+    stroke(4, 'rgba(8, 10, 14, .8)');
+    stroke(1.8, '#ffffff');
+  }
+  if (screen.kind === 'circle') {
+    const handles = screen.handles;
+    const centre = handles[0].at;
+    const edge = handles[1] && handles[1].at;
+    if (edge) {
+      ctx.beginPath();
+      ctx.moveTo(centre.x, centre.y);
+      ctx.lineTo(edge.x, edge.y);
+      stroke(1.1, 'rgba(255, 255, 255, .65)');
+    }
+  }
+  for (const handle of screen.handles) {
+    ctx.beginPath();
+    ctx.arc(handle.at.x, handle.at.y, MEASURE_HANDLE_PX, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = 'rgba(8, 10, 14, .9)';
+    ctx.stroke();
+  }
+  const text = measureText(measure.shape);
+  ctx.font = '12px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const half = ctx.measureText(text).width / 2 + 4;
+  let x = screen.caption.x + screen.away.x * 14;
+  let y = screen.caption.y + screen.away.y * 14;
+  x = clamp(x, half, state.width - half);
+  y = clamp(y, 12, state.height - 12);
+  ctx.lineWidth = 3.6;
+  ctx.strokeStyle = 'rgba(8, 10, 14, .9)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+/** The body of a /api/map/profile request for the current shape. */
+function measurePayload() {
+  const shape = measure.shape;
+  if (!shape) return null;
+  if (shape.kind === 'line') {
+    return {
+      kind: 'line',
+      samples: 192,
+      a: { lon: shape.a.lon, lat: shape.a.lat },
+      b: { lon: shape.b.lon, lat: shape.b.lat },
+    };
+  }
+  if (!(shape.radiusKm > 0.01)) return null;
+  return {
+    kind: 'circle',
+    samples: 160,
+    azimuths: 72,
+    center: { lon: shape.lon, lat: shape.lat },
+    radius_km: shape.radiusKm,
+  };
+}
+
+function measureSchedule(delay = 0) {
+  if (!(delay > 0)) {
+    if (measure.timer !== null) clearTimeout(measure.timer);
+    measure.timer = setTimeout(() => {
+      measure.timer = null;
+      measureFetch();
+    }, 0);
+    return;
+  }
+  // One request per interval while the shape is being dragged; the chart is
+  // meant to be watched changing, so a trailing debounce is the wrong shape.
+  if (measure.timer !== null) return;
+  measure.timer = setTimeout(() => {
+    measure.timer = null;
+    measureFetch();
+  }, delay);
+}
+
+async function measureFetch() {
+  const payload = measurePayload();
+  if (!payload) {
+    measure.profile = null;
+    drawMapMeasureChart();
+    return;
+  }
+  const token = ++measure.token;
+  try {
+    const response = await fetch('/api/map/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (!response.ok || body.error) throw new Error(body.error || 'profile failed');
+    if (token !== measure.token) return;
+    measure.profile = body;
+    drawMapMeasureChart();
+  } catch (error) {
+    if (token !== measure.token) return;
+    measure.profile = null;
+    drawMapMeasureChart();
+    setStatus('高程剖面读取失败：' + String(error.message || error), 'error');
+  }
+}
+
+/** A round axis interval that is close to ``span / target``. */
+function measureAxisStep(span, target) {
+  const raw = Math.max(1e-9, Number(span) / Math.max(1, target));
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const scaled = raw / power;
+  const multiplier = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+  return multiplier * power;
+}
+
+/** One tick label, with as many decimals as the interval needs. */
+function measureAxisText(value, step) {
+  const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
+  const text = Number(value).toFixed(decimals);
+  return /^-0(\.0+)?$/.test(text) ? text.slice(1) : text;
+}
+
+/** White profile on a translucent black panel, with both axes ticked. */
+function drawMapMeasureChart() {
+  const box = $('map-measure-chart');
+  const canvas = $('map-measure-chart-canvas');
+  const profile = measure.profile;
+  const usable = !!(measure.on && measure.shape && profile
+    && Array.isArray(profile.heights_km) && profile.heights_km.length > 1);
+  if (box) box.hidden = !usable;
+  if (!canvas || !usable) return;
+  const dpr = Number(state.dpr) || window.devicePixelRatio || 1;
+  const width = Math.max(120, Math.round(canvas.clientWidth || 248));
+  const height = Math.max(56, Math.round(canvas.clientHeight || 96));
+  const wantW = Math.round(width * dpr), wantH = Math.round(height * dpr);
+  if (canvas.width !== wantW || canvas.height !== wantH) {
+    canvas.width = wantW;
+    canvas.height = wantH;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const heights = profile.heights_km.map(Number);
+  const distances = (profile.distance_km || []).map(Number);
+  const left = distances.length === heights.length ? distances[0] : 0;
+  const right = distances.length === heights.length
+    ? distances[distances.length - 1] : heights.length - 1;
+  let low = Math.min(...heights);
+  let high = Math.max(...heights);
+  if (!(high > low)) { high = low + 0.001; }
+  const pad = Math.max(0.02, 0.12 * (high - low));
+  low -= pad;
+  high += pad;
+  const x0 = 31, x1 = width - 6;
+  const y0 = 15, y1 = height - 24;
+  const mapX = (value) => {
+    if (!(right > left)) return (x0 + x1) / 2;
+    return x0 + (value - left) / (right - left) * (x1 - x0);
+  };
+  const mapY = (value) => y1 - (value - low) / (high - low) * (y1 - y0);
+
+  const xStep = measureAxisStep(right - left, Math.max(2, Math.floor((x1 - x0) / 44)));
+  const yStep = measureAxisStep(high - low, Math.max(2, Math.floor((y1 - y0) / 20)));
+  ctx.font = '8px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif';
+  ctx.lineWidth = 0.6;
+  ctx.strokeStyle = 'rgba(255, 255, 255, .16)';
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y1);
+    ctx.stroke();
+  }
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x1, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255, 255, 255, .42)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x0, y1);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+
+  ctx.beginPath();
+  heights.forEach((value, index) => {
+    const x = mapX(distances.length === heights.length ? distances[index] : index);
+    const y = mapY(value);
+    if (index) ctx.lineTo(x, y);
+    else ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.4;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Short ticks on the two axes: the grid says where the values are, these
+  // say that the axes are ruled.
+  ctx.strokeStyle = 'rgba(255, 255, 255, .42)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    ctx.moveTo(x, y1);
+    ctx.lineTo(x, y1 + 2);
+  }
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    ctx.moveTo(x0 - 2, y);
+    ctx.lineTo(x0, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255, 255, 255, .68)';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    if (y < y0 - 1 || y > y1 + 1) continue;
+    ctx.fillText(measureAxisText(value, yStep), x0 - 3, y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    if (x < x0 - 1 || x > x1 + 1) continue;
+    ctx.fillText(measureAxisText(value, xStep), x, y1 + 2);
+  }
+
+  // The transform already carries dpr: the size is CSS pixels, not device ones.
+  ctx.font = '9px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255, 255, 255, .82)';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText('高程 km', 6, 2);
+  ctx.textAlign = 'right';
+  ctx.fillText(`最高 ${Number(profile.max_km).toFixed(2)}　最低 ${Number(profile.min_km).toFixed(2)}`,
+    width - 6, 2);
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  ctx.fillText('距离 km', width - 6, height - 1);
+}
+
+function measureHitTest(x, y) {
+  if (!measure.on) return null;
+  const screen = measureScreen(measure.shape);
+  if (!screen) return null;
+  for (const handle of screen.handles) {
+    if (Math.hypot(x - handle.at.x, y - handle.at.y) <= MEASURE_GRAB_PX) {
+      return handle.kind;
+    }
+  }
+  return null;
+}
+
+function setMapMeasure(on) {
+  measure.on = !!on;
+  if (!measure.on) {
+    measure.shape = null;
+    measure.drag = null;
+    measure.profile = null;
+    if (measure.timer !== null) clearTimeout(measure.timer);
+    measure.timer = null;
+    measure.token += 1;
+  }
+  stage.style.cursor = measure.on ? 'crosshair' : '';
+  const button = $('map-measure');
+  if (button) button.setAttribute('aria-pressed', String(measure.on));
+  drawMapMeasureChart();
+  render();
+}
+
+/** Pointer down in measure mode: a handle moves, anything else starts a shape. */
+function measureDown(event, point) {
+  if (!measure.on) return false;
+  const hit = measureHitTest(point.x, point.y);
+  if (hit) {
+    measure.drag = { mode: hit };
+    return true;
+  }
+  const ground = screenToLonLat(point.x, point.y);
+  if (!ground) return false;
+  if (event.ctrlKey || event.metaKey) {
+    measure.shape = {
+      kind: 'circle', lon: ground.lon, lat: ground.lat, radiusKm: 0, angle: 0,
+    };
+    measure.drag = { mode: 'new-circle' };
+  } else {
+    measure.shape = {
+      kind: 'line', a: { lon: ground.lon, lat: ground.lat },
+      b: { lon: ground.lon, lat: ground.lat },
+    };
+    measure.drag = { mode: 'new-line' };
+  }
+  measure.profile = null;
+  drawMapMeasureChart();
+  return true;
+}
+
+function measureMove(point) {
+  const drag = measure.drag;
+  const shape = measure.shape;
+  if (!drag || !shape) return false;
+  const ground = screenToLonLat(point.x, point.y);
+  if (!ground) return true;
+  if (drag.mode === 'new-line') {
+    shape.b = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'a') {
+    shape.a = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'b') {
+    shape.b = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'centre') {
+    shape.lon = ground.lon;
+    shape.lat = ground.lat;
+  } else if (drag.mode === 'radius' || drag.mode === 'new-circle') {
+    shape.radiusKm = measureDistanceKm(
+      { lon: shape.lon, lat: shape.lat }, ground);
+    shape.angle = measureAzimuth(shape.lon, shape.lat, ground);
+  }
+  measureSchedule(160);
+  return true;
+}
+
+function measureUp() {
+  if (!measure.drag) return false;
+  const drag = measure.drag;
+  measure.drag = null;
+  const shape = measure.shape;
+  if (shape) {
+    const tiny = shape.kind === 'line'
+      ? measureDistanceKm(shape.a, shape.b) < 0.5
+      : !(shape.radiusKm > 0.5);
+    const fresh = drag.mode === 'new-line' || drag.mode === 'new-circle';
+    if (tiny && fresh) measure.shape = null;
+  }
+  if (measure.shape) {
+    setStatus(`测量：${measureText(measure.shape)}`);
+    measureSchedule(0);
+  } else {
+    drawMapMeasureChart();
+  }
+  return true;
 }
 
 function selectFeature(feature) {
@@ -4171,11 +4887,43 @@ function endInteraction() {
   state.interacting = false;
 }
 
+/** Start a pan drag on the map.  Shared by the left button and by the middle
+ *  button, which pans even while the measuring tool owns the left one. */
+function beginStagePan(event, point) {
+  beginInteraction();
+  const dragGeo = screenToLonLat(point.x, point.y);
+  state.drag = {
+    x: event.clientX, y: event.clientY,
+    lon: state.centerLon, lat: state.centerLat, mercY: state.mercY,
+    geo: dragGeo,
+    globeLon: state.globe.lon,
+    globeLat: state.globe.lat,
+  };
+  stage.classList.add('dragging');
+  stage.style.cursor = 'grabbing';
+  stage.setPointerCapture(event.pointerId);
+  event.preventDefault();
+}
+
 stage.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
   if (event.target && event.target.closest
       && event.target.closest('button')) return;
   const point = stagePoint(event);
+  // The middle button pans even while 测量 is armed: a reader who is measuring
+  // can still move the map without putting the tool away.
+  if (event.button === 1) {
+    beginStagePan(event, point);
+    return;
+  }
+  if (event.button !== 0) return;
+  // 测量工具 owns the left button while it is armed: a drag draws, a press on a
+  // handle moves it, and Ctrl-drag (the manual-mark gesture) draws a circle.
+  if (measure.on && measureDown(event, point)) {
+    stage.setPointerCapture(event.pointerId);
+    stage.classList.add('measuring');
+    event.preventDefault();
+    return;
+  }
   if (event.ctrlKey || event.metaKey) {
     addManualMarkAt(screenToLonLat(point.x, point.y));
     event.preventDefault();
@@ -4196,40 +4944,16 @@ stage.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
-  beginInteraction();
-  const dragGeo = screenToLonLat(point.x, point.y);
-  state.drag = {
-    x: event.clientX, y: event.clientY,
-    lon: state.centerLon, lat: state.centerLat, mercY: state.mercY,
-    geo: dragGeo,
-    globeLon: state.globe.lon,
-    globeLat: state.globe.lat,
-  };
-  stage.classList.add('dragging');
-  stage.setPointerCapture(event.pointerId);
-  event.preventDefault();
+  beginStagePan(event, point);
 });
 
 stage.addEventListener('pointermove', (event) => {
   const point = stagePoint(event);
-  if (state.manualDrag) {
-    const geo = screenToLonLat(point.x, point.y);
-    if (geo) {
-      const mark = state.manualMarks.find((item) => item.id === state.manualDrag.id);
-      if (mark) {
-        mark.lon = geo.lon;
-        mark.lat = geo.lat;
-        updatePositionReadout(geo.lon, geo.lat, point);
-        renderSoon();
-        setStatus(`${mark.text}：${formatCoord(mark.lon, mark.lat)}`);
-      }
-    }
-    event.preventDefault();
-    return;
-  }
   const geo = screenToLonLat(point.x, point.y);
-  if (geo) updatePositionReadout(geo.lon, geo.lat, point);
-  if (state.drag) {
+  // A pan drag outranks the measuring tool: the middle button can start one
+  // while 测量 is armed, and the picture has to follow it.
+  if (state.drag && !state.manualDrag) {
+    if (geo) updatePositionReadout(geo.lon, geo.lat, point);
     const dx = event.clientX - state.drag.x;
     const dy = event.clientY - state.drag.y;
     if (state.projection === 'globe') {
@@ -4256,8 +4980,37 @@ stage.addEventListener('pointermove', (event) => {
     scheduleFeatures();
     scheduleHash();
     hideTooltip();
+    event.preventDefault();
     return;
   }
+  if (measure.on) {
+    if (measure.drag) {
+      measureMove(point);
+      if (geo) updatePositionReadout(geo.lon, geo.lat, point);
+      render();
+      event.preventDefault();
+      return;
+    }
+    stage.style.cursor = measureHitTest(point.x, point.y) ? 'move' : 'crosshair';
+    hideTooltip();
+    if (geo) updatePositionReadout(geo.lon, geo.lat, point);
+    return;
+  }
+  if (state.manualDrag) {
+    if (geo) {
+      const mark = state.manualMarks.find((item) => item.id === state.manualDrag.id);
+      if (mark) {
+        mark.lon = geo.lon;
+        mark.lat = geo.lat;
+        updatePositionReadout(geo.lon, geo.lat, point);
+        renderSoon();
+        setStatus(`${mark.text}：${formatCoord(mark.lon, mark.lat)}`);
+      }
+    }
+    event.preventDefault();
+    return;
+  }
+  if (geo) updatePositionReadout(geo.lon, geo.lat, point);
   const hit = featureAt(point.x, point.y);
   state.hover = hit;
   if (hit) {
@@ -4270,6 +5023,15 @@ stage.addEventListener('pointermove', (event) => {
 });
 
 function endDrag(event) {
+  if (measure.drag) {
+    measureUp();
+    stage.classList.remove('measuring');
+    if (event && event.pointerId !== undefined) {
+      try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* noop */ }
+    }
+    flushRender();
+    return;
+  }
   if (state.manualDrag) {
     state.manualDrag = null;
     endInteraction();
@@ -4283,6 +5045,8 @@ function endDrag(event) {
   state.drag = null;
   endInteraction();
   stage.classList.remove('dragging');
+  // The measuring tool owns the inline cursor; put it back after a pan.
+  stage.style.cursor = measure.on ? 'crosshair' : '';
   if (event && event.pointerId !== undefined) {
     try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* noop */ }
   }
@@ -4574,6 +5338,9 @@ function wire() {
   if ($('map-fullscreen')) {
     $('map-fullscreen').addEventListener('click', () => setMapFullscreen(true));
   }
+  if ($('map-measure')) {
+    $('map-measure').addEventListener('click', () => setMapMeasure(!measure.on));
+  }
   if ($('map-exit-fullscreen')) {
     $('map-exit-fullscreen').addEventListener('click', () => setMapFullscreen(false));
   }
@@ -4653,18 +5420,28 @@ function wire() {
   }
   if ($('label-density')) {
     const density = $('label-density');
+    const MAX_VALUE = 4;
     const applyDensity = () => {
       const value = Number(density.value);
+      const max = value >= 3.5;
+      const wasMax = densityIsMax();
       if ($('density-value')) {
-        $('density-value').textContent = `${Math.round(value * 100)}%`;
+        $('density-value').textContent = max
+          ? 'MAX' : `${Math.round(Math.min(3, value) * 100)}%`;
       }
       for (const layer of (state.layers && state.layers.layers) || []) {
-        if (layer.type === 'features') state.density[layer.id] = value;
+        if (layer.type === 'features') state.density[layer.id] = max ? MAX_VALUE : value;
       }
+      // MAX changes the *query* (no diameter floor, higher ceiling), not just
+      // the drawing, so the catalogue has to be asked for again.  Ordinary
+      // percentage changes only thin what is drawn and need no round trip.
+      if (max !== wasMax) scheduleFeatures();
       render();
     };
     // 100% is a detent: one rightward drag stops there, and a second drag is
     // needed to pass it.  Above 100% the labels stop avoiding each other.
+    // 300% is the second stop; pulling past it lands on MAX, which also drops
+    // the server's diameter floor and the page's caption-size gate.
     let densityDetentSeen = false;
     let densityLocked = false;
     density.addEventListener('pointerdown', () => { densityLocked = false; });
@@ -4679,11 +5456,24 @@ function wire() {
       } else if (value > 1 && densityLocked) {
         value = 1;
       }
+      // The 300% line is a detent while the pointer is between it and MAX.
+      // Past the midpoint of that last stretch the request becomes MAX, so a
+      // single continued drag goes straight to "everything".
+      if (value > 3 && value < 3.5) value = 3;
+      else if (value >= 3.5) value = MAX_VALUE;
       if (value !== Number(density.value)) density.value = String(value);
       applyDensity();
     });
     density.addEventListener('change', () => {
       densityLocked = false;
+      applyDensity();
+    });
+    // Double-click returns the density to 100%, the point where every class is
+    // on but the captions still avoid one another.
+    density.addEventListener('dblclick', () => {
+      densityDetentSeen = true;       // 100% itself is never stopped by the detent
+      densityLocked = false;
+      density.value = '1';
       applyDensity();
     });
     applyDensity();
@@ -4826,9 +5616,15 @@ function wire() {
     });
   }
   if ($('base-brightness')) {
-    $('base-brightness').addEventListener('input', (event) => {
-      state.brightness = Number(event.target.value) || 1;
+    const brightness = $('base-brightness');
+    const applyBrightness = () => {
+      state.brightness = Number(brightness.value) || 1;
       render();
+    };
+    brightness.addEventListener('input', applyBrightness);
+    brightness.addEventListener('dblclick', () => {
+      brightness.value = '1';
+      applyBrightness();
     });
   }
   if ($('earthshine-on')) {
@@ -4853,6 +5649,10 @@ function wire() {
     };
     $('shadow-bias').addEventListener('input', applyShadow);
     $('shadow-bias').addEventListener('change', applyShadow);
+    $('shadow-bias').addEventListener('dblclick', () => {
+      $('shadow-bias').value = '0';
+      applyShadow();
+    });
   }
   $('clear-selection').addEventListener('click', () => {
     selectFeature(null);

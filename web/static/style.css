@@ -160,6 +160,38 @@ html, body {
 }
 .layout.left-hidden .splitter[data-target="left"]:hover::before { border-color: var(--accent); }
 
+/* The right column's left pane (模拟设置 / 望远镜 / 成像模拟) can be dragged
+   away the same way: at zero width the divider it leaves behind is the handle
+   that brings it back, and the processing column takes the whole column. */
+.layout.pane-a-hidden .panes {
+  grid-template-columns: 0 var(--splitter) minmax(0, 1fr);
+}
+/* `display: none` removes the pane from grid auto-placement, so the splitter
+   and the remaining pane would slide into the first two columns: the events
+   column was squeezed into the 6 px handle and the rest read as blank
+   background.  Pin the two survivors to their columns. */
+.layout.pane-a-hidden .pane-a { display: none; }
+.layout.pane-a-hidden .panes > .splitter[data-target="panes"] { grid-column: 2; }
+.layout.pane-a-hidden .panes > .pane-b { grid-column: 3; }
+.layout.pane-a-hidden .splitter[data-target="panes"] { cursor: pointer; }
+.layout.pane-a-hidden .splitter[data-target="panes"]::before {
+  content: "›";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+}
+.layout.pane-a-hidden .splitter[data-target="panes"]:hover::before {
+  border-color: var(--accent);
+}
+
 /* ── the three pictures ──────────────────────────────────────────── */
 .views {
   flex: 1 1 auto;
@@ -568,7 +600,9 @@ h2 .en { font-size: 10px; }
 /* Date/time and its time zone read as one row: they are two halves of the same
    instant, and they have to be the same height to look like one row. */
 .col-left .time-row {
-  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
+  /* 时刻精确到秒后需要多半个字的宽度：日期时间拿剩余空间，时区只占自己
+     “UTC+8”所需的宽度，不再把控件撑成整行。 */
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 7px;
 }
 .col-left .time-row > label { margin-bottom: 8px; }
@@ -576,6 +610,11 @@ h2 .en { font-size: 10px; }
   height: 26px;
   padding: 3px 5px;
   font-size: 11.5px;
+}
+/* 秒段比分钟段多两个字符；小半号字让整个控件留在日期时间那一格里。 */
+.col-left .time-row input[type="datetime-local"] {
+  padding: 3px 4px;
+  font-size: 11px;
 }
 /* The zone is a whole number of hours: type it, or step it by one -- and it is
    still "UTC", which the field alone does not say. */
@@ -585,9 +624,14 @@ h2 .en { font-size: 10px; }
   gap: 5px;
   margin-top: 2px;
   height: 26px;
+  /* UTC+8 is two characters; a field that stretched to its cell forced the
+     label/badge pair to wrap once the date-time row grew its seconds. */
+  width: max-content;
+  max-width: 100%;
 }
 .col-left .tz-field input {
-  flex: 1 1 auto;
+  flex: 0 0 3.6em;
+  width: 3.6em;
   min-width: 0;
   height: 26px;
   text-align: center;
@@ -674,14 +718,54 @@ button[aria-pressed="true"] {
   border-radius: 6px;
   background: rgba(15, 17, 22, .74);
 }
+/* 测量工具's profile: a small black panel under the preview controls.  It is a
+   chart, not a control -- nothing here takes a press. */
+.measure-chart {
+  position: absolute;
+  top: 38px;
+  left: 8px;
+  z-index: 3;
+  pointer-events: none;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  border-radius: 4px;
+  /* 背景带一定透明度: the panel floats over the picture, so the ground under it
+     stays visible; the canvas itself is clear and the curve is white. */
+  background: rgba(0, 0, 0, .58);
+  line-height: 0;
+}
+.measure-chart[hidden] { display: none; }
+.measure-chart canvas {
+  display: block;
+  width: 248px;
+  height: 96px;
+}
+/* Armed, the tool owns the pointer, so the body keeps the drawing cursor even
+   where a label or the ruler would otherwise offer a move. */
+.view-body.measuring { cursor: crosshair; }
+
 /* 3D is a mode of its own, not another reading inside the preview box: its own
    border and its own latch state. */
-.view-3d {
+.view-3d, .view-occultation {
   padding: 2px 9px;
   border-color: var(--line);
   background: rgba(15, 17, 22, .74);
+  white-space: nowrap;
 }
-.view-3d[aria-pressed="true"] {
+.view-3d[aria-pressed="true"], .view-occultation[aria-pressed="true"] {
+  border-color: #ffd666;
+  background: rgba(255, 214, 102, .16);
+  color: #ffe6a3;
+}
+/* 隐藏选框 / 显示选框: the label carries the state, and the pressed style says
+   which way the drawing currently is (pressed = the box is away). */
+.view-select {
+  padding: 2px 9px;
+  border-color: var(--line);
+  background: rgba(15, 17, 22, .74);
+  white-space: nowrap;
+}
+.view-select[aria-pressed="true"] {
   border-color: #ffd666;
   background: rgba(255, 214, 102, .16);
   color: #ffe6a3;
@@ -2003,6 +2087,8 @@ button .en::before, button .en::after { content: ""; }
   .view-disk, .view-info, .view-stack { grid-column: 1; grid-row: auto; }
   .view-body { min-height: 46vh; }
   .panes { grid-template-columns: 1fr; }
+  .layout.pane-a-hidden .panes { grid-template-columns: 1fr; }
+  .layout.pane-a-hidden .panes > .pane-b { grid-column: 1; }
   .pane-a { border-right: 0; border-bottom: 1px solid var(--line); }
 }
 
@@ -2227,9 +2313,20 @@ h2 .mini.curve-open:hover {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  /* 时间步长是“拨钟”的动作，独占一行放在日期/时间/时区下面；和输入框挤在
-     一行里时，窄窗口会把 ± 拆成两截。 */
+  /* 曲线图的时间步长是“拨钟”的动作，独占一行放在日期/时间/时区下面；
+     天空位置图的同一排由下面的 .sky-step 覆盖为紧挨按钮。 */
   flex: 1 0 100%;
+}
+/* 天空位置图的步长排在触发按钮右边，不再独占一行：按钮和展开的 ± 是一个
+   不可拆开的整体，行内放不下时整组换行，而不是把 ± 单独挤到下一行。 */
+.sky-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.sky-step #sky-nudge {
+  flex: 0 0 auto;
 }
 #sky-sync-main { flex: 0 0 auto; }
 .sky-nudge button.mini {

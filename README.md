@@ -1,6 +1,6 @@
 # Tsukikage
 
-**当前版本 / Version：网页客户端 1.6.5 · 月面地图 1.0.1**
+**当前版本 / Version：网页客户端 1.6.6 · 月面地图 1.0.2**
 
 一套可**完全离线**运行的月球计算内核、观测模拟器与月面地图服务。
 
@@ -109,7 +109,7 @@ macOS 独立 App（DMG）：
 packaging/build_macos_app.sh
 ```
 
-产物是 `out/macos-app/Tsukikage-1.6.5-macos-arm64.dmg`。它使用 Swift/AppKit
+产物是 `out/macos-app/Tsukikage-1.6.6-macos-arm64.dmg`。它使用 Swift/AppKit
 原生窗口 + macOS 自带的 WKWebView，并把 Python 后端作为 App 的内部组件；
 **不打开系统浏览器，也不要求用户访问本地 URL**。内核同样已打包，用户只提供
 月面 `.tif` 数据。详见 [`out/macos-app/README.md`](out/macos-app/README.md)。
@@ -236,11 +236,12 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 - 等距圆柱、墨卡托、球面 / 3D 三种投影；等距圆柱与墨卡托只做东西向循环，纬度在南北边缘夹住；
 - 月面光照、底图亮度、阴影偏置与地照开关；无高分 DEM 时回退为平坦底图；
 - 地貌检索、分类开关、权重标注、真实直径圆、手动标记、双击名称复制经纬度；
+- 顶栏「测量」：在地图上拖线量地面距离，Ctrl / ⌘ + 拖动画圆量半径，并画出沿线／沿半径的高程剖面；
 - 全屏只看地图、左右栏收纳与提示按钮；
 - 照片库：按日期 / 月龄 / 覆盖地貌筛选，照片叠加、透明度、手画蒙版与自定义照片目录；
 - 右侧「其他设置」显示 DEM 状态，并可启动全球高分辨率 DEM 下载。
 
-月面地图使用独立版本号；本版为 **月面地图 1.0.1**，网页客户端为 **1.6.5**。
+月面地图使用独立版本号；本版为 **月面地图 1.0.2**，网页客户端为 **1.6.6**。
 
 ---
 
@@ -258,7 +259,7 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 | 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib.sun`、`moonlib.analemma`、`moonlib.plotting` |
 | **月面点太阳高度/方位角** | `moonlib.lunar_surface_solar`、`moonlib.lunar_surface_solar_series`、`moon sunpoint` |
 | **观测模拟** | `moonlib.moonview` |
-| **月背视角模拟**（假想对称地球的地心） | `moonlib.view_geometry(..., viewpoint="far_side")`、全月面标题栏「月背」按钮 |
+| **月背视角模拟**（假想对称地球的地心） | `moonlib.view_geometry(..., viewpoint="far_side")`、全月面标题栏「月背模式」按钮 |
 | **3D 地形切片（STL，可直接打印）** | `moonlib.selection_tile`、网页「3D模型」 |
 | **带纹理 GLB（Blender 直接查看）** | `TerrainTile.glb_bytes()`、网页「导出 GLB」 |
 | **Blender 预览场景（.blend，含三个光照场景）** | 网页「生成 Blender 预览场景」、`POST /api/mesh/blender` |
@@ -269,8 +270,10 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
 | **月面 X / V / L 预报** | `moonlib.events` |
 | **月面特殊观测事件预报** | `moonlib.events` |
+| **行星位置与月掩/合行星** | `moonlib.planets`、天空位置图「行星」、事件预报「行星合月」「月掩行星」、全月面「显示掩星」（轨迹、入掩前/出掩后十分钟的时间刻度、真实角直径） |
 | **最高／最低月亮** | `moonlib.events` |
 | **地貌标注**（分类、密度、避让、月海居中、避让已有图元） | `moonlib.annotations`、网页「月海居中」 |
+| **测量工具**（线／圆的地面距离、沿线与沿半径的高程剖面；选框可隐藏） | 网页「测量工具」「隐藏选框」、`POST /api/profile`、`POST /api/map/profile`、月面地图顶栏「测量」 |
 | **曲线图** | `web/static/app.js`、`moonlib.analemma`、`moonlib.moonview` |
 | **模拟实拍效果** | `moonlib.instrument` |
 | **生成动画**；**HDR 图片** | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |
@@ -293,7 +296,7 @@ node web/test_projection.js
 node web/test_map.js
 ```
 
-页面的四个 Node 脚本共 980 项，覆盖静态接线、投影、绘制与地图页面。需要栅格或内核的
+页面的四个 Node 脚本共 1094 项，覆盖静态接线、投影、绘制与地图页面。需要栅格或内核的
 检查在文件缺失时**自动跳过**并说明原因，所以没有下载任何栅格也能跑完。
 
 ---

@@ -60,6 +60,7 @@ LAYERS: Dict[str, int] = {
     "crescent": 2,
     "libration": 2,
     "analemma": 2,
+    "planets": 2,
     # L3
     "service": 3,
     "cli": 3,

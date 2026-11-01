@@ -199,6 +199,8 @@ KIND_LABELS = {
     "cheshire_moon": "Cheshire Moon（Wet Moon）",
     "annual_extremes": "年度之最",
     "libration_target": "极端天平动目标",
+    "planet_conjunction": "行星合月",
+    "planet_occultation": "月掩行星",
 }
 
 #: A lunar eclipse *is* 月全食 or 月偏食; "月食 偏食" says the same thing twice
@@ -213,9 +215,9 @@ ECLIPSE_TITLES = {
 EVENT_KINDS: Tuple[str, ...] = (
     "new_moon", "first_quarter", "full_moon", "last_quarter",
     "supermoon", "micromoon", "highest_moon", "lowest_moon",
-    "lunar_eclipse", "xvl", "jewelled_handle",
-    "eyes_of_clavius", "cheshire_moon", "annual_extremes",
-    "libration_target",
+    "lunar_eclipse", "planet_conjunction", "planet_occultation",
+    "xvl", "jewelled_handle", "eyes_of_clavius", "cheshire_moon",
+    "annual_extremes", "libration_target",
 )
 
 #: Old names kept as aliases so a bookmarked settings file or a saved request
@@ -998,27 +1000,25 @@ def _daylight_fraction(observer: Observer, start_et: float, end_et: float) -> fl
 
 
 def _with_daylight(observer: Observer, event: MoonEvent) -> MoonEvent:
-    """Append 白昼 when the Sun is up for most (or all) of the event.
+    """Mark whether the Sun is up for most (or all) of the event.
 
-    This is deliberately a note in ``detail`` rather than a new visibility
-    flag: the event itself can still be seen in daylight (a lunar eclipse near
-    the horizon, a full moon at noon), but the reader deserves to know that the
-    sky, not the Moon, is the limiting factor.  The threshold is the one asked
-    for: the whole event or more than half of it.
+    ``白昼`` is a property of every forecast row, not a prose note: the page
+    gives it a column of its own.  The event itself can still be seen in
+    daylight (a lunar eclipse near the horizon, a full moon at noon), but the
+    reader deserves to know that the sky, not the Moon, is the limiting factor.
+    The threshold is the one asked for: the whole event or more than half of it.
+    ``daylight_fraction`` is kept for callers that want the number, not the flag.
     """
     start = to_et(event.window_start_utc or event.when_utc)
     end = to_et(event.window_end_utc or event.when_utc)
-    # The Cheshire Moon table carries its own rise/set and illumination
-    # columns; a prose 白昼 note would be the only thing left in 备注.
-    if event.kind == "cheshire_moon":
-        return event
     fraction = _daylight_fraction(observer, start, end)
-    if fraction <= 0.5:
-        return event
-    metrics = dict(event.metrics)
-    metrics["sun_altitude_deg"] = _sun_altitude(to_et(event.when_utc), observer)
+    metrics = dict(event.metrics or {})
     metrics["daylight_fraction"] = fraction
-    return replace(event, detail=f"{event.detail}　白昼", metrics=metrics)
+    metrics["daylight"] = bool(fraction > 0.5)
+    if metrics["daylight"]:
+        metrics["sun_altitude_deg"] = _sun_altitude(
+            to_et(event.when_utc), observer)
+    return replace(event, metrics=metrics)
 
 
 def _transit_altitude(et: float, observer: Observer) -> float:
@@ -1161,6 +1161,51 @@ def _lowest_moon_events(observer: Observer, window) -> List[MoonEvent]:
     return events
 
 
+def _planet_conjunction_events(observer: Observer, window) -> List[MoonEvent]:
+    """Every Moon-planet passage in the window, as two separate categories.
+
+    A passage is 行星合月 unless the planet's disc meets the Moon's, in which
+    case it is 月掩行星 and carries the first/last contact window.  Only the
+    occultation kind is allowed to drive 显示掩星; the conjunction rows are
+    context, not a covered event.
+    """
+    from .planets import find_planet_conjunctions
+
+    events: List[MoonEvent] = []
+    for hit in find_planet_conjunctions(
+        observer, window.start_et, window.end_et
+    ):
+        metrics = event_metrics(observer, hit.when_utc)
+        metrics.update({
+            "planet": hit.planet.key,
+            "planet_name": hit.planet.name_zh,
+            "separation_deg": hit.separation_deg,
+            "moon_radius_deg": hit.moon_radius_deg,
+            "planet_diameter_arcsec": hit.angular_diameter_arcsec,
+            "occultation": hit.occultation,
+        })
+        title = (
+            f"月掩{hit.planet.name_zh}" if hit.occultation
+            else f"{hit.planet.name_zh}合月"
+        )
+        # Both numbers have their own columns in the forecast table; repeating
+        # them here would make 备注 the same two values and nothing else.
+        detail = ""
+        events.append(MoonEvent(
+            kind=("planet_occultation" if hit.occultation
+                  else "planet_conjunction"),
+            when_utc=hit.when_utc,
+            altitude_deg=float(metrics["altitude_deg"]),
+            detail=detail,
+            observable=float(metrics["altitude_deg"]) > 0.0,
+            title=title,
+            window_start_utc=hit.window_start_utc,
+            window_end_utc=hit.window_end_utc,
+            metrics=metrics,
+        ))
+    return events
+
+
 def moon_events(
     observer: Observer,
     start: Any,
@@ -1218,6 +1263,8 @@ def moon_events(
         events.extend(_annual_extreme_events(observer, window))
     if "libration_target" in wanted_set:
         events.extend(_libration_target_events(observer, window))
+    if {"planet_conjunction", "planet_occultation"} & wanted_set:
+        events.extend(_planet_conjunction_events(observer, window))
     keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)

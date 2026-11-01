@@ -18,7 +18,7 @@ Layer       Modules
 ==========  ==========================================================
 service     :mod:`service`, :mod:`cli`          (JSON contract, CLI)
 domain      :mod:`phases`, :mod:`crescent`, :mod:`libration`, :mod:`analemma`,
-            :mod:`moonview`                     (whole-disk observation simulation)
+            :mod:`moonview`, :mod:`planets`     (sky events; whole-disk simulation)
 model       :mod:`moon`, :mod:`sun`, :mod:`riseset`, :mod:`illumination`, :mod:`frames`,
             :mod:`terrain`                      (global elevation and colour rasters)
 foundation  :mod:`kernels`, :mod:`timeutil`, :mod:`observer`, :mod:`config`, :mod:`numerics`
@@ -81,6 +81,7 @@ from . import (  # noqa: F401
     models,
     moon,
     phases,
+    planets,
     riseset,
     sun,
 )
@@ -95,6 +96,20 @@ from .eclipse import (
 )
 from .events import EVENT_KINDS, MoonEvent, moon_events
 from .frames import AzEl, RaDec, az_el, angular_separation, position_angle
+from .planets import (
+    PLANETS,
+    PLANET_BY_KEY,
+    Planet,
+    PlanetConjunction,
+    find_planet_conjunctions,
+    planet,
+    planet_angular_diameter_arcsec,
+    planet_moon_separation_deg,
+    planet_radius_km,
+    planet_sky_position,
+    planet_sky_positions,
+    planet_track,
+)
 from .instrument import (
     DEFAULT_CAMERA,
     DEFAULT_TELESCOPE,
@@ -398,6 +413,18 @@ __all__ = [
     "EVENT_KINDS",
     "MoonEvent",
     "moon_events",
+    "PLANETS",
+    "PLANET_BY_KEY",
+    "Planet",
+    "PlanetConjunction",
+    "planet",
+    "planet_angular_diameter_arcsec",
+    "planet_moon_separation_deg",
+    "planet_radius_km",
+    "planet_sky_position",
+    "planet_sky_positions",
+    "planet_track",
+    "find_planet_conjunctions",
     "ECLIPSE_KINDS",
     "LUNAR_ECLIPSE_LABELS",
     "LunarEclipse",

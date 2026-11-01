@@ -30,10 +30,13 @@
       </select>
     </label>
     <label class="check inline" title="标注密度：百分比越低，画面上的名字越少">
-      密度 <input type="range" id="label-density" min="0" max="1.5" step="0.01" value="0.2"
-                     title="超过 100% 自动停用避让；100% 处有断点">
+      密度 <input type="range" id="label-density" min="0" max="4" step="0.01" value="0.2"
+                     title="超过 100% 自动停用避让；100% 与 300% 处有断点；拉到 MAX 显示全部地貌">
       <b id="density-value">20%</b>
     </label>
+    <!-- 测量工具：线量距离，Ctrl / ⌘ + 拖动量半径；数值写在图形旁边。 -->
+    <button class="ghost mini" id="map-measure" aria-pressed="false"
+            title="测量：在地图上拖一条线量地面距离；按住 Ctrl / ⌘ 拖动画圆量半径">测量</button>
     <button class="ghost caret" id="classes-toggle" aria-expanded="false"
             title="展开标注设置"></button>
   </div>
@@ -205,11 +208,13 @@
       </div>
       <label class="field" title="只调整底图亮度，不影响地貌标注与照片">
         <span>底图亮度</span>
-        <input id="base-brightness" type="range" min="0.4" max="1.8" step="0.05" value="1">
+        <input id="base-brightness" type="range" min="0.4" max="3" step="0.05" value="1"
+               title="双击复位到 100%">
       </label>
       <label class="field" title="正数提亮阴影，负数让低色阶截断到黑">
         <span>阴影偏置</span>
-        <input id="shadow-bias" type="range" min="-0.30" max="0.30" step="0.01" value="0">
+        <input id="shadow-bias" type="range" min="-0.30" max="0.30" step="0.01" value="0"
+               title="双击复位到 0">
       </label>
       <label class="field">
         <span>投影</span>
@@ -260,6 +265,9 @@
     <div class="map-loading" id="map-loading" hidden>渲染中…</div>
     <button class="map-exit-fullscreen" id="map-exit-fullscreen" hidden>退出全屏</button>
     <div class="map-tooltip" id="map-tooltip" hidden></div>
+    <div class="map-measure-chart" id="map-measure-chart" hidden>
+      <canvas id="map-measure-chart-canvas"></canvas>
+    </div>
     <div class="map-coords" id="map-coords">—</div>
     <div class="scale-bar" id="scale-bar">
       <span id="scale-label"></span>
@@ -370,7 +378,7 @@
   <span id="status">正在连接本地地图服务…</span>
   <span id="source-label"></span>
   <span id="feature-count"></span>
-  <span class="map-version" id="map-version">1.0.1</span>
+  <span class="map-version" id="map-version">1.0.2</span>
 </footer>
 
 <div class="mask-backdrop" id="photo-mask-backdrop" hidden>

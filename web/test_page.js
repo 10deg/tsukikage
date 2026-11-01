@@ -30,14 +30,15 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'lonLatToPixel', 'cameraFieldRadiusArcsec', 'LAND_CLASSES',
   'collectSettings', 'drawMagnifier', 'magnifierView', 'selectionAspect', 'splitterStart',
   'splitterCeiling', 'SPLITTERS', 'setLeftHidden', 'leftIsHidden',
+  'setPaneAHidden', 'paneAIsHidden',
   'syncKmPxPresets', 'terrainLimitLabel', 'clearActivePatch', 'setActivePatch',
   'syncTerrainSourceFromRegion', 'selectionInsidePatch',
   'DEFAULT_OFF_CLASSES', 'animationRequest',
   'animationRenderSize', 'animationOutputPixels', 'animationSkyKm',
   'setLabelControls', 'syncResolutionPicker', 'previewPixels',
   'applySettings', 'centrePlacement', 'setAllClasses',
-  'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setProcTab',
-  'buildEventKinds', 'drawViewLabels', 'labelEdits', 'labelHidden', 'labelClass',
+  'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setEventVisibleOnly', 'setProcTab',
+  'buildEventKinds', 'drawViewLabels', 'composeImage', 'labelEdits', 'labelHidden', 'labelClass',
   'resetLabelClass', 'resetAllLabelEdits', 'labelKey', 'ruler',
   'labelStyleForFrame', 'labelLockOn', 'scalePlan', 'scalePlanAxes',
   'fitPlanToFrame', 'lockedDiskPlan', 'relatedNameFor',
@@ -45,13 +46,16 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
   'selectionCorrected', 'effectiveSelectionArcsec', 'effectiveSelectionAspect',
   'correctedBoundaryPixels', 'ellipseBoundarySegments', 'selectionEllipse',
+  'centreLonLat',
   'diskGeom', 'projectSelenographic', 'lonLatFromVector', 'skyGroundPoint',
   'selectionCameraGeometry', 'selectionSkyHalfAngles',
+  'measure', 'setMeasureOn', 'measurePayload', 'measureText', 'setSelectionVisible',
+  'measureDistanceKm', 'measureCirclePoint', 'measureSchedule', 'drawMeasureChart',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'imageToScreen',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries', 'skyOptions',
   'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
-  'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow',
+  'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow', 'occultationTimeBoxes', 'applyOccultationTick',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
   'eventColumnsFor', 'eventCellText', 'eventMetric', 'renderEventHeader',
   'curveSeries', 'curveSeriesSpecs', 'curveTargetView', 'curveOptions',
@@ -62,6 +66,7 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
   'manualHitTest', 'clearManualMarks', 'overlay',
   'drawDisk', 'drawSelection', 'drawGlobeSelection',
+  'globeSelectionGeometry', 'globePixelFromDirection',
   'regionMarksWanted', 'drawRegionMarks', 'handleLabelDoubleClick'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
@@ -765,6 +770,68 @@ function respond(url, body) {
                   elevation_min_deg: 10, elevation_max_deg: 70 },
     };
   }
+  if (url === '/api/planet-track') {
+    // Directions, as the real route returns them.  They follow the fake
+    // disc's own sub-observer point (-4.7°, 1.4°) and cross the limb, so the
+    // page's camera can project a track that runs in and out of the disc.
+    const deg = Math.PI / 180;
+    const directionAt = (lon, lat) => {
+      const c = Math.cos(lat * deg);
+      return [-c * Math.cos(lon * deg), -c * Math.sin(lon * deg),
+              -Math.sin(lat * deg)];
+    };
+    const start = Date.parse(body.start);
+    const end = Date.parse(body.end);
+    const samples = [];
+    for (let index = 0; index <= 40; index += 1) {
+      const u = index / 40;
+      samples.push({
+        when_utc: new Date(start + (end - start) * u).toISOString(),
+        direction: directionAt(-4.7 - 0.35 + 0.7 * u, 1.4),
+      });
+    }
+    return {
+      planet: body.planet, name: 'Mars', name_zh: '火星', colour: '#e08a63',
+      when_utc: '2026-05-25T07:30:00+00:00',
+      track_start_utc: body.start, track_end_utc: body.end,
+      moon_radius_deg: 0.26, angular_diameter_arcsec: 5.0,
+      center: { direction: directionAt(-4.7, 1.4) },
+      samples,
+    };
+  }
+  if (url === '/api/events') {
+    if (body.kind === 'planet_occultation') {
+      return {
+        kind: 'planet_occultation', start: body.start, end: body.end,
+        events: [{
+          kind: 'planet_occultation', label: '月掩火星',
+          when_utc: '2026-05-25T07:30:00+00:00',
+          altitude_deg: 35.0, detail: '',
+          observable: true,
+          window_start_utc: '2026-05-25T07:00:00+00:00',
+          window_end_utc: '2026-05-25T08:00:00+00:00',
+          metrics: { planet: 'mars', planet_name: '火星',
+                     separation_deg: 0.02, planet_diameter_arcsec: 5.0,
+                     moon_radius_deg: 0.26 },
+        }],
+      };
+    }
+    if (body.kind === 'planet_conjunction') {
+      return {
+        kind: 'planet_conjunction', start: body.start, end: body.end,
+        events: [{
+          kind: 'planet_conjunction', label: '火星合月',
+          when_utc: '2026-05-25T07:30:00+00:00',
+          altitude_deg: 35.0, detail: '',
+          observable: true,
+          metrics: { planet: 'mars', planet_name: '火星',
+                     separation_deg: 0.80, planet_diameter_arcsec: 5.0,
+                     moon_radius_deg: 0.26 },
+        }],
+      };
+    }
+    return { kind: body.kind, start: body.start, end: body.end, events: [] };
+  }
   if (url === '/api/sky') {
     /* A high Moon far from a Sun already below the horizon: the exact case the
        window's automatic close-up exists for.  The tracks are a plain parabola,
@@ -791,6 +858,14 @@ function respond(url, body) {
       samples,
       moon: { azimuth_deg: 133, elevation_deg: 60, range_km: 384400 },
       sun: { azimuth_deg: 313, elevation_deg: -28, range_km: 151000000 },
+      planets: [
+        { key: 'venus', name: 'Venus', name_zh: '金星', colour: '#f3e2b6',
+          azimuth_deg: 145, elevation_deg: 58, range_km: 1.1e8,
+          angular_diameter_arcsec: 22.0 },
+        { key: 'jupiter', name: 'Jupiter', name_zh: '木星', colour: '#e5c99a',
+          azimuth_deg: 310, elevation_deg: -30, range_km: 6.0e8,
+          angular_diameter_arcsec: 40.0 },
+      ],
       geometry: {
         elongation_deg: 120.0, illumination_percent_geo: 88.0,
         illumination_percent_topo: 87.8, phase_angle_geo_deg: 35.0,
@@ -800,6 +875,24 @@ function respond(url, body) {
     };
   }
   if (url === '/api/annotations') return planFor(body);
+  if (url === '/api/profile') {
+    // A profile the page can plot without pretending to know the Moon: the
+    // shape of the curve is the harness's business, the request is the test's.
+    const samples = Math.max(2, Number(body.samples) || 64);
+    const span = body.kind === 'circle'
+      ? Math.max(1, Number(body.radius_km) || 1)
+      : 120;
+    const heights = Array.from({ length: samples },
+      (_, index) => Math.sin(index / 7) * 1.5 - 0.5);
+    return {
+      kind: body.kind || 'line', samples,
+      distance_km: heights.map((_, index) => index * span / (samples - 1)),
+      heights_km: heights,
+      min_km: Math.min(...heights), max_km: Math.max(...heights),
+      mean_km: 0, level: 0, seconds: 0.001,
+      ...(body.kind === 'circle' ? { radius_km: span } : { length_km: span }),
+    };
+  }
   if (url === '/api/mesh') {
     return {
       info: {
@@ -1172,9 +1265,9 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
      browser's own idea of local time (which read as UTC+0 at UTC+8). */
   {
     const wall = new Date(Date.now() + Number(document.getElementById('tz').value) * 3600e3)
-      .toISOString().slice(0, 16);
+      .toISOString().slice(0, 19);
     const shown = document.getElementById('when').value;
-    const gap = Math.abs(Date.parse(shown + ':00Z') - Date.parse(wall + ':00Z'));
+    const gap = Math.abs(Date.parse(shown + 'Z') - Date.parse(wall + 'Z'));
     check('the date field starts at the zone the field beside it names',
       gap <= 60 * 1000, `${shown} vs ${wall}`);
   }
@@ -2234,6 +2327,19 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     annotationCalls2.length > annotationsBefore &&
     annotationCalls2[annotationCalls2.length - 1].body.frame === 'region',
     JSON.stringify(annotationCalls2.map((c) => c.body.frame)));
+  /* A zoom changes the frame-pixel type size, which changes how many names
+     fit.  The plan has to be re-laid-out after the scale settles, or names the
+     reader zoomed in to see stay absent until some unrelated control moves. */
+  {
+    const zoomCalls = fetchCalls.filter((c) => c.url === '/api/annotations').length;
+    T.setZoom('disk', 2.0);
+    await new Promise((resolve) => setTimeout(resolve, 420));
+    check('zooming in asks for a fresh layout',
+      fetchCalls.filter((c) => c.url === '/api/annotations').length > zoomCalls,
+      `${zoomCalls} -> ${fetchCalls.filter((c) => c.url === '/api/annotations').length}`);
+    T.setZoom('disk', 1.0);
+    await new Promise((resolve) => setTimeout(resolve, 320));
+  }
   /* 100% is a detent: one drag stops there, a second deliberate drag passes. */
   set('label-density', 1.2);
   fire('label-density', 'input');
@@ -2263,16 +2369,26 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 12 event kinds plus 极低照明度, which shares the range boxes and the list
+  /* 14 event kinds plus 极低照明度, which shares the range boxes and the list
      but is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 13 && T.state.eventKind === 'full_moon',
+    kindChips().length === 15 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
   check('年度之最 and the two named phenomena have their own pills',
     kindChips().some((chip) => chip.id === 'event-chip-annual_extremes')
     && kindChips().some((chip) => chip.id === 'event-chip-eyes_of_clavius')
     && kindChips().some((chip) => chip.id === 'event-chip-cheshire_moon')
-    && kindChips().some((chip) => chip.id === 'event-chip-libration_target'));
+    && kindChips().some((chip) => chip.id === 'event-chip-libration_target')
+    && kindChips().some((chip) => chip.id === 'event-chip-planet_conjunction')
+    && kindChips().some((chip) => chip.id === 'event-chip-planet_occultation'));
+  {
+    const ids = kindChips().map((chip) => chip.id);
+    const eclipse = ids.indexOf('event-chip-lunar_eclipse');
+    check('行星合月 and 月掩行星 follow 月食 as two separate pills',
+      ids[eclipse + 1] === 'event-chip-planet_conjunction'
+      && ids[eclipse + 2] === 'event-chip-planet_occultation',
+      ids.slice(0, 9).join(' '));
+  }
   check('the old separate min/high/low moons are gone from the pills',
     !kindChips().some((chip) => /event-chip-(micromoon|highest_moon|lowest_moon)/.test(chip.id)));
   check('年度之最 has its own table columns',
@@ -2292,7 +2408,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   {
     const columns = T.eventColumnsFor('cheshire_moon');
     check('Cheshire has separate rise, illumination and equator columns',
-      columns.join(',') === 'date,time,label,rise,illumination,ecliptic,equator',
+      columns.join(',') === 'date,time,label,rise,illumination,ecliptic,equator,daylight',
       columns.join(','));
     check('Cheshire has no prose 备注 column', !columns.includes('detail'));
     check('the Cheshire rise cell says 月升 or 月落',
@@ -2338,6 +2454,160 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       cell(rows[0], 2));
     fire('event-kind-full_moon', 'change');
     await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
+  /* 月掩行星: the occultation half of the split, and the rows that carry the
+     contact window 显示掩星 needs. */
+  {
+    set('when', '2026-05-25T15:30');
+    set('tz', '+8');
+    fire('event-kind-planet_occultation', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    check('the occultation category lists its event',
+      T.state.eventTable.some((row) => row.label === '月掩火星'),
+      JSON.stringify(T.state.eventTable.map((row) => row.label)));
+    check('and the contact window is kept for the layer',
+      T.state.occultationEvents.length === 1
+      && T.state.occultationEvents[0].metrics.planet === 'mars',
+      JSON.stringify(T.state.occultationEvents));
+    check('the table has a separation column',
+      T.eventColumnsFor('planet_occultation').includes('separation')
+      && T.eventCellText({ metrics: { separation_deg: 0.02 } }, 'separation', 8) === '0.02°');
+    check('and no empty prose 备注 column beside it',
+      !T.eventColumnsFor('planet_occultation').includes('detail')
+      && T.eventColumnsFor('planet_conjunction').includes('daylight')
+      && !T.eventColumnsFor('planet_conjunction').includes('detail'),
+      T.eventColumnsFor('planet_occultation').join(','));
+
+    const button = document.getElementById('occultation-track');
+    if (button.getAttribute('aria-pressed') !== 'true') button.fire('click');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    check('显示掩星 asks for the live track',
+      fetchCalls.some((call) => call.url === '/api/planet-track')
+      && !!T.state.planetTrack && T.state.planetTrack.samples.length === 41
+      && Array.isArray(T.state.planetTrack.samples[0].direction),
+      T.state.planetTrack ? String(T.state.planetTrack.samples.length) : 'none');
+    {
+      const call = fetchCalls.filter((entry) => entry.url === '/api/planet-track').pop();
+      check('the track is asked for ten minutes either side of the contacts',
+        !!call
+        && Math.abs(Date.parse(call.body.start)
+          - Date.parse('2026-05-25T06:50:00Z')) < 1000
+        && Math.abs(Date.parse(call.body.end)
+          - Date.parse('2026-05-25T08:10:00Z')) < 1000,
+        call ? `${call.body.start} .. ${call.body.end}` : 'no call');
+    }
+    const labelCtx = document.getElementById('labels-disk').getContext('2d');
+    labelCtx.drawn.strokes.length = 0;
+    labelCtx.drawn.texts.length = 0;
+    T.drawViewLabels('disk');
+    check('and the track is painted on the full disk',
+      labelCtx.drawn.strokes.includes('#e08a63'),
+      JSON.stringify(labelCtx.drawn.strokes.slice(0, 6)));
+    {
+      // 保存图像 has no screen to paint on: the geometric layer composes the
+      // track into the file when 几何 is on, even with 地貌 off.
+      const exportCanvas = T.composeImage(
+        { width: 400, height: 400 }, 400, 400, null, null, null,
+        { marks: false, occultation: true, fontPx: 12 }, false);
+      check('the geometry save path draws the occultation track',
+        exportCanvas.getContext('2d').drawn.strokes.includes('#e08a63'),
+        JSON.stringify(exportCanvas.getContext('2d').drawn.strokes.slice(0, 6)));
+    }
+    const clockTexts = labelCtx.drawn.texts.map((entry) => entry.text);
+    check('the track carries a time scale',
+      clockTexts.some((text) => /^\d\d:\d\d$/.test(text)),
+      JSON.stringify(clockTexts));
+    check('immersion and emersion are labelled with their times',
+      clockTexts.includes('入 15:00') && clockTexts.includes('出 16:00'),
+      JSON.stringify(clockTexts));
+    {
+      const boxes = T.occultationTimeBoxes();
+      const out = boxes.find((box) => box.text === '出 16:00');
+      check('the contact labels are hit-testable',
+        !!out && out.ms === Date.parse('2026-05-25T08:00:00Z'),
+        JSON.stringify(boxes.map((box) => box.text)));
+      const before = document.getElementById('when').value;
+      T.applyOccultationTick(out);
+      check('double-clicking a contact label sets the main time',
+        document.getElementById('when').value === '2026-05-25T16:00:00',
+        document.getElementById('when').value);
+      document.getElementById('when').value = before;
+    }
+    // The live range is padded by ten minutes; beyond it the layer goes away.
+    set('when', '2026-05-25T16:05');
+    fire('when', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    check('the track is still live five minutes after emersion',
+      !!T.state.planetTrack, JSON.stringify(T.state.planetTrack));
+    set('when', '2026-05-25T16:15');
+    fire('when', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    check('and it drops once the ten-minute padding has passed',
+      T.state.planetTrack === null, JSON.stringify(T.state.planetTrack));
+    // 行星合月 is the other half of the split and must not drive the overlay.
+    fire('event-kind-planet_conjunction', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    check('行星合月 has its own rows and clears the occultation layer',
+      T.state.eventTable.some((row) => row.label === '火星合月')
+      && T.state.occultationEvents.length === 0
+      && T.state.planetTrack === null,
+      JSON.stringify({ events: T.state.eventTable.map((row) => row.label),
+                       occultations: T.state.occultationEvents.length,
+                       track: T.state.planetTrack }));
+    set('when', '2026-05-25T15:30');
+    fire('when', 'change');
+    fire('event-kind-full_moon', 'change');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+
+  /* 筛选可见: one switch, two buttons (sidebar and table window), same rows. */
+  {
+    const saved = {
+      table: T.state.eventTable,
+      imported: T.state.eventImported,
+      visible: T.state.eventVisibleOnly,
+    };
+    const rows = [
+      { kind: 'full_moon', label: '满月',
+        when_utc: '2026-05-01T12:00:00+00:00', altitude_deg: 40.2,
+        observable: true, detail: '地心距 390,000 km', metrics: null },
+      { kind: 'full_moon', label: '满月',
+        when_utc: '2026-06-01T03:00:00+00:00', altitude_deg: -12.0,
+        observable: false, detail: '地心距 400,000 km', metrics: null },
+    ];
+    T.state.eventTable = rows;
+    T.state.eventImported = false;
+    T.renderEvents(rows);
+    T.setEventVisibleOnly(true);
+    check('筛选可见 keeps only the rows above the horizon',
+      document.getElementById('event-list').children.length === 1
+      && T.state.eventVisibleOnly === true,
+      String(document.getElementById('event-list').children.length));
+    check('both 筛选可见 buttons report the state',
+      document.getElementById('event-visible-only').getAttribute('aria-pressed') === 'true'
+      && document.getElementById('event-window-visible-only')
+        .getAttribute('aria-pressed') === 'true');
+    check('the count keeps the visible and the total',
+      document.getElementById('event-count').textContent === '1 / 2 条',
+      document.getElementById('event-count').textContent);
+    T.openEventWindow();
+    check('the table window is filtered too',
+      document.getElementById('event-window-rows').children.length === 1
+      && document.getElementById('event-window-count').textContent === '1 / 2 条',
+      document.getElementById('event-window-count').textContent);
+    fire('event-window-visible-only', 'click');
+    check('the window button releases the filter for both views',
+      T.state.eventVisibleOnly === false
+      && document.getElementById('event-visible-only')
+        .getAttribute('aria-pressed') === 'false'
+      && document.getElementById('event-window-rows').children.length === 2
+      && document.getElementById('event-list').children.length === 2,
+      String(document.getElementById('event-window-rows').children.length));
+    T.closeEventWindow();
+    T.state.eventTable = saved.table;
+    T.state.eventImported = saved.imported;
+    T.setEventVisibleOnly(saved.visible);
   }
 
   const eventBody = fetchCalls.filter((c) => c.url === '/api/events').pop();
@@ -2439,11 +2709,11 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     // X/V has its own column set: date, event, best, start, end, duration,
     // altitude, ... -- the first six cells are the window, not the phase table.
     check('the X/V row carries its own window columns',
-      !!xvRow && xvRow.children[0].textContent === '05-21'
+      !!xvRow && xvRow.children[0].textContent === '2026-05-21'
       && xvRow.children[1].textContent.includes('X / V')
-      && xvRow.children[2].textContent === '05-21 03:00'
-      && xvRow.children[3].textContent === '05-21 03:00'
-      && xvRow.children[4].textContent.includes('05-21')
+      && xvRow.children[2].textContent === '2026-05-21 03:00'
+      && xvRow.children[3].textContent === '2026-05-21 03:00'
+      && xvRow.children[4].textContent.includes('2026-05-21')
       && xvRow.children[5].textContent.includes('196 min')
       && xvRow.children[6].textContent.includes('31.5'),
       xvRow ? [...xvRow.children].map((cell) => cell.textContent).join(' | ') : 'no row');
@@ -2463,7 +2733,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     xvRow.fire('dblclick', { type: 'dblclick' });
     check('double-clicking a table row sets the main time',
       document.getElementById('when').value !== before
-      && document.getElementById('when').value === '2026-05-21T03:00',
+      && document.getElementById('when').value === '2026-05-21T03:00:00',
       document.getElementById('when').value);
     document.getElementById('when').value = before;
 
@@ -2502,16 +2772,17 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
                  illumination_percent: 99.8, diameter_arcmin: 33.0,
                  altitude_deg: 40.2, azimuth_deg: 180.0,
                  distance_km: 384400, magnitude: -12.7,
-                 surface_brightness: 3.4, earthshine_magnitude: null },
+                 surface_brightness: 3.4, earthshine_magnitude: null,
+                 daylight: true },
     })];
     T.renderEventWindowRows();
     const phaseHead = document.getElementById('event-window-head');
     const phaseLabels = [...phaseHead.children].map((cell) => cell.textContent);
-    check('a phase row gets the phase column set plus the note column',
-      phaseHead.children.length === 14 &&
+    check('a phase row gets the phase column set plus 白昼 and the note column',
+      phaseHead.children.length === 15 &&
       phaseLabels.includes('月龄') && phaseLabels.includes('农历') &&
       phaseLabels.includes('亮度') && phaseLabels.includes('月面亮度') &&
-      phaseLabels.includes('备注') &&
+      phaseLabels.includes('白昼') && phaseLabels.includes('备注') &&
       !phaseLabels.includes('地照亮度') && !phaseLabels.includes('最佳时刻'),
       phaseLabels.join(' / '));
     const phaseCells = [...body.children[0].children].map((cell) => cell.textContent);
@@ -2520,7 +2791,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       phaseCells[7] === '33.00′' && phaseCells[8] === '+40.2°' &&
       phaseCells[10] === '384,400 km' && phaseCells[11] === '-12.70 mag' &&
       phaseCells[12] === '3.40 mag/″²' &&
-      phaseCells[13] === '视直径 33′ 00.0″',
+      phaseCells[13] === '白昼' &&
+      phaseCells[14] === '视直径 33′ 00.0″',
       phaseCells.join(' | '));
     T.state.eventTable = eventTable;
     T.renderEventWindowRows();
@@ -2893,6 +3165,64 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       check('the globe carries the selection outline',
         overlayCtx.drawn.strokes.length > 0,
         String(overlayCtx.drawn.strokes.length));
+      {
+        const shape = T.globeSelectionGeometry();
+        const projected = shape ? shape.corners.map(T.globePixelFromDirection) : [];
+        const xs = projected.map((point) => point.x);
+        const ys = projected.map((point) => point.y);
+        const spread = projected.length
+          ? Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)
+          : 0;
+        check('the globe outline is a box, not a point', spread > 20,
+          `${projected.length} corners, spread ${spread.toFixed(1)}`);
+      }
+      {
+        // No box yet: an empty drag on the globe has to draw the first one
+        // (it used to turn the globe, leaving the reader unable to select).
+        const savedSelection = T.state.selection;
+        T.state.selection = null;
+        T.state.dragging = null;
+        const origin = T.imageToScreen('disk', 560 / 2, 560 / 2);
+        const at = (x, y) => ({
+          button: 0, pointerId: 23, target: null,
+          clientX: x / origin.dpr, clientY: y / origin.dpr,
+          preventDefault() {},
+        });
+        const body = document.getElementById('body-disk');
+        body.fire('pointerdown', at(origin.x, origin.y));
+        body.fire('pointermove', at(origin.x + 40, origin.y + 30));
+        body.fire('pointerup', at(origin.x + 40, origin.y + 30));
+        check('an empty drag on the globe starts a box',
+          !!T.state.selection && T.state.selection.radiusFraction > 0.02,
+          JSON.stringify(T.state.selection));
+        T.state.selection = savedSelection;
+        T.state.dragging = null;
+      }
+      // The ellipse switch has to reach the globe as well: the 3D outline is
+      // built from the selection's own directions, so it can be an ellipse.
+      const ellipseBefore = document.getElementById('mesh-ellipse').checked;
+      set('mesh-ellipse', false);
+      const rectangle = T.globeSelectionGeometry();
+      set('mesh-ellipse', true);
+      const ellipse = T.globeSelectionGeometry();
+      check('the 3D outline follows the ellipse switch',
+        !!rectangle && !!ellipse
+        && ellipse.directions.length > rectangle.directions.length,
+        `${rectangle ? rectangle.directions.length : 'none'} -> `
+        + `${ellipse ? ellipse.directions.length : 'none'}`);
+      set('mesh-ellipse', ellipseBefore);
+      // A direction on the far side of the globe is drawn through it rather
+      // than dropped, which is what makes a box that reaches the far limb stay
+      // visible.
+      const globe = T.state.globe3d;
+      const lon = globe.lon * Math.PI / 180;
+      const lat = globe.lat * Math.PI / 180;
+      const up = [Math.cos(lat) * Math.cos(lon),
+                  Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
+      const behind = T.globePixelFromDirection(up.map((value) => -value));
+      check('a direction behind the globe still maps to a pixel',
+        !!behind && Number.isFinite(behind.x) && Number.isFinite(behind.y),
+        JSON.stringify(behind));
       T.state.selection = savedSelection;
     }
     check('the low-resolution globe texture is loaded once',
@@ -2906,6 +3236,75 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       T.state.view3d === false &&
       document.getElementById('overlay').hidden === false &&
       document.getElementById('labels-disk').hidden === false);
+  }
+
+  console.log('');
+  console.log('隐藏选框 puts the box away without moving it');
+  {
+    /* The button is a label swap in the preview toolbar: 隐藏选框 while the box
+       is on, 显示选框 after.  It hides the *drawing* only -- the selection, the
+       close-up window and the bottom readout keep their numbers. */
+    const source = require('fs').readFileSync(
+      require('path').join(__dirname, 'static', 'index.html'), 'utf8');
+    const selectAt = source.indexOf('id="selection-visible"');
+    const occultationAt = source.indexOf('id="occultation-track"');
+    const threeAt = source.indexOf('id="view-3d"');
+    check('the button sits to the left of 3D',
+      selectAt > 0 && threeAt > selectAt, `${selectAt} -> ${threeAt}`);
+    check('显示掩星 sits between 隐藏选框 and 3D',
+      occultationAt > selectAt && threeAt > occultationAt,
+      `${selectAt} -> ${occultationAt} -> ${threeAt}`);
+
+    const button = document.getElementById('selection-visible');
+    check('and starts as 隐藏选框',
+      button.textContent === '隐藏选框' && T.state.selectionHidden === false,
+      button.textContent);
+
+    const saved = T.state.selection;
+    T.state.selection = {
+      lon: 10, lat: 20, radiusFraction: 0.1, rotationDeg: 0, aspect: 1,
+    };
+    const overlay = document.getElementById('overlay').getContext('2d').drawn;
+    overlay.strokes.length = 0;
+    T.drawDisk();
+    check('the box is painted while it is visible',
+      overlay.strokes.includes('#ff5a52'),
+      JSON.stringify(overlay.strokes.slice(0, 4)));
+
+    button.fire('click');
+    check('pressing it says 显示选框',
+      button.textContent === '显示选框'
+      && button.getAttribute('aria-pressed') === 'true',
+      button.textContent);
+    overlay.strokes.length = 0;
+    T.drawDisk();
+    check('and nothing of the box is painted',
+      overlay.strokes.length === 0, JSON.stringify(overlay.strokes));
+
+    /* A hidden box is not a control: a drag over it must not move it, and must
+       not start a new one. */
+    const centre = T.lonLatToPixel(T.state.selection.lon, T.state.selection.lat);
+    const map = T.imageToScreen('disk', centre.x, centre.y);
+    const event = (x, y) => ({
+      button: 0, pointerId: 11, clientX: x / map.dpr, clientY: y / map.dpr,
+      preventDefault() {}, target: null,
+    });
+    const body = document.getElementById('body-disk');
+    body.fire('pointerdown', event(map.x, map.y));
+    body.fire('pointermove', event(map.x + 30, map.y));
+    body.fire('pointerup', event(map.x + 30, map.y));
+    check('and a drag over where it was does not grab it',
+      T.state.dragging === null && T.state.selection.lon === 10,
+      JSON.stringify([T.state.dragging, T.state.selection]));
+
+    button.fire('click');
+    check('pressing again brings it back',
+      button.textContent === '隐藏选框'
+      && button.getAttribute('aria-pressed') === 'false'
+      && T.state.selectionHidden === false,
+      button.textContent);
+    T.state.selection = saved;
+    T.drawDisk();
   }
 
   console.log('');
@@ -2944,9 +3343,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.drawMagnifier();
     const ellipses = magnifyCanvas._ctx.drawn.ellipses;
     const last = ellipses.length ? ellipses[ellipses.length - 1] : null;
-    check('the fallback ellipse mask is centred in the window',
-      !!last && last[0] === 0 && last[1] === 0 && last[2] > 0,
-      JSON.stringify(last));
+    check('the fallback ellipse mask is centred and fits inside the window',
+      !!last && Math.abs(last[0] - magnifyCanvas.width / 2) < 1e-6
+        && Math.abs(last[1] - magnifyCanvas.height / 2) < 1e-6
+        && last[2] > 0
+        && 2 * last[2] <= magnifyCanvas.width + 1e-6
+        && 2 * last[3] <= magnifyCanvas.height + 1e-6,
+      JSON.stringify(last) + ' in ' + magnifyCanvas.width + 'x' + magnifyCanvas.height);
     const live = T.magnifierView(400, 300);
     check('the live window has the same field of view as the render',
       Math.abs(live.height / live.width - T.selectionAspect()) < 0.01,
@@ -3409,6 +3812,15 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('and it stops where the other column begins',
     T.splitterCeiling(T.SPLITTERS.panes) === 620 - 6 - 200,
     String(T.splitterCeiling(T.SPLITTERS.panes)));
+  check('the settings pane starts visible', T.paneAIsHidden() === false);
+  T.setPaneAHidden(true);
+  check('pulling it away hides the whole simulation pane',
+    T.paneAIsHidden() === true
+    && document.getElementById('layout').classList.contains('pane-a-hidden'));
+  T.setPaneAHidden(false, 280);
+  check('clicking the handle brings it back',
+    T.paneAIsHidden() === false
+    && !document.getElementById('layout').classList.contains('pane-a-hidden'));
 
   console.log('');
   console.log('时间微调 nine buttons and 同步设备时间');
@@ -3419,11 +3831,11 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('when', '2026-05-25T15:30');
     fire('nudge-fwd-hour', 'click');
     check('+1h moves the instant by an hour',
-      document.getElementById('when').value === '2026-05-25T16:30',
+      document.getElementById('when').value === '2026-05-25T16:30:00',
       document.getElementById('when').value);
     fire('nudge-back-minute', 'click');
     check('and -1m comes back by a minute',
-      document.getElementById('when').value === '2026-05-25T16:29',
+      document.getElementById('when').value === '2026-05-25T16:29:00',
       document.getElementById('when').value);
     set('when', '2026-01-31T12:00');
     // The coarsest step on 观测信息 is a week, not a calendar month: a month
@@ -3432,20 +3844,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     // range's own row, where both ends move together.
     fire('nudge-fwd-week', 'click');
     check('+1w is seven days',
-      document.getElementById('when').value === '2026-02-07T12:00',
+      document.getElementById('when').value === '2026-02-07T12:00:00',
       document.getElementById('when').value);
     fire('nudge-back-week', 'click');
     check('and -1w comes back seven days',
-      document.getElementById('when').value === '2026-01-31T12:00',
+      document.getElementById('when').value === '2026-01-31T12:00:00',
       document.getElementById('when').value);
     set('when', '2026-12-31T23:30');
     fire('nudge-fwd-day', 'click');
     check('+1d rolls over the year boundary',
-      document.getElementById('when').value === '2027-01-01T23:30',
+      document.getElementById('when').value === '2027-01-01T23:30:00',
       document.getElementById('when').value);
     fire('sync-now', 'click');
     check('同步设备时间 writes the clock the zone field names',
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(document.getElementById('when').value),
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(document.getElementById('when').value),
       document.getElementById('when').value);
     // 时区 always shows which side of Greenwich it is on.
     set('tz', '8');
@@ -3998,6 +4410,157 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       + ' overlay.selected = null; state.labelsOn = false');
   }
 
+
+  console.log('');
+  console.log('测量工具：线、圆与剖面');
+  {
+    /* The button lives beside 适配字号 and is a latch: armed, a drag on the disk
+       draws instead of selecting; disarmed, the mouse is the page's again. */
+    const htmlSource = require('fs').readFileSync(
+      require('path').join(__dirname, 'static', 'index.html'), 'utf8');
+    const fontAt = htmlSource.indexOf('id="label-refresh-font"');
+    const toolAt = htmlSource.indexOf('id="measure-tool"');
+    check('测量工具 sits to the right of 适配字号',
+      fontAt > 0 && toolAt > fontAt, `${fontAt} -> ${toolAt}`);
+    const button = document.getElementById('measure-tool');
+    const selectButton = document.getElementById('selection-visible');
+    check('the box is visible before the tool is armed',
+      T.state.selectionHidden === false
+      && selectButton.textContent === '隐藏选框',
+      selectButton.textContent);
+    button.fire('click');
+    check('the button arms the tool',
+      button.getAttribute('aria-pressed') === 'true' && T.measure.on === true,
+      button.getAttribute('aria-pressed'));
+    check('arming it also hides the selection box, once',
+      T.state.selectionHidden === true
+      && selectButton.textContent === '显示选框',
+      selectButton.textContent);
+
+    const toClient = (fx, fy) => {
+      const map = T.imageToScreen('disk', fx, fy);
+      return { x: map.x / map.dpr, y: map.y / map.dpr };
+    };
+    const dispatch = (name, fx, fy, extra) => {
+      const at = toClient(fx, fy);
+      document.getElementById('body-disk').fire(name, {
+        clientX: at.x, clientY: at.y, button: 0, pointerId: 5,
+        preventDefault() {}, target: null, ...(extra || {}),
+      });
+    };
+    const selectionBefore = JSON.stringify(T.state.selection);
+
+    dispatch('pointerdown', 380, 560);
+    dispatch('pointermove', 520, 560);
+    dispatch('pointerup', 520, 560);
+    check('a drag draws a ground line instead of a selection box',
+      T.measure.shape && T.measure.shape.kind === 'line'
+      && JSON.stringify(T.state.selection) === selectionBefore,
+      JSON.stringify(T.measure.shape));
+    const lineKm = T.measureDistanceKm(T.measure.shape.a, T.measure.shape.b);
+    check('and the line carries a physical length',
+      lineKm > 5 && lineKm < 4000, String(lineKm));
+    check('the readout names the length',
+      /^\d+(\.\d+)? (km|m)$/.test(T.measureText()), T.measureText());
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const lineProfile = fetchCalls.filter((c) => c.url === '/api/profile').pop();
+    check('the line asks the server for its heights',
+      !!lineProfile && lineProfile.body.kind === 'line'
+      && Array.isArray([lineProfile.body.a, lineProfile.body.b]),
+      JSON.stringify(lineProfile && lineProfile.body));
+    check('and the profile panel appears under the preview controls',
+      document.getElementById('measure-chart').hidden === false,
+      String(document.getElementById('measure-chart').hidden));
+    {
+      /* The chart is a black panel with a white curve and the two extremes:
+         drawn, not merely requested. */
+      const chart = document.getElementById('measure-chart-canvas')
+        .getContext('2d').drawn;
+      check('the chart draws a white profile',
+        chart.strokes.includes('#ffffff'),
+        JSON.stringify(chart.strokes.slice(0, 3)));
+      check('and the panel behind it is translucent black',
+        /\.measure-chart \{[^}]*background: rgba\(0, 0, 0, \.\d+\)/.test(
+          require('fs').readFileSync(require('path').join(
+            __dirname, 'static', 'style.css'), 'utf8')));
+      check('both axes carry their unit and the extremes are written',
+        chart.texts.some((entry) => entry.text === '高程 km')
+        && chart.texts.some((entry) => entry.text === '距离 km')
+        && chart.texts.some((entry) => /^最高 .*最低 /.test(entry.text)),
+        JSON.stringify(chart.texts.map((entry) => entry.text)));
+      const layer = document.getElementById('labels-disk').getContext('2d').drawn;
+      check('the distance is painted beside the line',
+        layer.texts.some((entry) => / km$| m$/.test(entry.text)),
+        JSON.stringify(layer.texts.map((entry) => entry.text)));
+      check('with a handle at each end',
+        layer.fills.includes('#ffffff'), JSON.stringify(layer.fills));
+      /* On a 2x display the chart's own drawing buffer is scaled by dpr, so
+         the type must stay 9 CSS pixels.  Asking for 9 * dpr drew 18 px type
+         on every Retina machine, which is what made the chart look too big. */
+      const savedDpr = sandbox.window.devicePixelRatio;
+      sandbox.window.devicePixelRatio = 2;
+      T.drawMeasureChart();
+      const chartCtx = document.getElementById('measure-chart-canvas')
+        .getContext('2d');
+      check('the chart type stays 9 CSS px on a 2x display',
+        /^9px /.test(String(chartCtx.font)), String(chartCtx.font));
+      sandbox.window.devicePixelRatio = savedDpr;
+      T.drawMeasureChart();
+    }
+
+    /* The endpoints are handles: dragging one re-measures the same line. */
+    const end = T.measure.shape.b;
+    const endPx = T.lonLatToPixel(end.lon, end.lat);
+    dispatch('pointerdown', endPx.x, endPx.y);
+    dispatch('pointermove', endPx.x + 40, endPx.y);
+    dispatch('pointerup', endPx.x + 40, endPx.y);
+    check('dragging an end moves that end only',
+      T.measure.shape.b.lon !== end.lon
+      && T.measure.shape.a.lon === T.measure.shape.a.lon,
+      JSON.stringify(T.measure.shape));
+
+    /* Ctrl-drag is the circle: a ground radius, not a screen oval. */
+    dispatch('pointerdown', 500, 500, { ctrlKey: true });
+    dispatch('pointermove', 560, 540, { ctrlKey: true });
+    dispatch('pointerup', 560, 540, { ctrlKey: true });
+    check('Ctrl-drag draws a circle',
+      T.measure.shape.kind === 'circle' && T.measure.shape.radiusKm > 0,
+      JSON.stringify(T.measure.shape));
+    const rim = [0, 1, 2, 3, 4, 5, 6, 7].map((index) => T.measureCirclePoint(
+      T.measure.shape.lon, T.measure.shape.lat, T.measure.shape.radiusKm,
+      index * Math.PI / 4));
+    const centre = T.measure.shape;
+    const distances = rim.map((point) => T.measureDistanceKm(centre, point));
+    const spread = Math.max(...distances) - Math.min(...distances);
+    check('every point of the rim is the same ground radius away',
+      spread < 0.05, `${Math.min(...distances)} … ${Math.max(...distances)}`);
+    check('and the readout calls it a radius',
+      /^半径 /.test(T.measureText()), T.measureText());
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const circleProfile = fetchCalls.filter((c) => c.url === '/api/profile').pop();
+    check('the circle asks for the mean profile along its radius',
+      !!circleProfile && circleProfile.body.kind === 'circle'
+      && circleProfile.body.radius_km > 0 && circleProfile.body.azimuths > 1,
+      JSON.stringify(circleProfile && circleProfile.body));
+
+    /* Nothing reached the picture while the tool was armed. */
+    check('the tool does not touch the selection box',
+      JSON.stringify(T.state.selection) === selectionBefore);
+
+    button.fire('click');
+    check('pressing the button again puts the mouse back',
+      button.getAttribute('aria-pressed') === 'false'
+      && T.measure.on === false && T.measure.shape === null
+      && document.getElementById('measure-chart').hidden === true,
+      JSON.stringify([button.getAttribute('aria-pressed'), T.measure.on]));
+    check('and it leaves the box as it found it: still hidden',
+      T.state.selectionHidden === true,
+      String(T.state.selectionHidden));
+    T.setSelectionVisible(true);
+  }
+
   console.log('');
   console.log('the close-up form and the save row');
   {
@@ -4391,6 +4954,15 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         document.getElementById('sky-nudge').hidden === true
         && document.getElementById('sky-nudge-toggle')
           .getAttribute('aria-expanded') === 'false');
+      {
+        const source = readStatic('index.html');
+        const closeupAt = source.indexOf('id="sky-closeup"');
+        const nudgeAt = source.indexOf('id="sky-nudge-toggle"');
+        const saveAt = source.indexOf('id="sky-save"');
+        check('时间步长 sits after 轨迹特写 and before 保存',
+          closeupAt > 0 && nudgeAt > closeupAt && saveAt > nudgeAt,
+          `${closeupAt} -> ${nudgeAt} -> ${saveAt}`);
+      }
       fire('sky-nudge-toggle', 'click');
       check('时间步长 unfolds them',
         document.getElementById('sky-nudge').hidden === false
@@ -4457,6 +5029,21 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       && T.skyEdgeAt(layout.x + layout.w / 2, layout.y + 2, layout) === 'top');
     check('time labels are on the canvas',
       ctx.drawn.texts.some((text) => /^\d\d:\d\d$/.test(text.text)));
+
+    // The planet layer: a dot and a name, and only for planets above the
+    // horizon (Jupiter is below it in the canned answer).
+    check('a planet in the sky is named on the chart',
+      ctx.drawn.texts.some((text) => text.text === '金星'),
+      JSON.stringify(ctx.drawn.texts.map((text) => text.text).slice(-12)));
+    check('a planet below the horizon is not drawn',
+      !ctx.drawn.texts.some((text) => text.text === '木星'));
+    ctx.drawn.texts.length = 0;
+    set('sky-planets', false);
+    fire('sky-planets', 'change');
+    check('turning the planet layer off removes the names',
+      !ctx.drawn.texts.some((text) => text.text === '金星'));
+    set('sky-planets', true);
+    fire('sky-planets', 'change');
 
     // Labels are a switch, and the switch has to reach the paint.
     ctx.drawn.texts.length = 0;
@@ -5313,6 +5900,34 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       limbAfter && Math.abs(limbAfter.x - (limbOrigin.x - 18)) < 0.3 &&
       Math.abs(limbAfter.y - (limbOrigin.y + 10)) < 0.3,
       JSON.stringify({ limbOrigin, limbAfter }));
+  }
+
+  console.log('');
+  console.log('an uncorrected box can reach the sky beyond the limb');
+  {
+    const saved = T.state.selection;
+    const correctedBefore = document.getElementById('mesh-corrected').checked;
+    T.state.selection = {
+      lon: 0, lat: 0, radiusFraction: 0.2, rotationDeg: 0, aspect: 1,
+    };
+    set('mesh-corrected', false);
+    const g = T.diskGeom();
+    const inSky = T.centreLonLat(g.cx + g.radius * 1.8, g.cy + g.radius * 0.2);
+    check('a pointer beyond the limb still gives the box a centre',
+      !!inSky && Number.isFinite(inSky.lon) && Number.isFinite(inSky.lat),
+      JSON.stringify(inSky));
+    const clamped = inSky ? T.lonLatToPixel(inSky.lon, inSky.lat) : null;
+    check('and the centre slides to the limb instead of vanishing',
+      !!clamped
+      && Math.hypot(clamped.x - g.cx, clamped.y - g.cy)
+        <= g.radius * 1.02,
+      JSON.stringify(clamped));
+    set('mesh-corrected', true);
+    const refused = T.centreLonLat(g.cx + g.radius * 1.8, g.cy);
+    check('a corrected patch still refuses a centre off the ground',
+      refused === null, JSON.stringify(refused));
+    set('mesh-corrected', correctedBefore);
+    T.state.selection = saved;
   }
 
   console.log('');

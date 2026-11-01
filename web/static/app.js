@@ -38,6 +38,11 @@ const state = {
   rawImage: null,      // geometry only, no post-processing
   resultImage: null,   // after post-processing
   selection: null,     // {lon, lat, radiusFraction, rotationDeg}
+  selectionHidden: false,  // the box is put away; the picture is not cropped
+  occultationTrack: false, // 显示掩星: draw the planet's path when an event is live
+  occultationEvents: [],   // occultations from the last 月掩行星 forecast
+  planetTrack: null,       // last /api/planet-track payload, for the live event
+  occultationSeq: 0,       // guards a stale track reply
   selectedFeature: null,  // the catalogue row behind the current selection
   lastRenderSelection: null,   // the box the last close-up render was made with
   dragging: null,      // in-progress selection edit
@@ -73,6 +78,8 @@ const state = {
   skyViewLocked: true,  // keep the current axes while time and span change
   eventTable: [],      // rows currently shown by the forecast (and its window)
   eventImported: false, // the rows came from a CSV, not from the server
+  eventVisibleOnly: false, // 筛选可见: only rows above the observer's horizon
+  crescentItems: [],   // raw 极低照明度 rows, so the filter can re-render them
   eventSort: { key: 'date', dir: 1 }, // table sort: column and direction
   processAbort: null,   // the /api/process request in flight
   skyWindow: null,     // {left, top, width, height} of the floating window
@@ -342,7 +349,9 @@ function whenPayload() {
   let at = null;
   if (local) {
     // Interpret the typed time as local time at the given offset, and send UTC.
-    const asUtc = Date.parse(local + ':00Z');
+    // The field may carry a minute (16 chars) or a second (19 chars) value.
+    const typed = local.length === 16 ? local + ':00' : local;
+    const asUtc = Date.parse(typed + 'Z');
     at = new Date(asUtc - offset * 3600 * 1000).toISOString().slice(0, 19);
   }
   return {
@@ -701,7 +710,7 @@ const LABEL_FIELDS = [
 function wallClockNow() {
   const offset = Number($('tz').value);
   const hours = Number.isFinite(offset) ? offset : 0;
-  return new Date(Date.now() + hours * 3600 * 1000).toISOString().slice(0, 16);
+  return new Date(Date.now() + hours * 3600 * 1000).toISOString().slice(0, 19);
 }
 
 /** 时区 always shows its sign: ``+8`` rather than ``8``.
@@ -760,11 +769,13 @@ function parseStep(step) {
   };
 }
 
-/** One instant, moved by one step.  Returns ``YYYY-MM-DDTHH:MM`` or null. */
-function shiftInstant(value, step) {
+/** One instant, moved by one step.  Returns minute or second precision, or null. */
+function shiftInstant(value, step, withSeconds = false) {
   const parsed = parseStep(step);
   if (!parsed) return null;
-  const base = Date.parse(String(value || '') + ':00Z');
+  const raw = String(value || '');
+  const typed = raw.length === 16 ? raw + ':00' : raw;
+  const base = Date.parse(typed + 'Z');
   if (!Number.isFinite(base)) return null;
   const { amount, unit } = parsed;
   let next = base;
@@ -777,7 +788,7 @@ function shiftInstant(value, step) {
     if (!milliseconds) return null;
     next = base + amount * milliseconds;
   }
-  return new Date(next).toISOString().slice(0, 16);
+  return new Date(next).toISOString().slice(0, withSeconds ? 19 : 16);
 }
 
 /** Move the observer's instant by one nudge step: ``-1m``/``+1h``/``+1d``/``+1M``.
@@ -788,7 +799,7 @@ function shiftInstant(value, step) {
 function nudgeTime(step) {
   const field = $('when');
   if (!field) return;
-  const next = shiftInstant(field.value || wallClockNow(), step);
+  const next = shiftInstant(field.value || wallClockNow(), step, true);
   if (!next) return;
   setWhenField(next);
   setStatus(`时间 ${step} → ${field.value}`);
@@ -1857,6 +1868,20 @@ function regionLonLatToPixel(lonDeg, latDeg) {
   };
 }
 
+/** A sky direction in the close-up frame, or null when it is behind the Moon. */
+function regionDirectionToPixel(direction) {
+  const cam = regionCamera();
+  if (!cam) return null;
+  const depth = dot3(direction, cam.forward);
+  if (!(depth > 0)) return null;
+  const column = dot3(direction, cam.right) / depth;
+  const row = dot3(direction, cam.up) / depth;
+  return {
+    x: 0.5 * (cam.width - 1) + column / cam.pixelScale,
+    y: 0.5 * (cam.height - 1) - row / cam.pixelScale,
+  };
+}
+
 /** The raw frame's width and height for a view. */
 function frameSize(viewName) {
   if (viewName === 'disk') return { width: DISK.width, height: DISK.height };
@@ -1949,12 +1974,15 @@ const COORD_HUDS = {
   disk: 'coord-hud-disk', raw: 'coord-hud-raw', proc: 'coord-hud-proc',
 };
 
-/** Format one coordinate for the readout. */
+/** Format one coordinate for the readout.
+ *
+ *  Latitude first: it is the number a reader uses to find a place, and the one
+ *  the eye expects at the start of a coordinate pair. */
 function coordText(lon, lat) {
   if (!Number.isFinite(lon) || !Number.isFinite(lat)) return '';
   const ew = lon >= 0 ? 'E' : 'W';
   const ns = lat >= 0 ? 'N' : 'S';
-  return `经度 ${Math.abs(lon).toFixed(2)}°${ew}　纬度 ${Math.abs(lat).toFixed(2)}°${ns}`;
+  return `纬度 ${Math.abs(lat).toFixed(2)}°${ns}　经度 ${Math.abs(lon).toFixed(2)}°${ew}`;
 }
 
 /** The coordinate a selected thing pins to the readout, or null. */
@@ -2241,6 +2269,11 @@ function setView3d(on) {
   state.view3d = !!on;
   const button = $('view-3d');
   if (button) button.setAttribute('aria-pressed', String(state.view3d));
+  // The measurement is a flat-sky tool: a line on the globe would need the
+  // sphere's own projection, and the chart has no ground to describe there.
+  if (state.view3d) setMeasureOn(false);
+  const measureButton = $('measure-tool');
+  if (measureButton) measureButton.disabled = state.view3d;
   const overlay = $('overlay');
   const labels = $('labels-disk');
   const coord = $('coord-hud-disk');
@@ -3013,72 +3046,170 @@ function finishRenderProgress(handle, pixels, samples, note) {
 const SELECTION_COLOR = '#ff5a52';
 const SELECTION_SHADOW = 'rgba(10, 12, 16, .65)';
 
-/** The selection box carried onto the 3D globe.
+/** The selection's boundary, as MOON_ME directions.
  *
- * The box is a rectangle in the flat sky frame; on the sphere each point of its
- * boundary maps to a selenographic direction and then to a screen pixel.  The
- * outline is therefore sampled along the four edges and broken where it passes
- * behind the limb, rather than drawn as a flat rectangle that would no longer
- * agree with the ground it names.
+ * The 3D globe must not inherit the flat disk's limb: a box that runs past the
+ * *flat* edge is still perfectly visible on a globe showing that side, and the
+ * old code dropped exactly those points (``pixelToLonLat`` returned null).  So
+ * the boundary is built from the selection's own geometry -- its camera, its
+ * sky half-angles or its ground patch -- and never asks whether a flat disc
+ * pixel exists.  The ellipse checkbox is honoured here too.
  */
-function drawGlobeSelection(ctx, box, width, height, dpr) {
+function globeSelectionGeometry() {
+  const s = state.selection;
+  if (!s || !state.geometry) return null;
+  const ellipse = selectionEllipse();
+  const corrected = selectionCorrected();
+  const directions = [];
+  let corners = [];
+  let top = null;
+  let centre = null;
+  if (corrected && ellipse) {
+    const ground = selectionGroundEllipse();
+    if (!ground) return null;
+    const { camera, halfW, halfH } = ground;
+    const at = (angle) => {
+      const point = groundSurfacePoint(
+        camera, Math.cos(angle) * halfW, Math.sin(angle) * halfH,
+      );
+      return point ? unit3(point) : null;
+    };
+    for (let index = 0; index <= 96; index += 1) {
+      directions.push(at(2 * Math.PI * index / 96));
+    }
+    corners = [at(0), at(Math.PI / 2), at(Math.PI), at(3 * Math.PI / 2)];
+    top = at(3 * Math.PI / 2);
+    centre = unit3(ground.camera.up0);
+  } else if (corrected) {
+    const ground = selectionGroundBox();
+    if (!ground) return null;
+    const { camera, x0, x1, y0, y1 } = ground;
+    const at = (x, y) => {
+      const point = groundSurfacePoint(camera, x, y);
+      return point ? unit3(point) : null;
+    };
+    const edge = (ax, ay, bx, by) => {
+      for (let step = 0; step <= 16; step += 1) {
+        const t = step / 16;
+        directions.push(at(ax + (bx - ax) * t, ay + (by - ay) * t));
+      }
+    };
+    edge(x0, y0, x1, y0);
+    edge(x1, y0, x1, y1);
+    edge(x1, y1, x0, y1);
+    edge(x0, y1, x0, y0);
+    corners = [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)];
+    top = at(0.5 * (x0 + x1), y0);
+    centre = unit3(camera.up0);
+  } else {
+    const camera = selectionCameraGeometry();
+    const half = selectionSkyHalfAngles();
+    if (!camera || !half) return null;
+    const tu = Math.tan(half.w);
+    const tv = Math.tan(half.h);
+    const at = (u, v) => unit3([
+      camera.forward[0] + u * tu * camera.right[0]
+        + v * tv * camera.up[0],
+      camera.forward[1] + u * tu * camera.right[1]
+        + v * tv * camera.up[1],
+      camera.forward[2] + u * tu * camera.right[2]
+        + v * tv * camera.up[2],
+    ]);
+    if (ellipse) {
+      for (let index = 0; index <= 96; index += 1) {
+        const angle = 2 * Math.PI * index / 96;
+        directions.push(at(Math.cos(angle), Math.sin(angle)));
+      }
+      corners = [at(1, 0), at(0, 1), at(-1, 0), at(0, -1)];
+      top = at(0, -1);
+    } else {
+      const edge = (u0, v0, u1, v1) => {
+        for (let step = 0; step <= 16; step += 1) {
+          const t = step / 16;
+          directions.push(at(u0 + (u1 - u0) * t, v0 + (v1 - v0) * t));
+        }
+      };
+      edge(-1, -1, 1, -1);
+      edge(1, -1, 1, 1);
+      edge(1, 1, -1, 1);
+      edge(-1, 1, -1, -1);
+      corners = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
+      top = at(0, -1);
+    }
+    centre = unit3(camera.forward);
+  }
+  return { directions, corners, top, centre };
+}
+
+/** A MOON_ME direction on the 3D globe, in preview-image pixels.
+ *
+ * Points behind the globe are mirrored through the tangent plane instead of
+ * being dropped: the box is a control, and a control that vanishes when it
+ * crosses the limb is worse than one drawn through the body.
+ */
+function globePixelFromDirection(direction) {
+  const { up, east, north } = globe3dBasis(state.globe3d.lon, state.globe3d.lat);
+  const depth = dot3(direction, up);
+  const shown = depth < 0
+    ? [
+      direction[0] - 2 * depth * up[0],
+      direction[1] - 2 * depth * up[1],
+      direction[2] - 2 * depth * up[2],
+    ]
+    : direction;
+  const radius = globe3dRadius();
+  // A selection radius is a fraction of the Moon's *apparent* radius, while
+  // the globe's radius is drawn as one Moon radius on screen.  Converting the
+  // sky direction to the globe therefore needs one more factor of
+  // 1/sin(angular radius); without it a box 10% of the Moon across projects to
+  // a tenth of a pixel -- the "selection shrinks to a point" in 3D.
+  const angular = Number(state.geometry && state.geometry.angular_diameter_deg);
+  const sine = Number.isFinite(angular) && angular > 0
+    ? Math.sin(angular * Math.PI / 360) : 0;
+  const scale = sine > 1e-9 ? 1 / sine : 1;
+  return {
+    x: DISK.width / 2 + dot3(shown, east) * radius * scale,
+    y: DISK.height / 2 - dot3(shown, north) * radius * scale,
+  };
+}
+
+/** The selection box carried onto the 3D globe. */
+function drawGlobeSelection(ctx, width, height, dpr) {
   const px = dpr;
-  const overlayPoint = (u, v) => {
-    const flat = boxToScreen(box, u, v);
-    const geo = pixelToLonLat(flat.x, flat.y);
-    if (!geo) return null;
-    const globe = globePixelFromLonLat(geo.lon, geo.lat);
-    if (!globe) return null;
+  const shape = globeSelectionGeometry();
+  if (!shape) return;
+  const overlayOf = (direction) => {
+    if (!direction) return null;
+    const globe = globePixelFromDirection(direction);
     return imageToOverlay(globe.x, globe.y);
   };
-  const edges = [
-    [-box.halfW, -box.halfH, box.halfW, -box.halfH],
-    [box.halfW, -box.halfH, box.halfW, box.halfH],
-    [box.halfW, box.halfH, -box.halfW, box.halfH],
-    [-box.halfW, box.halfH, -box.halfW, -box.halfH],
-  ];
-  const segments = [];
-  let current = [];
-  for (const [u0, v0, u1, v1] of edges) {
-    current = [];
-    for (let step = 0; step <= 28; step += 1) {
-      const t = step / 28;
-      const point = overlayPoint(u0 + (u1 - u0) * t, v0 + (v1 - v0) * t);
-      if (!point) {
-        if (current.length > 1) segments.push(current);
-        current = [];
-        continue;
+  const points = shape.directions.map(overlayOf).filter(Boolean);
+  if (points.length > 1) {
+    for (const pass of [
+      { color: SELECTION_SHADOW, width: 3.2 * px },
+      { color: SELECTION_COLOR, width: 1.5 * px },
+    ]) {
+      ctx.lineWidth = pass.width;
+      ctx.strokeStyle = pass.color;
+      ctx.setLineDash([7 * px, 5 * px]);
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let index = 1; index < points.length; index += 1) {
+        ctx.lineTo(points[index].x, points[index].y);
       }
-      current.push(point);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
-    if (current.length > 1) segments.push(current);
-  }
-  for (const pass of [
-    { color: SELECTION_SHADOW, width: 3.2 * px },
-    { color: SELECTION_COLOR, width: 1.5 * px },
-  ]) {
-    ctx.lineWidth = pass.width;
-    ctx.strokeStyle = pass.color;
-    ctx.setLineDash([7 * px, 5 * px]);
-    ctx.beginPath();
-    for (const segment of segments) {
-      ctx.moveTo(segment[0].x, segment[0].y);
-      for (let index = 1; index < segment.length; index += 1) {
-        ctx.lineTo(segment[index].x, segment[index].y);
-      }
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
   }
   ctx.fillStyle = SELECTION_COLOR;
   const tick = 4 * px;
-  for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-    const point = overlayPoint(u * box.halfW, v * box.halfH);
+  for (const corner of shape.corners) {
+    const point = overlayOf(corner);
     if (!point) continue;
     ctx.fillRect(point.x - tick / 2, point.y - tick / 2, tick, tick);
   }
-  const centre = overlayPoint(0, 0);
-  const top = overlayPoint(0, -box.halfH);
+  const centre = overlayOf(shape.centre);
+  const top = overlayOf(shape.top);
   if (centre && top) {
     const dx = top.x - centre.x;
     const dy = top.y - centre.y;
@@ -3103,13 +3234,19 @@ function drawSelection() {
   const ctx = OVERLAY.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  const box = boxGeometry();
-  if (!box) return;
+  // 隐藏选框: the overlay is cleared above, so returning here leaves the picture
+  // exactly as it is -- no outline, handles or rotation glyph.
+  if (state.selectionHidden || !state.selection) return;
   const dpr = window.devicePixelRatio || 1;
   if (state.view3d) {
-    drawGlobeSelection(ctx, box, width, height, dpr);
+    // The globe draws from the selection's own directions; it has no use for a
+    // flat-disc box, and a far-side selection must not be dropped for lacking
+    // one.
+    drawGlobeSelection(ctx, width, height, dpr);
     return;
   }
+  const box = boxGeometry();
+  if (!box) return;
   // Everything below is in *screen* pixels: the rectangle must not grow when
   // the picture is magnified.
   const px = dpr;
@@ -3483,6 +3620,10 @@ function labelStyleFor(viewName, frameFactor = 1) {
   const markerWidth = Number($('marker-stroke-width').value);
   const outlineWidth = Number($('outline-width').value);
   return {
+    // Frame pixels per screen pixel.  The painter derives the marker floors and
+    // the leader's hairline from this instead of from the type, so they stay
+    // the size they are read at however far the picture is zoomed.
+    scale,
     outlineWidth: (outlineWidth > 0 ? Math.min(4, outlineWidth) : 1) / scale,
     outlineStyle: mode,
     outlineColor: $('outline-color').value,
@@ -3585,11 +3726,15 @@ function syncLabelLayer(viewName) {
  *
  * A region name set across its own formation is its own locator; one that had
  * to step aside keeps its dot.  A highlighted family member keeps its dot even
- * when it has a rim, so the selection ring still has something to sit around.
+ * when it has a rim: its rim is not drawn (see `paintLabels`), so the dot is
+ * the whole locator.
  * *rimDrawn* is the line-style switch: with the rims off, the dot is the only
- * thing locating the feature and must come back.
+ * thing locating the feature and must come back.  *scale* is frame pixels per
+ * screen pixel, so the floors stay the same size on screen however far the
+ * picture is zoomed -- a two-frame-pixel dot is six of them at 3x.
  */
-function markerShape(item, fontPx, rimDrawn = true) {
+function markerShape(item, fontPx, rimDrawn = true, scale = 1) {
+  const floor = (px) => px / Math.max(1e-6, scale);
   if (item.region && item.labelled && !item.leader) return { kind: 'none' };
   if (rimDrawn && item.outline && item.outline.length && !item.highlight) {
     return { kind: 'none' };
@@ -3597,11 +3742,11 @@ function markerShape(item, fontPx, rimDrawn = true) {
   if (item.class === 'statio') {
     return {
       kind: 'cross',
-      radius: Math.max(3, fontPx * 0.22),
-      width: Math.max(1, fontPx * 0.045),
+      radius: Math.max(floor(3), fontPx * 0.22),
+      width: Math.max(floor(1), fontPx * 0.045),
     };
   }
-  return { kind: 'dot', radius: Math.max(2, fontPx * 0.06) };
+  return { kind: 'dot', radius: Math.max(floor(2), fontPx * 0.06) };
 }
 
 /** Where a leader leaves its feature: the rim, not the centre.
@@ -3657,6 +3802,13 @@ function paintLabels(ctx, plan, style) {
   const textColor = ink.textColor || '#eef2ff';
   const highlightColor = ink.highlightColor || '#ffd166';
   const strokeColor = ink.strokeColor || 'rgba(12, 14, 20, .92)';
+  // Frame pixels per screen pixel.  The marker floors and the leader's line are
+  // read off the screen, so they are divided by this: a dot with a two-frame-
+  // pixel floor is two screen pixels at 100 % and six at 300 %, which is the
+  // "markers too big when magnified" the reader sees.  The style carries the
+  // scale because it already carries the same number for the strokes.
+  const scale = Math.max(1e-6, Number(ink.scale) || 1);
+  const screenPx = (px) => px / scale;
   // The halo is a sixth of the type in MoonLabeler, with a two-pixel floor:
   // enough to separate a name from the ground, not enough to thicken the
   // letterforms.  A caller with no style gets the same proportion.
@@ -3668,6 +3820,15 @@ function paintLabels(ctx, plan, style) {
   const markerStrokeColor = ink.markerStrokeColor || strokeColor;
   const markerStrokeWidth = ink.markerStrokeWidth === undefined
     ? Math.max(0.6, fontPx * 0.03) : ink.markerStrokeWidth;
+  // The family a selection asked to highlight.  ``plan.related`` is the one the
+  // reader picked; everything else carrying ``highlight`` is one of its
+  // satellites, and those are drawn as *markers only*: a dot per crater, no rim
+  // and no ring around the dot.  A crater with twenty lettered neighbours turned
+  // the disk into a field of yellow rings that hid the ground they were marking.
+  const chosenName = plan.related || null;
+  const isChosen = (item) => !!(item.highlight && chosenName
+    && item.name_en === chosenName);
+  const isSatelliteMember = (item) => !!(item.highlight && !isChosen(item));
   // A feature on the night side is not really observable -- it is drawn because
   // it was asked for, and half-faded so it cannot be mistaken for a lit one.
   const alphaFor = (item) => (item.illuminated === false ? 0.5 : 1);
@@ -3701,17 +3862,21 @@ function paintLabels(ctx, plan, style) {
     ctx.setLineDash((rim.dash || []).map((value) => value * rim.width));
     for (const item of plan.items) {
       if (!item.outline || !item.outline.length) continue;
+      if (isSatelliteMember(item)) continue;
       ctx.globalAlpha = alphaFor(item);
       ctx.strokeStyle = 'rgba(12, 14, 20, .55)';
       strokeRing(item);
     }
     for (const item of plan.items) {
       if (!item.outline || !item.outline.length) continue;
+      // A satellite of the selected crater is a *marker*, not an outline: its
+      // ring is exactly what the reader asked not to see, and at a typical
+      // preview size those rims are only a few pixels wide anyway.
+      if (isSatelliteMember(item)) continue;
       ctx.globalAlpha = alphaFor(item);
       // The rim carries the class colour too; the picker is the override for
-      // when the reader wants one colour for everything.  A related member of
-      // the selected crater's family is drawn heavier and in the highlight
-      // colour, so the family reads as one object.
+      // when the reader wants one colour for everything.  The selected crater
+      // itself is drawn heavier and in the highlight colour.
       ctx.lineWidth = item.highlight
         ? Math.max(0.8, rim.width * 1.9 + 0.8)
         : Math.max(0.4, rim.width);
@@ -3723,21 +3888,15 @@ function paintLabels(ctx, plan, style) {
     ctx.setLineDash([]);
   }
   for (const item of plan.items) {
-    const shape = markerShape(item, fontPx, rim.style !== 'none');
+    const shape = markerShape(item, fontPx, rim.style !== 'none', scale);
     if (shape.kind === 'none') continue;
     ctx.globalAlpha = alphaFor(item);
     const colour = item.highlight ? highlightColor
       : item.manual ? MANUAL_COLOUR : itemColor(item, ink);
-    if (item.highlight) {
-      // A halo outside the locator, so a related crater is visible even when its
-      // caption was lost to the budget or its rim is too small to draw.
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, shape.radius * 2.15 + Math.max(1.6, fontPx * 0.12),
-        0, Math.PI * 2);
-      ctx.strokeStyle = highlightColor;
-      ctx.lineWidth = Math.max(1.1, fontPx * 0.13);
-      ctx.stroke();
-    }
+    // A highlighted family member is this dot and nothing else.  The ring that
+    // used to sit around it multiplied into a field of yellow circles the
+    // moment a crater with twenty satellites was selected, and a ring around a
+    // two-pixel locator reads as a feature of its own.
     if (shape.kind === 'cross') {
       ctx.beginPath();
       ctx.moveTo(item.x - shape.radius, item.y);
@@ -3790,9 +3949,12 @@ function paintLabels(ctx, plan, style) {
         ctx.lineTo(Math.min(Math.max(item.x, left), right),
                    Math.min(Math.max(item.y, top), bottom));
         ctx.strokeStyle = colour;
-        ctx.lineWidth = Math.max(1.2, fontPx * 0.055);
-        ctx.shadowColor = 'rgba(12, 14, 20, .85)';
-        ctx.shadowBlur = Math.max(1.5, fontPx * 0.14);
+        // A hairline: the leader only has to say "this name belongs to that
+        // dot".  At the old width it read as a stroke in its own right, and
+        // the shadow under it doubled that.
+        ctx.lineWidth = Math.max(screenPx(0.8), fontPx * 0.032);
+        ctx.shadowColor = 'rgba(12, 14, 20, .7)';
+        ctx.shadowBlur = Math.max(screenPx(1.0), fontPx * 0.08);
         ctx.stroke();
         ctx.restore();
       }
@@ -4213,6 +4375,27 @@ function projectSelenographic(lonDeg, latDeg, geom) {
     x: g.cx + g.radius * s * dot3(shown, right) / divisor,
     y: g.cy - g.radius * s * dot3(shown, up) / divisor,
     far,
+  };
+}
+
+/** A selenographic direction on the disc, in image pixels.
+ *
+ * The track is a list of *directions*, not points on the sphere: a direction
+ * outside the limb projects outside the disc, which is what lets 显示掩星 draw
+ * the passage from before immersion to after emersion without folding it back
+ * onto the edge.  The camera is the same one :func:`pixelToLonLat` inverts, so
+ * a direction that does meet the sphere lands on the same pixel as the sphere
+ * point would.
+ */
+function diskDirectionToPixel(direction, geom) {
+  const g = geom || diskGeom();
+  const { k, s } = cameraScale(g);
+  const { forward, right, up } = cameraBasis(g);
+  const depth = dot3(direction, forward);
+  if (!(depth > 1e-9)) return null;
+  return {
+    x: g.cx + g.radius * (s / k) * dot3(direction, right) / depth,
+    y: g.cy - g.radius * (s / k) * dot3(direction, up) / depth,
   };
 }
 
@@ -4659,6 +4842,370 @@ function regionLabelsWanted(viewName) {
   return !box || box.checked;
 }
 
+/** The time scale along a 显示掩星 track reaches this far past each contact. */
+const OCCULTATION_PAD_MS = 10 * 60 * 1000;
+
+/** Where the time labels were painted, in disc-frame pixels, for dblclick. */
+let occultationLabelBoxes = [];
+
+/** Would 显示掩星 paint anything on this view? */
+function occultationOverlayWanted(viewName) {
+  if (!state.occultationTrack || !state.planetTrack) return false;
+  if (viewName === 'disk') return !state.view3d;
+  // An orthorectified close-up has been resampled out of the camera frame;
+  // the track's sky directions no longer apply to its pixels.
+  return !(state.regionInfo && state.regionInfo.orthorectified);
+}
+
+/** The instant the page is showing, in milliseconds, or NaN. */
+function pageInstantMs() {
+  const payload = whenPayload();
+  if (!payload.at) return NaN;
+  const stamp = Date.parse(payload.at + 'Z');
+  return Number.isFinite(stamp) ? stamp : NaN;
+}
+
+/** The computed occultation running at the page's instant, or null.
+ *
+ *  The live range is the contact window extended by ten minutes on each side:
+ *  the track and its time scale cover that span, so the layer is allowed to
+ *  show while the planet is still outside the limb.
+ */
+function occultationEventAt(stamp) {
+  if (!Number.isFinite(stamp)) return null;
+  return state.occultationEvents.find((event) => {
+    const start = Date.parse(event.window_start_utc);
+    const end = Date.parse(event.window_end_utc);
+    return Number.isFinite(start) && Number.isFinite(end)
+      && stamp >= start - OCCULTATION_PAD_MS
+      && stamp <= end + OCCULTATION_PAD_MS;
+  }) || null;
+}
+
+/** Fetch the live event's track, or forget it when nothing is running.
+ *
+ *  The track is deliberately *not* a permanent layer: it exists only after the
+ *  reader has asked 事件预报 for 月掩行星 (which fills state.occultationEvents)
+ *  and only while the page's clock sits inside one of those windows.
+ */
+async function syncOccultationTrack() {
+  if (!state.occultationTrack) {
+    if (state.planetTrack) {
+      state.planetTrack = null;
+      drawAllLabels();
+    }
+    return;
+  }
+  const stamp = pageInstantMs();
+  const event = occultationEventAt(stamp);
+  if (!event) {
+    if (state.planetTrack) {
+      state.planetTrack = null;
+      drawAllLabels();
+    }
+    return;
+  }
+  const when = whenPayload();
+  const at = when.at;
+  const key = `${event.metrics.planet}|${event.window_start_utc}|${at}` +
+    `|${when.observer.lat}|${when.observer.lon}`;
+  if (state.planetTrack && state.planetTrack.key === key) return;
+  // The track itself runs from ten minutes before first contact to ten
+  // minutes after last contact; that is the span its time scale covers.
+  const eventStart = Date.parse(event.window_start_utc);
+  const eventEnd = Date.parse(event.window_end_utc);
+  const seq = ++state.occultationSeq;
+  try {
+    const payload = await post('/api/planet-track', {
+      when: whenPayload(),
+      planet: event.metrics.planet,
+      start: new Date(eventStart - OCCULTATION_PAD_MS).toISOString(),
+      end: new Date(eventEnd + OCCULTATION_PAD_MS).toISOString(),
+    });
+    if (seq !== state.occultationSeq) return;
+    // The clock may have left the window while the request was in flight.
+    if (!occultationEventAt(pageInstantMs())) return;
+    state.planetTrack = {
+      ...payload, key, eventStartMs: eventStart, eventEndMs: eventEnd,
+    };
+    drawAllLabels();
+    drawDisk();
+    drawMagnifier();
+  } catch (error) {
+    if (seq !== state.occultationSeq) return;
+    state.planetTrack = null;
+    drawAllLabels();
+    setStatus('掩星轨迹读取失败：' + String(error.message || error), 'error');
+  }
+}
+
+/** Local wall-clock HH:MM for one instant, in the page's zone. */
+function occultationClock(ms) {
+  const tz = Number($('tz').value) || 0;
+  return new Date(ms + tz * 3600000).toISOString().slice(11, 16);
+}
+
+/** The track direction at an arbitrary instant, interpolated between samples. */
+function trackDirectionAt(timed, stamp) {
+  if (!timed.length) return null;
+  if (stamp <= timed[0].ms) return timed[0].direction;
+  const last = timed[timed.length - 1];
+  if (stamp >= last.ms) return last.direction;
+  let low = 0;
+  let high = timed.length - 1;
+  while (high - low > 1) {
+    const middle = (low + high) >> 1;
+    if (timed[middle].ms <= stamp) low = middle;
+    else high = middle;
+  }
+  const a = timed[low];
+  const b = timed[high];
+  const span = b.ms - a.ms;
+  if (!(span > 0)) return b.direction;
+  const t = (stamp - a.ms) / span;
+  return unit3([
+    a.direction[0] + (b.direction[0] - a.direction[0]) * t,
+    a.direction[1] + (b.direction[1] - a.direction[1]) * t,
+    a.direction[2] + (b.direction[2] - a.direction[2]) * t,
+  ]);
+}
+
+/** One tick and its clock label, perpendicular to the track at *point*. */
+function drawOccultationTick(ctx, frame, point, before, after, ms, text,
+                              strong, side, fontPx, colour, record = true) {
+  if (!point) return;
+  if (point.x < 2 || point.x > frame.width - 2
+      || point.y < 2 || point.y > frame.height - 2) {
+    // A contact can sit a pixel or two beyond the frame edge when the Moon
+    // fills it; losing the 入 label there is worse than nudging its tick
+    // inward.  A point genuinely off the picture is still dropped.
+    const outside = Math.max(2 - point.x, point.x - (frame.width - 2),
+      2 - point.y, point.y - (frame.height - 2));
+    if (!strong || outside > 24) return;
+    point = {
+      x: Math.max(3, Math.min(frame.width - 3, point.x)),
+      y: Math.max(3, Math.min(frame.height - 3, point.y)),
+    };
+  }
+  let tx = 1, ty = 0;
+  if (before && after) {
+    const dx = after.x - before.x;
+    const dy = after.y - before.y;
+    const length = Math.hypot(dx, dy);
+    if (length > 1e-6) { tx = dx / length; ty = dy / length; }
+  }
+  const nx = -ty;
+  const ny = tx;
+  const tick = Math.max(3, fontPx * 0.34);
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = strong ? 1.15 : 0.7;
+  ctx.beginPath();
+  ctx.moveTo(point.x - nx * tick, point.y - ny * tick);
+  ctx.lineTo(point.x + nx * tick, point.y + ny * tick);
+  ctx.stroke();
+  if (strong) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, Math.max(1.6, tick * 0.45), 0, Math.PI * 2);
+    ctx.fillStyle = colour;
+    ctx.fill();
+  }
+  ctx.font = `${strong ? 600 : 400} ${fontPx}px "PingFang SC", system-ui, sans-serif`;
+  const width = ctx.measureText(text).width;
+  const padX = fontPx * 0.25;
+  const offset = tick + fontPx * 0.85;
+  const halfBox = width / 2 + padX;
+  const boxHalfH = fontPx * 0.62;
+  const fits = (lx, ly) => lx - halfBox >= 2 && lx + halfBox <= frame.width - 2
+    && ly - boxHalfH >= 2 && ly + boxHalfH <= frame.height - 2;
+  // A contact label is the one thing on this layer that must not vanish at
+  // the limb: try the preferred side of the track, then the other side, then
+  // clamp.  The old code only clamped, which could leave the first character
+  // of 入 19:08 outside the layer where the picture's own border clipped it.
+  let lx = point.x + nx * offset * side;
+  let ly = point.y + ny * offset * side;
+  if (!fits(lx, ly)) {
+    const otherX = point.x - nx * offset * side;
+    const otherY = point.y - ny * offset * side;
+    if (fits(otherX, otherY)) {
+      lx = otherX;
+      ly = otherY;
+    } else {
+      lx = Math.max(halfBox + 2, Math.min(frame.width - halfBox - 2, lx));
+      ly = Math.max(boxHalfH + 2, Math.min(frame.height - boxHalfH - 2, ly));
+    }
+  }
+  ctx.fillStyle = 'rgba(6, 9, 14, .74)';
+  ctx.fillRect(lx - width / 2 - padX, ly - fontPx * 0.62,
+               width + 2 * padX, fontPx * 1.24);
+  ctx.fillStyle = strong ? '#ffe6a3' : '#e7edf9';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, lx, ly);
+  if (record !== false) {
+    occultationLabelBoxes.push({
+      ms,
+      text,
+      left: lx - width / 2 - padX,
+      top: ly - fontPx * 0.62,
+      right: lx + width / 2 + padX,
+      bottom: ly + fontPx * 0.62,
+    });
+  }
+}
+
+/** The clock along the track: regular ticks, plus the two contact times. */
+function drawOccultationTimeScale(ctx, timed, project, track, frame,
+                                  fontPx, colour, record = true,
+                                  contactsOnly = false) {
+  const startMs = timed[0].ms;
+  const endMs = timed[timed.length - 1].ms;
+  const spanMinutes = Math.max(1, (endMs - startMs) / 60000);
+  const ladder = [1, 2, 5, 10, 15, 20, 30, 60];
+  const stepMinutes = ladder.find((step) => spanMinutes / step <= 6) || 60;
+  const stepMs = stepMinutes * 60000;
+  const tzMs = (Number($('tz').value) || 0) * 3600000;
+  const contactStart = Number(track.eventStartMs);
+  const contactEnd = Number(track.eventEndMs);
+  const nearContact = (ms) => [contactStart, contactEnd].some(
+    (contact) => Number.isFinite(contact) && Math.abs(ms - contact) < 3 * 60 * 1000);
+  if (!contactsOnly) {
+    let side = -1;
+    for (let ms = Math.ceil((startMs + tzMs) / stepMs) * stepMs - tzMs;
+         ms <= endMs + 1e-6; ms += stepMs) {
+      if (nearContact(ms)) continue;
+      const point = project(trackDirectionAt(timed, ms));
+      if (!point) continue;
+      drawOccultationTick(
+        ctx, frame, point,
+        project(trackDirectionAt(timed, ms - 30000)),
+        project(trackDirectionAt(timed, ms + 30000)),
+        ms, occultationClock(ms), false, side, fontPx, colour, record,
+      );
+      side = -side;
+    }
+  }
+  for (const [contact, prefix, side] of [
+    [contactStart, '入', -1], [contactEnd, '出', 1],
+  ]) {
+    if (!Number.isFinite(contact)) continue;
+    const point = project(trackDirectionAt(timed, contact));
+    if (!point) continue;
+    drawOccultationTick(
+      ctx, frame, point,
+      project(trackDirectionAt(timed, contact - 30000)),
+      project(trackDirectionAt(timed, contact + 30000)),
+      contact, `${prefix} ${occultationClock(contact)}`, true, side,
+      fontPx, '#ffd666', record,
+    );
+  }
+}
+
+/** Draw the live occultation's path, time scale and true-diameter disc.
+ *
+ *  The samples are sky directions relative to the Moon (see the server's
+ *  ``planet_track``): they project cleanly both inside and outside the limb,
+ *  so the ends of the track are a straight continuation, not a fold.  The
+ *  time scale covers the ten minutes on either side of the contacts.
+ */
+function drawOccultationOverlay(ctx, viewName, frame, mirror, record = true,
+                                fontOverride = null) {
+  if (record) occultationLabelBoxes = [];
+  const track = state.planetTrack;
+  if (!track || !Array.isArray(track.samples) || !track.samples.length) return;
+  const geom = viewName === 'disk'
+    ? diskGeomFor(frame.width, frame.height) : null;
+  const camera = viewName === 'disk' ? null : regionCamera();
+  const flop = (point) => {
+    if (!point) return null;
+    let x = point.x, y = point.y;
+    if (mirror === 'horizontal') x = frame.width - 1 - x;
+    else if (mirror === 'vertical') y = frame.height - 1 - y;
+    return { x, y };
+  };
+  const project = (direction) => {
+    if (!direction) return null;
+    if (geom) return flop(diskDirectionToPixel(direction, geom));
+    if (!camera) return null;
+    return flop(regionDirectionToPixel(direction));
+  };
+  const timed = [];
+  for (const sample of track.samples) {
+    const stamp = Date.parse(sample.when_utc);
+    if (!Number.isFinite(stamp) || !Array.isArray(sample.direction)) continue;
+    timed.push({ ms: stamp, direction: sample.direction });
+  }
+  if (timed.length < 2) return;
+  timed.sort((a, b) => a.ms - b.ms);
+  const colour = track.colour || '#8fd0ff';
+  // The full disk and the close-up are both shown scaled down, so the type is
+  // derived from the *screen* label size and converted back to frame pixels.
+  // A fixed 11 frame pixels was legible on a 900 px preview and microscopic on
+  // a 4 000 px close-up.
+  const fontPx = Number(fontOverride) > 0
+    ? Number(fontOverride)
+    : (viewName === 'disk'
+      ? Math.max(6, Math.min(40, labelFrameFontPx('disk') * 0.82))
+      : Math.max(8, Math.min(200, labelFrameFontPx(viewName))));
+  const lineWidth = Math.max(0.75, fontPx * 0.095);
+  const points = timed.map((entry) => project(entry.direction));
+  ctx.setLineDash([]);
+  for (const pass of [
+    { colour: 'rgba(6, 8, 12, .78)', width: lineWidth + 0.8 },
+    { colour, width: lineWidth },
+  ]) {
+    ctx.strokeStyle = pass.colour;
+    ctx.lineWidth = pass.width;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    let drawing = false;
+    for (const point of points) {
+      if (!point) { drawing = false; continue; }
+      if (!drawing) { ctx.moveTo(point.x, point.y); drawing = true; }
+      else ctx.lineTo(point.x, point.y);
+    }
+    ctx.stroke();
+  }
+  const centre = project(track.center && track.center.direction);
+  if (!centre) return;
+  const arcsec = Number(track.angular_diameter_arcsec) || 0;
+  let radiusPx = 1.2;
+  if (geom) {
+    const moonArcsec = geom.angularRadiusDeg * 3600;
+    radiusPx = Math.max(1.2,
+      geom.radius * (0.5 * arcsec) / Math.max(moonArcsec, 1e-9));
+  } else if (camera) {
+    const radians = (0.5 * arcsec) * Math.PI / (180 * 3600);
+    radiusPx = Math.max(1.2, radians / Math.max(camera.pixelScale, 1e-12));
+  }
+  ctx.beginPath();
+  ctx.arc(centre.x, centre.y, radiusPx, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(8, 11, 16, .55)';
+  ctx.fill();
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
+  const text = track.name_zh || track.name || '';
+  if (text) {
+    ctx.font = `${fontPx}px "PingFang SC", system-ui, sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const tx = centre.x + radiusPx + fontPx * 0.35;
+    const ty = centre.y;
+    ctx.lineWidth = Math.max(2, fontPx * 0.28);
+    ctx.strokeStyle = 'rgba(6, 8, 12, .85)';
+    ctx.strokeText(text, tx, ty);
+    ctx.fillStyle = colour;
+    ctx.fillText(text, tx, ty);
+  }
+  // The regular clock ticks belong to the whole-disk picture, where the whole
+  // track is in view.  The two contacts are worth naming in every view: 入 and
+  // 出 are the moments the reader is actually waiting for, and a close-up that
+  // happens to frame one should not be the one place they disappear.
+  drawOccultationTimeScale(ctx, timed, project, track, frame, fontPx, colour,
+    record, viewName !== 'disk');
+}
+
 /** Redraw one view's labels at the resolution it is being looked at.
  *
  * The full disk carries the geometric overlays as well; they need no plan, so
@@ -4686,7 +5233,15 @@ function drawViewLabels(viewName) {
   // Manual anchors are the reader's own, so they obey the label switch but not
   // the landform-class filters or the close-ups' 地貌 export checkbox.
   const manual = state.labelsOn && state.manualMarks.length > 0;
-  if (!hasNames && !marks && !manual && !regionMarks) {
+  // 测量工具 is a layer of its own: it is drawn with the labels but does not
+  // need them, and a picture with no names on it must still show the line.
+  const measuring = viewName === 'disk' && measure.on && !!measure.shape
+    && !state.view3d;
+  // 显示掩星: a layer of its own, and only while a computed occultation is
+  // actually running at the page's instant.
+  const occultation = occultationOverlayWanted(viewName);
+  if (!hasNames && !marks && !manual && !regionMarks && !measuring
+      && !occultation) {
     state.manualLayout[viewName] = [];
     return;
   }
@@ -4727,10 +5282,15 @@ function drawViewLabels(viewName) {
     drawRegionMarks(ctx, fontPx, frame.width, frame.height,
       viewName === 'proc' ? frameOrientation().mirror : 'none');
   }
+  if (occultation) {
+    drawOccultationOverlay(ctx, viewName, frame,
+      viewName === 'proc' ? frameOrientation().mirror : 'none');
+  }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   // The handles of whatever is selected -- the ruler's cross and a nudged
   // label's -- are drawn in *device* pixels, last, so they stay one size
   // however far the picture is zoomed.
+  if (measuring) paintMeasure(ctx, viewName);
   drawSelectionHandles(ctx, viewName);
 }
 
@@ -5035,6 +5595,594 @@ function drawRuler(ctx, fontPx, geom) {
   ctx.restore();
 }
 
+/* ── 测量工具 ──────────────────────────────────────────────────────────────
+ *
+ * A line or a circle drawn on the full disk, in kilometres, plus the ground it
+ * crosses: /api/profile samples the DEM and the little black chart under the
+ * preview controls plots the result.  Everything here is *ground* geometry --
+ * lon/lat and great-circle distances -- so a measurement keeps its meaning at
+ * the limb, where a screen-space oval is no longer the circle the reader drew.
+ * The circle is a small circle on the sphere: the radius handle sets a ground
+ * radius, the rim is the set of points that far from the centre.
+ */
+
+/** Radius distances are measured on, when the report does not carry one. */
+const MEASURE_RADIUS_KM = 1737.4;
+/** Handle radius and grab slack, in screen pixels. */
+const MEASURE_HANDLE_PX = 4.5;
+const MEASURE_GRAB_PX = 12;
+/** Heights asked of the server, and azimuths averaged into one ring. */
+const MEASURE_SAMPLES = 192;
+const MEASURE_AZIMUTHS = 72;
+/** Points drawn along a line or round a rim. */
+const MEASURE_POINTS = 96;
+
+const measure = {
+  on: false,          // the tool is armed: a drag draws instead of selecting
+  shape: null,        // {kind:'line', a, b} | {kind:'circle', lon, lat, radiusKm, angle}
+  drag: null,         // the edit in progress
+  profile: null,      // the last /api/profile answer
+  token: 0,           // only the newest answer may replace the chart
+  timer: null,
+};
+
+function measureRadiusKm() {
+  const report = (state.geometry || {}).report || {};
+  const value = Number((report.state || {}).moon_radius_km);
+  return value > 0 ? value : MEASURE_RADIUS_KM;
+}
+
+/** Great-circle distance between two ground points, in kilometres. */
+function measureDistanceKm(a, b) {
+  const u = moonVector(a.lon, a.lat), v = moonVector(b.lon, b.lat);
+  const angle = Math.atan2(Math.hypot(...cross3(u, v)),
+    Math.max(-1, Math.min(1, dot3(u, v))));
+  return angle * measureRadiusKm();
+}
+
+/** The tangent frame a circle about one point is drawn in. */
+function measureCircleBasis(lonDeg, latDeg) {
+  const pole = moonVector(lonDeg, latDeg);
+  const helper = Math.abs(pole[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const east = unit3(cross3(pole, helper));
+  return { pole, east, north: cross3(pole, east) };
+}
+
+/** On the ground, θ radians round the centre at *radiusKm*. */
+function measureCirclePoint(lonDeg, latDeg, radiusKm, theta) {
+  const { pole, east, north } = measureCircleBasis(lonDeg, latDeg);
+  const turn = Math.max(0, radiusKm) / measureRadiusKm();
+  const c = Math.cos(turn), s = Math.sin(turn);
+  const ct = Math.cos(theta), st = Math.sin(theta);
+  const [lon, lat] = lonLatFromVector([
+    c * pole[0] + s * (ct * east[0] + st * north[0]),
+    c * pole[1] + s * (ct * east[1] + st * north[1]),
+    c * pole[2] + s * (ct * east[2] + st * north[2]),
+  ]);
+  return { lon, lat };
+}
+
+/** The azimuth of *point* in the circle's own basis: what the handle remembers. */
+function measureAzimuth(lonDeg, latDeg, point) {
+  const { pole, east, north } = measureCircleBasis(lonDeg, latDeg);
+  const v = moonVector(point.lon, point.lat);
+  const along = dot3(v, pole);
+  const t = unit3([v[0] - along * pole[0], v[1] - along * pole[1],
+                   v[2] - along * pole[2]]);
+  return Math.atan2(dot3(t, north), dot3(t, east));
+}
+
+/** A point *t* of the way along the ground line from a to b. */
+function measureLinePoint(a, b, t) {
+  const u = moonVector(a.lon, a.lat), v = moonVector(b.lon, b.lat);
+  const angle = Math.atan2(Math.hypot(...cross3(u, v)),
+    Math.max(-1, Math.min(1, dot3(u, v))));
+  if (!(angle > 1e-12)) return { lon: a.lon, lat: a.lat };
+  const s = Math.sin(angle);
+  const wa = Math.sin((1 - t) * angle) / s;
+  const wb = Math.sin(t * angle) / s;
+  const [lon, lat] = lonLatFromVector([
+    wa * u[0] + wb * v[0], wa * u[1] + wb * v[1], wa * u[2] + wb * v[2],
+  ]);
+  return { lon, lat };
+}
+
+/** A ground point -> the frame pixel it is drawn at, or null if it is turned away. */
+function measureFramePoint(lonDeg, latDeg) {
+  const px = lonLatToPixel(lonDeg, latDeg);
+  return px ? px : null;
+}
+
+/** The shape in device pixels: the path, the handles, and where the caption goes. */
+function measureScreen(shape) {
+  if (!shape || !state.geometry) return null;
+  const map = imageToScreen('disk', 0, 0);
+  if (!map) return null;
+  const frame = { width: DISK.width, height: DISK.height };
+  const place = (lon, lat) => {
+    const px = measureFramePoint(lon, lat);
+    return px ? frameToDevice('disk', map, frame, px.x, px.y) : null;
+  };
+  if (shape.kind === 'line') {
+    const points = [];
+    for (let index = 0; index <= MEASURE_POINTS; index += 1) {
+      const ground = measureLinePoint(shape.a, shape.b, index / MEASURE_POINTS);
+      points.push(place(ground.lon, ground.lat));
+    }
+    const a = place(shape.a.lon, shape.a.lat);
+    const b = place(shape.b.lon, shape.b.lat);
+    if (!a || !b) return null;
+    return { kind: 'line', points, handles: [{ kind: 'a', at: a }, { kind: 'b', at: b }] };
+  }
+  const rim = [];
+  for (let index = 0; index <= MEASURE_POINTS; index += 1) {
+    const at = measureCirclePoint(shape.lon, shape.lat, shape.radiusKm,
+      2 * Math.PI * index / MEASURE_POINTS);
+    rim.push(place(at.lon, at.lat));
+  }
+  const centre = place(shape.lon, shape.lat);
+  const edge = measureCirclePoint(shape.lon, shape.lat, shape.radiusKm, shape.angle);
+  const handle = place(edge.lon, edge.lat);
+  if (!centre) return null;
+  const handles = [{ kind: 'centre', at: centre }];
+  if (handle) handles.push({ kind: 'radius', at: handle });
+  return { kind: 'circle', rim, centre, handle, handles };
+}
+
+/** What the measurement reads: the line's length, the circle's radius. */
+function measureText() {
+  const shape = measure.shape;
+  if (!shape) return '';
+  if (shape.kind === 'line') return rulerText(measureDistanceKm(shape.a, shape.b));
+  return `半径 ${rulerText(shape.radiusKm)}`;
+}
+
+/** Draw the tool's marks, in device pixels so they keep one size under zoom. */
+function paintMeasure(ctx, viewName) {
+  if (viewName !== 'disk' || !measure.on || !measure.shape || state.view3d) return;
+  const screen = measureScreen(measure.shape);
+  if (!screen) return;
+  const dpr = window.devicePixelRatio || 1;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const path = (points) => {
+    ctx.beginPath();
+    let started = false;
+    for (const point of points) {
+      if (!point) { started = false; continue; }
+      if (started) ctx.lineTo(point.x, point.y);
+      else { ctx.moveTo(point.x, point.y); started = true; }
+    }
+  };
+  const stroke = (width, colour) => {
+    ctx.lineWidth = width;
+    ctx.strokeStyle = colour;
+    ctx.stroke();
+  };
+  if (screen.kind === 'line') {
+    path(screen.points);
+    stroke(4 * dpr, 'rgba(8, 10, 14, .8)');
+    stroke(1.8 * dpr, '#ffffff');
+  } else {
+    path(screen.rim);
+    stroke(4 * dpr, 'rgba(8, 10, 14, .8)');
+    stroke(1.8 * dpr, '#ffffff');
+    if (screen.handle) {
+      ctx.beginPath();
+      ctx.moveTo(screen.centre.x, screen.centre.y);
+      ctx.lineTo(screen.handle.x, screen.handle.y);
+      stroke(1.1 * dpr, 'rgba(255, 255, 255, .65)');
+    }
+  }
+  for (const handle of screen.handles) {
+    ctx.beginPath();
+    ctx.arc(handle.at.x, handle.at.y, MEASURE_HANDLE_PX * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.lineWidth = Math.max(1, 1.2 * dpr);
+    ctx.strokeStyle = 'rgba(8, 10, 14, .9)';
+    ctx.stroke();
+  }
+  // The value sits beside the line / outside the rim, whichever way there is
+  // room for it on this canvas.
+  let anchor;
+  let away = { x: 0, y: -1 };
+  if (screen.kind === 'line') {
+    const a = screen.handles[0].at, b = screen.handles[1].at;
+    anchor = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (length > 1e-6) away = { x: -dy / length, y: dx / length };
+  } else {
+    anchor = screen.handle || screen.centre;
+    const dx = anchor.x - screen.centre.x, dy = anchor.y - screen.centre.y;
+    const length = Math.hypot(dx, dy);
+    if (length > 1e-6) away = { x: dx / length, y: dy / length };
+  }
+  const fontPx = 12 * dpr;
+  ctx.font = `${fontPx}px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ` +
+    'system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const text = measureText();
+  const half = ctx.measureText(text).width / 2 + 4 * dpr;
+  const gap = 13 * dpr;
+  let x = anchor.x + away.x * gap;
+  let y = anchor.y + away.y * gap;
+  x = Math.max(half, Math.min(ctx.canvas.width - half, x));
+  y = Math.max(fontPx, Math.min(ctx.canvas.height - fontPx, y));
+  ctx.lineWidth = Math.max(2, fontPx * 0.3);
+  ctx.strokeStyle = 'rgba(8, 10, 14, .9)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+/** The grab targets, in the device pixels the pointer is measured in. */
+function measureHitTest(point) {
+  if (!measure.on || !measure.shape || !point) return null;
+  const screen = measureScreen(measure.shape);
+  if (!screen) return null;
+  const grab = MEASURE_GRAB_PX * (point.dpr || 1);
+  for (const handle of screen.handles) {
+    if (Math.hypot(point.x - handle.at.x, point.y - handle.at.y) <= grab) {
+      return handle.kind;
+    }
+  }
+  return null;
+}
+
+/** The body of a /api/profile request for the current shape. */
+function measurePayload() {
+  const shape = measure.shape;
+  if (!shape) return null;
+  if (shape.kind === 'line') {
+    return {
+      kind: 'line',
+      samples: MEASURE_SAMPLES,
+      a: { lon: shape.a.lon, lat: shape.a.lat },
+      b: { lon: shape.b.lon, lat: shape.b.lat },
+    };
+  }
+  if (!(shape.radiusKm > 0.01)) return null;
+  return {
+    kind: 'circle',
+    samples: Math.min(MEASURE_SAMPLES, 160),
+    azimuths: MEASURE_AZIMUTHS,
+    center: { lon: shape.lon, lat: shape.lat },
+    radius_km: shape.radiusKm,
+  };
+}
+
+function measureSchedule(delay = 0) {
+  // 0 means "now": a finished gesture replaces whatever the drag had queued.
+  if (!(delay > 0)) {
+    if (measure.timer !== null) clearTimeout(measure.timer);
+    measure.timer = setTimeout(() => {
+      measure.timer = null;
+      measureFetch();
+    }, 0);
+    return;
+  }
+  // While dragging, at most one request is in flight per *delay* -- a trailing
+  // debounce would never fire during a continuous drag, and the chart is there
+  // to be watched changing.
+  if (measure.timer !== null) return;
+  measure.timer = setTimeout(() => {
+    measure.timer = null;
+    measureFetch();
+  }, delay);
+}
+
+async function measureFetch() {
+  const payload = measurePayload();
+  if (!payload) {
+    measure.profile = null;
+    drawMeasureChart();
+    return;
+  }
+  const token = ++measure.token;
+  try {
+    const body = await post('/api/profile', payload);
+    if (token !== measure.token) return;
+    measure.profile = body;
+    drawMeasureChart();
+  } catch (error) {
+    if (token !== measure.token) return;
+    measure.profile = null;
+    drawMeasureChart();
+    setStatus('高程剖面读取失败：' + String(error.message || error), 'error');
+  }
+}
+
+/** The chart's drawing-buffer size, in device pixels. */
+function measureChartSize(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(120, Math.round(canvas.clientWidth || 240));
+  const height = Math.max(56, Math.round(canvas.clientHeight || 96));
+  const wantW = Math.round(width * dpr), wantH = Math.round(height * dpr);
+  if (canvas.width !== wantW || canvas.height !== wantH) {
+    canvas.width = wantW;
+    canvas.height = wantH;
+  }
+  return { dpr, width, height };
+}
+
+/** A round axis interval that is close to ``span / target``. */
+function measureAxisStep(span, target) {
+  const raw = Math.max(1e-9, Number(span) / Math.max(1, target));
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const scaled = raw / power;
+  const multiplier = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
+  return multiplier * power;
+}
+
+/** One tick label, with as many decimals as the interval needs. */
+function measureAxisText(value, step) {
+  const decimals = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
+  const text = Number(value).toFixed(decimals);
+  return /^-0(\.0+)?$/.test(text) ? text.slice(1) : text;
+}
+
+/** White profile on a translucent black panel: the heights along the line /
+ *  across the radius.  Both axes carry ticks, so the shape can be read as a
+ *  number rather than only as a silhouette. */
+function drawMeasureChart() {
+  const box = $('measure-chart');
+  const canvas = $('measure-chart-canvas');
+  const profile = measure.profile;
+  const usable = !!(measure.on && measure.shape && profile
+    && Array.isArray(profile.heights_km) && profile.heights_km.length > 1);
+  if (box) box.hidden = !usable;
+  if (!canvas) return;
+  if (!usable) return;
+  const { dpr, width, height } = measureChartSize(canvas);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // The panel's background is the translucent black in the stylesheet; the
+  // canvas itself stays clear so the Moon shows through both of them.
+  ctx.clearRect(0, 0, width, height);
+
+  const heights = profile.heights_km.map(Number);
+  const distances = (profile.distance_km || []).map(Number);
+  const left = distances.length === heights.length ? distances[0] : 0;
+  const right = distances.length === heights.length
+    ? distances[distances.length - 1] : heights.length - 1;
+  let low = Math.min(...heights);
+  let high = Math.max(...heights);
+  if (!(high > low)) { high = low + 0.001; }
+  const pad = Math.max(0.02, 0.12 * (high - low));
+  low -= pad;
+  high += pad;
+  const x0 = 31, x1 = width - 6;
+  const y0 = 15, y1 = height - 24;
+  const mapX = (value) => {
+    if (!(right > left)) return (x0 + x1) / 2;
+    return x0 + (value - left) / (right - left) * (x1 - x0);
+  };
+  const mapY = (value) => y1 - (value - low) / (high - low) * (y1 - y0);
+
+  // Grid and ticks first, so the profile stays the brightest thing on the panel.
+  const xStep = measureAxisStep(right - left, Math.max(2, Math.floor((x1 - x0) / 44)));
+  const yStep = measureAxisStep(high - low, Math.max(2, Math.floor((y1 - y0) / 20)));
+  ctx.font = '8px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ' +
+    'system-ui, sans-serif';
+  ctx.lineWidth = 0.6;
+  ctx.strokeStyle = 'rgba(255, 255, 255, .16)';
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y1);
+    ctx.stroke();
+  }
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x1, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255, 255, 255, .42)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x0, y1);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+
+  ctx.beginPath();
+  heights.forEach((value, index) => {
+    const x = mapX(distances.length === heights.length ? distances[index] : index);
+    const y = mapY(value);
+    if (index) ctx.lineTo(x, y);
+    else ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.4;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Short ticks on the two axes: the grid says where the values are, these
+  // say that the axes are ruled.
+  ctx.strokeStyle = 'rgba(255, 255, 255, .42)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    ctx.moveTo(x, y1);
+    ctx.lineTo(x, y1 + 2);
+  }
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    ctx.moveTo(x0 - 2, y);
+    ctx.lineTo(x0, y);
+  }
+  ctx.stroke();
+  // Tick labels: the y ones right-aligned in the left margin, the x ones under
+  // the axis.  The two titles stay in the panel's own top row and bottom edge.
+  ctx.fillStyle = 'rgba(255, 255, 255, .68)';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let value = Math.ceil(low / yStep) * yStep;
+       value <= high + 1e-9; value += yStep) {
+    const y = mapY(value);
+    if (y < y0 - 1 || y > y1 + 1) continue;
+    ctx.fillText(measureAxisText(value, yStep), x0 - 3, y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let value = Math.ceil(left / xStep) * xStep;
+       value <= right + 1e-9; value += xStep) {
+    const x = mapX(value);
+    if (x < x0 - 1 || x > x1 + 1) continue;
+    ctx.fillText(measureAxisText(value, xStep), x, y1 + 2);
+  }
+
+  const span = `${Number(profile.max_km).toFixed(2)}`;
+  const floor = `${Number(profile.min_km).toFixed(2)}`;
+  // The context is already scaled by dpr, so the size is CSS pixels -- asking
+  // for 9 * dpr here drew 18 px type on a 2x display.
+  ctx.font = '9px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ' +
+    'system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255, 255, 255, .82)';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText('高程 km', 6, 2);
+  ctx.textAlign = 'right';
+  ctx.fillText(`最高 ${span}　最低 ${floor}`, width - 6, 2);
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  ctx.fillText('距离 km', width - 6, height - 1);
+}
+
+/** Arm or disarm the tool.  Off also forgets the measurement and its chart:
+ *  the button's second press is "put the mouse back", not "hide the line". */
+function setMeasureOn(on) {
+  const next = !!on && !state.view3d;
+  measure.on = next;
+  // Arming the tool puts the selection box away for the run: the reader is
+  // looking at the ground now, and the box is a control, not part of the Moon.
+  // One press, one action -- closing the tool does not bring it back, because
+  // the reader may have hidden it for their own reasons.
+  if (next && !state.selectionHidden) setSelectionVisible(false);
+  const body = $('body-disk');
+  if (body) body.classList.toggle('measuring', measure.on);
+  if (!next) {
+    measure.shape = null;
+    measure.profile = null;
+    measure.drag = null;
+    if (measure.timer !== null) clearTimeout(measure.timer);
+    measure.timer = null;
+    measure.token += 1;
+    if (body) body.style.cursor = '';
+  }
+  const button = $('measure-tool');
+  if (button) button.setAttribute('aria-pressed', String(measure.on));
+  drawViewLabels('disk');
+  drawMeasureChart();
+}
+
+/** Pointer down, in measure mode: grab a handle, or start a new shape. */
+function measureDown(event) {
+  if (!measure.on || state.view3d || !state.geometry) return false;
+  // Shift-drag and the middle button still pan the picture: the tool owns the
+  // plain left drag, not every way of moving the view.
+  if (event.button !== 0 || wantsPan(event)) return false;
+  const point = overlayPoint('disk', event);
+  const frame = pointerFramePoint('disk', event);
+  if (!frame) return false;
+  const hit = measureHitTest(point);
+  if (hit) {
+    measure.drag = { mode: hit };
+    return true;
+  }
+  const ground = pixelToLonLat(frame.x, frame.y);
+  if (!ground) return false;
+  if (event.ctrlKey || event.metaKey) {
+    measure.shape = {
+      kind: 'circle', lon: ground.lon, lat: ground.lat, radiusKm: 0, angle: 0,
+    };
+    measure.drag = { mode: 'new-circle' };
+  } else {
+    measure.shape = {
+      kind: 'line', a: { lon: ground.lon, lat: ground.lat },
+      b: { lon: ground.lon, lat: ground.lat },
+    };
+    measure.drag = { mode: 'new-line' };
+  }
+  measure.profile = null;
+  drawViewLabels('disk');
+  drawMeasureChart();
+  return true;
+}
+
+/** Pointer move: resize or move the shape under the pointer. */
+function measureMove(event) {
+  const drag = measure.drag;
+  const shape = measure.shape;
+  if (!drag || !shape) return false;
+  const frame = pointerFramePoint('disk', event);
+  if (!frame) return true;
+  const ground = pixelToLonLat(frame.x, frame.y);
+  if (!ground) return true;
+  if (drag.mode === 'new-line') {
+    shape.b = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'a') {
+    shape.a = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'b') {
+    shape.b = { lon: ground.lon, lat: ground.lat };
+  } else if (drag.mode === 'centre') {
+    shape.lon = ground.lon;
+    shape.lat = ground.lat;
+  } else if (drag.mode === 'radius' || drag.mode === 'new-circle') {
+    const dx = measureDistanceKm({ lon: shape.lon, lat: shape.lat }, ground);
+    shape.radiusKm = dx;
+    shape.angle = measureAzimuth(shape.lon, shape.lat, ground);
+  }
+  drawViewLabels('disk');
+  measureSchedule(140);
+  return true;
+}
+
+/** Pointer up: keep the shape if it is big enough, and read its profile. */
+function measureUp() {
+  if (!measure.drag) return false;
+  const drag = measure.drag;
+  measure.drag = null;
+  const shape = measure.shape;
+  if (shape) {
+    const tiny = shape.kind === 'line'
+      ? measureDistanceKm(shape.a, shape.b) < 0.5
+      : !(shape.radiusKm > 0.5);
+    if (tiny && (drag.mode === 'new-line' || drag.mode === 'new-circle')) {
+      // A click is not a measurement: the press cleared the old shape and has
+      // nothing to replace it with.
+      measure.shape = null;
+      measure.profile = null;
+      if (measure.timer !== null) clearTimeout(measure.timer);
+      measure.timer = null;
+      measure.token += 1;
+    }
+  }
+  drawViewLabels('disk');
+  if (measure.shape) {
+    setStatus(`测量：${measureText()}`);
+    measureSchedule(0);
+  } else {
+    drawMeasureChart();
+  }
+  return true;
+}
+
+
 /** Which label is under *point*, latest drawn first (that is what is on top). */
 function labelHitTest(viewName, point) {
   if (!regionLabelsWanted(viewName)) return null;
@@ -5150,9 +6298,9 @@ function selectOverlay(what) {
   const wasLabel = !!(overlay.selected && overlay.selected.kind === 'label');
   overlay.selected = what;
   repaintCoordReadouts();
-  // A selected crater asks the plan for its family's highlight markers.  The
+  // A selected crater asks the plan for its family's marker points.  The
   // request returns the same captions in the same places (they are not part of
-  // the layout), so this cannot make the picture jump; it only adds the halos.
+  // the layout), so this cannot make the picture jump; it only adds dots.
   if (state.labelsOn && (wasLabel || (what && what.kind === 'label'))) {
     refreshLabels();
   }
@@ -5448,22 +6596,47 @@ function composeImage(source, width, height, plan, style, orientation, marks, le
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
   }
   if (marks) {
-    if (marks.region) {
-      ctx.setTransform(scale, 0, 0, scale, 0, 0);
-      const turn = marks.orientation && marks.orientation.rotation;
-      if (turn) {
-        const cx = 0.5 * (picture.width - 1);
-        const cy = 0.5 * (picture.height - 1);
-        ctx.translate(cx, cy);
-        ctx.rotate(-turn);
-        ctx.translate(-cx, -cy);
+    if (marks.marks !== false) {
+      if (marks.region) {
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        const turn = marks.orientation && marks.orientation.rotation;
+        if (turn) {
+          const cx = 0.5 * (picture.width - 1);
+          const cy = 0.5 * (picture.height - 1);
+          ctx.translate(cx, cy);
+          ctx.rotate(-turn);
+          ctx.translate(-cx, -cy);
+        }
+        drawRegionMarks(ctx, marks.fontPx || 12, picture.width, picture.height,
+          marks.orientation ? marks.orientation.mirror : 'none');
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      } else {
+        drawDiskMarks(ctx, marks.fontPx || 12,
+          diskGeomFor(canvas.width, canvas.height));
       }
-      drawRegionMarks(ctx, marks.fontPx || 12, picture.width, picture.height,
-        marks.orientation ? marks.orientation.mirror : 'none');
+    }
+    // 显示掩星 is part of the geometric layer, so the save's 几何 switch takes
+    // the track into the file exactly as it takes the terminator and poles.
+    if (marks.occultation) {
+      const frame = { width: picture.width, height: picture.height };
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      if (marks.region) {
+        const turn = marks.orientation && marks.orientation.rotation;
+        if (turn) {
+          const cx = 0.5 * (picture.width - 1);
+          const cy = 0.5 * (picture.height - 1);
+          ctx.translate(cx, cy);
+          ctx.rotate(-turn);
+          ctx.translate(-cx, -cy);
+        }
+        drawOccultationOverlay(ctx, 'raw', frame,
+          marks.orientation ? marks.orientation.mirror : 'none', false,
+          marks.fontPx);
+      } else {
+        drawOccultationOverlay(ctx, 'disk', frame, 'none', false,
+          marks.fontPx);
+      }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-    } else {
-      drawDiskMarks(ctx, marks.fontPx || 12,
-        diskGeomFor(canvas.width, canvas.height));
     }
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -5544,13 +6717,20 @@ function savedImageBlob(target, callback) {
   plan = annotate
     ? withManualPlan(plan, view, style, source.width, source.height) : plan;
   // Geometric marks are their own layer: the disk uses 地貌 (the same master
-  // switch as on screen), the close-ups use their own 几何 switch.
+  // switch as on screen), the close-ups use their own 几何 switch.  The live
+  // occultation track belongs to that layer, so 几何 takes it into the file.
   const wantMarks = target === 'disk'
     ? (annotate && marksWanted()) : regionMarksWanted();
-  const marks = wantMarks ? {
-    fontPx: plan && plan.font_px ? plan.font_px : 12,
+  const wantOccultation = state.occultationTrack && !!state.planetTrack
+    && (target === 'disk' ? $('disk-annotated').checked
+      : ($('download-marks').checked
+        && !(state.regionInfo && state.regionInfo.orthorectified)));
+  const marks = (wantMarks || wantOccultation) ? {
+    fontPx: plan && plan.font_px ? plan.font_px : labelFrameFontPx(view),
     region: target !== 'disk',
     orientation: target === 'proc' ? frameOrientation() : null,
+    marks: wantMarks,
+    occultation: wantOccultation,
   } : null;
   const canvas = composeImage(source, wanted.width, wanted.height, plan,
     style, target === 'proc' ? frameOrientation() : null,
@@ -5639,7 +6819,10 @@ async function saveDisk() {
   // switched on the terminator can still save it into the file.
   const annotate = $('disk-annotated').checked && state.labelsOn;
   const wantMarks = $('disk-annotated').checked && marksWanted();
-  const annotated = annotate || wantMarks;
+  // 显示掩星 rides with the geometric layer in the saved file.
+  const wantOccultation = $('disk-annotated').checked && state.occultationTrack
+    && !!state.planetTrack;
+  const annotated = annotate || wantMarks || wantOccultation;
   const suffix = component === 'image' ? '' : '-' + component;
   const componentName = component === 'sunlit' ? '只出阳光分量' : '';
   const name = `moon-disk${suffix}-${width}.${format.extension}`;
@@ -5649,7 +6832,8 @@ async function saveDisk() {
   // side's brightness centroid, and only sideways: see litCentre().
   let centred = null;
   let shift = null;
-  if ($('disk-centre-lit').checked && !annotate && !wantMarks) {
+  if ($('disk-centre-lit').checked && !annotate && !wantMarks
+      && !wantOccultation) {
     const fraction = source.geometry && source.geometry.disk_radius_fraction;
     const centre = litCentre(source.image, fraction);
     if (centre) {
@@ -5671,8 +6855,8 @@ async function saveDisk() {
       `${componentName ? '，' + componentName : ''}）`);
     return;
   }
-  if (!centred && !annotate && !wantMarks && !hdr && !smooth
-      && format.type === 'image/png') {
+  if (!centred && !annotate && !wantMarks && !wantOccultation && !hdr
+      && !smooth && format.type === 'image/png') {
     // Nothing to draw on it: the render *is* the file, at full resolution and
     // without passing through a canvas that a 10 000 px picture may not fit in.
     downloadUrl(source.url, name);
@@ -5709,7 +6893,11 @@ async function saveDisk() {
     }
     const canvas = centred || composeImage(source.image, width, width, plan,
       style, null,
-      wantMarks ? { fontPx: plan ? plan.font_px : 12 } : null, false, smooth);
+      (wantMarks || wantOccultation) ? {
+        fontPx: plan ? plan.font_px : exportFont,
+        marks: wantMarks,
+        occultation: wantOccultation,
+      } : null, false, smooth);
     if (hdr) {
       // The gain map comes from the render that made this frame.  If it is not
       // here, say *that* rather than posting a request the server can only
@@ -6045,7 +7233,6 @@ function drawCorrectedMagnifier(ctx, canvas, view, source, ellipse) {
   const radiusKm = camera.radiusKm;
   const ratio = source && DISK.width ? source.width / DISK.width : 1;
   let written = 0;
-  let luminance = 0;
   for (let py = 0; py < outH; py += 1) {
     const v = (outH / 2 - (py + 0.5)) / halfH;
     for (let px = 0; px < outW; px += 1) {
@@ -6078,15 +7265,17 @@ function drawCorrectedMagnifier(ctx, canvas, view, source, ellipse) {
           + pixels.data[next + channel] * fx;
         const bottom = pixels.data[below + channel] * (1 - fx)
           + pixels.data[belowNext + channel] * fx;
-        const value = top * (1 - fy) + bottom * fy;
-        data[index + channel] = value;
-        luminance += value;
+        data[index + channel] = top * (1 - fy) + bottom * fy;
       }
       data[index + 3] = 255;
       written += 1;
     }
   }
-  if (!written || luminance / written < 0.5) return false;
+  // A genuinely black patch (the night side) is a valid answer, so only an
+  // empty warp falls back.  The old mean-luminance test sent a dark corrected
+  // ellipse down the uncorrected path, where the mask no longer fitted the
+  // window and the field appeared sliced at the top and bottom.
+  if (!written) return false;
   const buffer = document.createElement('canvas');
   buffer.width = outW;
   buffer.height = outH;
@@ -6172,16 +7361,35 @@ function drawMagnifier() {
     if (selectionEllipse()) {
       // A classic ellipse is a sky-plane shape, so the mask is simply the
       // inscribed ellipse in the window; it may run past the limb with the
-      // picture, exactly like an uncorrected square box.
+      // picture, exactly like an uncorrected square box.  A corrected ellipse
+      // is the ground patch, and its standard ellipse has to be fitted inside
+      // the window -- using the box's half sizes made it taller than the
+      // window and sliced a strip off the top and bottom.
+      const ground = selectionGroundEllipse();
       ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.scale(view.scale * dpr, view.scale * dpr);
-      ctx.beginPath();
-      ctx.rect(-1e7, -1e7, 2e7, 2e7);
-      // The transform has already moved the origin to the window centre and
-      // scaled it; using the source centre here put the ellipse off-canvas and
-      // filled the whole window with the outer rect.
-      ctx.ellipse(0, 0, view.halfW, view.halfH, 0, 0, Math.PI * 2);
+      if (ground) {
+        const aspect = ground.halfW / Math.max(ground.halfH, 1e-9);
+        const outW = canvas.width, outH = canvas.height;
+        let ellipseW = outW;
+        let ellipseH = outW / Math.max(aspect, 1e-9);
+        if (ellipseH > outH) {
+          ellipseH = outH;
+          ellipseW = outH * aspect;
+        }
+        ctx.beginPath();
+        ctx.rect(0, 0, outW, outH);
+        ctx.ellipse(outW / 2, outH / 2, ellipseW / 2, ellipseH / 2,
+          0, 0, Math.PI * 2);
+      } else {
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.scale(view.scale * dpr, view.scale * dpr);
+        ctx.beginPath();
+        ctx.rect(-1e7, -1e7, 2e7, 2e7);
+        // The transform has already moved the origin to the window centre and
+        // scaled it; using the source centre here put the ellipse off-canvas
+        // and filled the whole window with the outer rect.
+        ctx.ellipse(0, 0, view.halfW, view.halfH, 0, 0, Math.PI * 2);
+      }
       ctx.fillStyle = '#07090d';
       ctx.fill('evenodd');
       ctx.restore();
@@ -6635,8 +7843,40 @@ function skyOptions() {
     // its circle is a cleaner mark on a busy sky.
     moonTrack: $('sky-moon-track') ? $('sky-moon-track').checked : true,
     sunTrack: $('sky-sun-track') ? $('sky-sun-track').checked : true,
+    planets: $('sky-planets') ? $('sky-planets').checked : true,
     phaseFrame: $('sky-phase-frame') ? $('sky-phase-frame').checked : true,
   };
+}
+
+/** The planets that fall inside the current chart, with their labels. */
+function skyPlanetItems(data, projection, plot, view) {
+  const items = [];
+  const planets = (data && data.planets) || [];
+  const middle = view
+    ? 0.5 * (Number(view.azMin) + Number(view.azMax)) : NaN;
+  for (const planet of planets) {
+    let azimuth = Number(planet.azimuth_deg);
+    const elevation = Number(planet.elevation_deg);
+    if (!Number.isFinite(azimuth) || !Number.isFinite(elevation)) continue;
+    // A planet below the horizon is not part of the sky the chart shows.
+    if (elevation < -0.5) continue;
+    // The chart's azimuth axis is unwrapped around the Moon and may run past
+    // 0/360; put the planet on the equivalent side of that same axis.
+    if (Number.isFinite(middle)) {
+      azimuth = middle + skyWrap180(azimuth - middle);
+    }
+    const x = projection.x(azimuth);
+    const y = projection.y(elevation);
+    if (x < plot.x - 14 || x > plot.x + plot.w + 14
+        || y < plot.y - 14 || y > plot.y + plot.h + 14) continue;
+    items.push({
+      key: planet.key,
+      text: planet.name_zh || planet.name || planet.key,
+      colour: planet.colour || '#cfe0ff',
+      x, y,
+    });
+  }
+  return items;
 }
 
 /** Does the Sun belong in the frame at all? */
@@ -7398,8 +8638,42 @@ function paintSkyChart(ctx, area, data, view, options) {
   ctx.lineWidth = 1;
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
 
-  // Labels last, so their boxes sit above every line they describe.
+  // Planets: a coloured dot and its name, drawn last so a busy track cannot
+  // bury them.  Their boxes join the obstacles, so a time label never lands on
+  // top of a planet's name.
   const obstacles = [];
+  if (options.planets !== false) {
+    const planets = skyPlanetItems(data, projection, plot, view);
+    ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
+    for (const planet of planets) {
+      const x = skyClamp(planet.x, plot.x + 2, plot.x + plot.w - 2);
+      const y = skyClamp(planet.y, plot.y + 2, plot.y + plot.h - 2);
+      ctx.beginPath();
+      ctx.arc(x, y, 2.6, 0, Math.PI * 2);
+      ctx.fillStyle = planet.colour;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(7,9,13,.82)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      const width = ctx.measureText(planet.text).width;
+      let textX = x + 5;
+      if (textX + width > plot.x + plot.w - 2) textX = x - 5 - width;
+      textX = Math.max(plot.x + 2, textX);
+      const textY = skyClamp(y, plot.y + 7, plot.y + plot.h - 3);
+      ctx.fillStyle = 'rgba(9,12,18,.68)';
+      ctx.fillRect(textX - 1.5, textY - 6.5, width + 3, 12);
+      ctx.fillStyle = planet.colour;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(planet.text, textX, textY);
+      obstacles.push({
+        x: Math.min(x, textX) - 3, y: textY - 8,
+        w: Math.max(x, textX + width) - Math.min(x, textX) + 6, h: 16,
+      });
+    }
+  }
+
+  // Labels last, so their boxes sit above every line they describe.
   if (moonPoint.x > plot.x && moonPoint.x < plot.x + plot.w
       && moonPoint.y > plot.y && moonPoint.y < plot.y + plot.h) {
     const reach = moonMarkerRadius + 2.5;
@@ -12031,6 +13305,27 @@ let labelSeq = 0;
 // is the same result with one request.
 let suppressClassRefresh = false;
 
+/** Re-lay the names after the picture's scale settles.
+ *
+ *  The plan is a function of the *frame* pixel size, which follows the zoom:
+ *  magnifying the Moon makes the type smaller in frame pixels, which makes
+ *  more names fit.  Repainting the old plan at the new scale kept the type
+ *  large (so labels the reader had just zoomed in to see were still absent)
+ *  until some other change happened to ask for a fresh plan.  A short debounce
+ *  makes a wheel burst one request, and the lock keeps its promise that a
+ *  locked layout never moves.
+ */
+let labelReplanTimer = null;
+function scheduleLabelReplan() {
+  if (!state.labelsOn || labelLockOn()) return;
+  if (labelReplanTimer) clearTimeout(labelReplanTimer);
+  labelReplanTimer = setTimeout(() => {
+    labelReplanTimer = null;
+    if (!state.labelsOn || labelLockOn()) return;
+    refreshLabels();
+  }, 260);
+}
+
 async function refreshLabels() {
   const seq = ++labelSeq;
   if (!state.labelsOn) {
@@ -12165,9 +13460,32 @@ function toggleLabels() {
  * not linear, so at high zoom, and anywhere away from the sub-observer point,
  * the box would travel a different distance from the cursor.
  */
+/** Lon/lat for a selection centre, sliding to the limb when the pointer is in
+ *  the sky.
+ *
+ * Without 投影修正 the box is a rectangle in the sky, so it has to be allowed
+ * to cover the black area beyond the limb.  The camera target still has to be
+ * a point on the Moon, so an off-disc pointer pins the *centre* to the nearest
+ * limb point while the box's size (which comes from pixel distances) keeps
+ * growing into the sky.  With correction on, the old refusal stays: a ground
+ * patch cannot be centred off the ground.
+ */
+function centreLonLat(px, py) {
+  const direct = pixelToLonLat(px, py);
+  if (direct) return direct;
+  if (selectionCorrected() && state.selection) return null;
+  const g = diskGeom();
+  const dx = px - g.cx;
+  const dy = py - g.cy;
+  const distance = Math.hypot(dx, dy);
+  if (!(distance > 1e-9)) return null;
+  const inside = Math.max(0, Math.min(1, (g.radius - 0.5) / distance));
+  return pixelToLonLat(g.cx + dx * inside, g.cy + dy * inside);
+}
+
 function movedSelection(start, dx, dy) {
   const centre = lonLatToPixel(start.lon, start.lat);
-  const moved = centre ? pixelToLonLat(centre.x + dx, centre.y + dy) : null;
+  const moved = centre ? centreLonLat(centre.x + dx, centre.y + dy) : null;
   if (!moved) return null;
   return {
     ...start,
@@ -12254,7 +13572,7 @@ function beginSelectionDrag(p, allowNew) {
     state.dragging = { mode: 'move', origin: p, start: { ...state.selection } };
   } else {
     if (!allowNew) return false;
-    const target = pixelToLonLat(p.x, p.y);
+    const target = centreLonLat(p.x, p.y);
     if (!target) return false;
     // A fresh box grows outwards from where the drag started; it must not
     // follow the cursor, or the selection slides across the Moon as you draw it.
@@ -12274,12 +13592,35 @@ $('body-disk').addEventListener('pointerdown', (event) => {
   const target = event.target;
   if (target && target.closest
       && target.closest('.view-toolbar, .view-3d, .zoom, .disk-bottom-hud, .selection-inputs')) return;
+  // 测量工具 takes the whole left button while it is armed: the press draws or
+  // grabs a handle, and Ctrl-drag (the manual-anchor gesture) draws a circle.
+  if (measure.on && !state.view3d && measureDown(event)) {
+    $('body-disk').setPointerCapture(event.pointerId);
+    event.preventDefault();
+    return;
+  }
   if (state.view3d) {
     if (event.button !== 0) return;
-    // A press on the drawn box edits it; an empty press turns the globe.  Alt
-    // is the way to start a new box on the sphere without leaving 3D.
+    // Shift is always "turn the globe", even before the first box exists.
+    if (event.shiftKey) {
+      state.globeDrag = {
+        x: event.clientX, y: event.clientY,
+        lon: state.globe3d.lon, lat: state.globe3d.lat,
+      };
+      $('body-disk').setPointerCapture(event.pointerId);
+      event.preventDefault();
+      return;
+    }
+    // A press on the drawn box edits it.  With a box present an empty press
+    // turns the globe (Alt always starts a new one); with no box at all an
+    // empty press draws the first one, because there is nothing to rotate.
     const globePoint = canvasPoint(event);
-    if (beginSelectionDrag(globePoint, !!event.altKey)) {
+    // With no box yet there is nothing to rotate around: an empty drag draws
+    // the first one.  Once a box exists, an empty drag turns the globe and Alt
+    // starts a new box, as before.
+    const allowNew = !!event.altKey || !state.selection;
+    if (!state.selectionHidden
+        && beginSelectionDrag(globePoint, allowNew)) {
       $('body-disk').setPointerCapture(event.pointerId);
       drawDisk();
       event.preventDefault();
@@ -12313,6 +13654,9 @@ $('body-disk').addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
+  // A hidden box is not a control: a drag on the picture must not grab
+  // something the reader cannot see (and must not start a second one).
+  if (state.selectionHidden) return;
   const p = canvasPoint(event);
   if (!beginSelectionDrag(p, true)) return;
   $('body-disk').setPointerCapture(event.pointerId);
@@ -12337,6 +13681,7 @@ $('body-disk').addEventListener('pointermove', (event) => {
     event.preventDefault();
     return;
   }
+  if (measure.drag && measureMove(event)) { event.preventDefault(); return; }
   if (overlayMove(event)) { event.preventDefault(); return; }
   const drag = state.dragging;
   if (!drag) {
@@ -12369,7 +13714,7 @@ $('body-disk').addEventListener('pointermove', (event) => {
     halfH = Math.max(6, halfH);
     const midX = (p.x + drag.anchorPx.x) / 2;
     const midY = (p.y + drag.anchorPx.y) / 2;
-    const mid = pixelToLonLat(midX, midY);
+    const mid = centreLonLat(midX, midY);
     if (mid) {
       state.selection = {
         lon: mid.lon, lat: mid.lat,
@@ -12396,7 +13741,7 @@ $('body-disk').addEventListener('pointermove', (event) => {
       { centre: drag.anchor, rotation: drag.rotation },
       Math.sign(local.u) * halfW, Math.sign(local.v) * halfH
     );
-    const midLonLat = pixelToLonLat(mid.x, mid.y);
+    const midLonLat = centreLonLat(mid.x, mid.y);
     if (midLonLat) {
       state.selection = {
         ...start,
@@ -12427,6 +13772,7 @@ function endDrag(event) {
     $('body-disk').style.cursor = '';
     return;
   }
+  if (measureUp()) { drawAllLabels(); return; }
   if (overlayUp()) { drawAllLabels(); return; }
   if (!state.dragging) return;
   state.dragging = null;
@@ -12449,7 +13795,47 @@ $('body-disk').addEventListener('pointerleave', () => clearCoordReadout('disk'))
 $('body-disk').addEventListener('contextmenu', (event) => {
   if (event.ctrlKey || event.metaKey) event.preventDefault();
 });
+/** The 显示掩星 time label under the pointer, in disc-frame pixels, or null.
+ *
+ * The labels are painted on the canvas rather than the DOM, so their boxes are
+ * recorded by :func:`drawOccultationTick` and hit-tested here.  This is what
+ * makes a double-click on 入/出 jump the main clock to that contact.
+ */
+function occultationTimeAt(event) {
+  if (!occultationOverlayWanted('disk') || !occultationLabelBoxes.length) {
+    return null;
+  }
+  const p = pointerFramePoint('disk', event);
+  if (!p) return null;
+  for (const box of occultationLabelBoxes) {
+    if (p.x >= box.left && p.x <= box.right
+        && p.y >= box.top && p.y <= box.bottom) return box;
+  }
+  return null;
+}
+
+/** Put the main page's clock on one 显示掩星 time label. */
+function applyOccultationTick(tick) {
+  if (!tick || !Number.isFinite(tick.ms)) return false;
+  const tz = Number($('tz').value) || 0;
+  setWhenField(new Date(tick.ms + tz * 3600 * 1000)
+    .toISOString().slice(0, 19));
+  setStatus(`时间已设为 ${$('when').value.replace('T', ' ')}（${tick.text}）`);
+  return true;
+}
+
+/** The labels currently hit-testable, for the harness and for diagnostics. */
+function occultationTimeBoxes() {
+  return occultationLabelBoxes.slice();
+}
+
 $('body-disk').addEventListener('dblclick', (event) => {
+  const tick = occultationTimeAt(event);
+  if (tick) {
+    applyOccultationTick(tick);
+    event.preventDefault();
+    return;
+  }
   handleLabelDoubleClick('disk', event);
 });
 
@@ -12517,7 +13903,7 @@ function resizeByEdge(drag, p, radiusPx) {
     halfH = half;
   }
   const centre = boxToScreen(frame, shiftU, shiftV);
-  const mid = pixelToLonLat(centre.x, centre.y);
+  const mid = centreLonLat(centre.x, centre.y);
   if (!mid) return null;
   return {
     ...drag.start,
@@ -12530,6 +13916,11 @@ function resizeByEdge(drag, p, radiusPx) {
 }
 
 function updateCursor(event) {
+  if (!state.view3d && measure.on) {
+    const point = overlayPoint('disk', event);
+    $('body-disk').style.cursor = measureHitTest(point) ? 'move' : 'crosshair';
+    return;
+  }
   // Ctrl / ⌘ means "drop a manual mark", and that gesture is available on the
   // box and on a name as well.  Leaving the selection's move cursor in place
   // over the box made the pointer promise the wrong action.
@@ -12553,14 +13944,34 @@ function updateCursor(event) {
     $('body-disk').style.cursor = 'move';
     return;
   }
-  const hit = state.selection ? hitTest(p) : null;
+  const hit = state.selection && !state.selectionHidden ? hitTest(p) : null;
   const cursors = {
     rotate: 'grab', corner: 'nwse-resize', move: 'move',
     'edge-l': 'ew-resize', 'edge-r': 'ew-resize',
     'edge-t': 'ns-resize', 'edge-b': 'ns-resize',
   };
   $('body-disk').style.cursor = cursors[hit]
-    || (state.view3d ? 'grab' : 'crosshair');
+    || (state.view3d ? 'grab'
+      : (state.selectionHidden ? 'default' : 'crosshair'));
+}
+
+/** Show or put away the selection box on the full disk.
+ *
+ *  The box is a control, not part of the picture: the reader hides it to look
+ *  at the ground it was covering, and the button's own label says which way the
+ *  next press goes.  The selection itself, the close-up window and the numbers
+ *  in the bottom row are untouched -- this is a switch on the drawing.
+ */
+function setSelectionVisible(visible) {
+  state.selectionHidden = !visible;
+  const button = $('selection-visible');
+  if (button) {
+    button.textContent = state.selectionHidden ? '显示选框' : '隐藏选框';
+    button.setAttribute('aria-pressed', String(state.selectionHidden));
+    button.title = state.selectionHidden
+      ? '在全月面上显示选框' : '在月面上隐藏选框，只看画面';
+  }
+  drawDisk();
 }
 
 function wrap180(x) {
@@ -13405,7 +14816,7 @@ const SETTING_FIELDS = [
   'out-px', 'out-ref', 'out-kmpx', 'out-samples', 'surface-texture',
   'terrain-denoise', 'parallel',
   'sky-span', 'sky-label-step', 'sky-labels', 'sky-elongation', 'sky-closeup',
-  'sky-moon-track', 'sky-sun-track', 'sky-phase-frame',
+  'sky-moon-track', 'sky-sun-track', 'sky-planets', 'sky-phase-frame',
   'sky-save-ref', 'sky-save-px',
   'seeing', 'seeing-num',
   'blur-strength', 'diffraction', 'sharpen-radius', 'sharpen-radius-num',
@@ -13895,6 +15306,7 @@ function applyZoom(view) {
   // is the blur this layer was introduced to remove.
   drawViewLabels(view.name);
   if (view.name === 'disk') drawSelection();
+  scheduleLabelReplan();
 }
 
 function setZoom(name, value) {
@@ -14176,6 +15588,12 @@ async function runProcess() {
     state.downloads.proc = payload.image;
     sizeCanvas(RESULT, state.resultImage);
     fitCanvas(views.proc);
+    // The region block describes the frame that just arrived, and both label
+    // overlays -- including the occultation track -- project through that
+    // camera.  It has to be in ``state.regionInfo`` before the first paint,
+    // otherwise a fresh close-up is drawn against the previous frame's camera
+    // and the track can vanish until the layer is toggled.
+    describeResult(payload.info, null);
     if (payload.image_raw) {
       state.rawImage = await loadImage(payload.image_raw);
       state.rawComponent = (payload.info && payload.info.component) || component;
@@ -14191,7 +15609,6 @@ async function runProcess() {
     // -- which is how a component switch could hand back the old component.
     updateDownloadLink();
     drawResult();
-    describeResult(payload.info, null);
     // A component is worth saying out loud: the picture on screen is not the
     // whole frame, and it is the one the save button will write.
     setStatus(component === 'image'
@@ -14318,9 +15735,13 @@ async function acceptRender(payload) {
   sizeCanvas(RESULT, state.resultImage);
   fitCanvas(views.raw);
   fitCanvas(views.proc);
+  // The camera block belongs to this frame; put it in place before either
+  // pane paints, or an overlay projected through the old camera (a live
+  // occultation track, most visibly) is drawn nowhere and stays gone until
+  // the reader toggles the layer.
+  describeResult(payload.info, null);
   drawRaw();
   drawResult();
-  describeResult(payload.info, null);
   state.downloads.raw = payload.image_raw;
   state.downloads.proc = payload.image;
   // The file's pixel count is the user's number; all this does is keep it a
@@ -15229,7 +16650,9 @@ function syncRangeTime(fieldId, label, reload) {
     setStatus('全月面的日期时间还是空的，先设一个时刻', 'error');
     return;
   }
-  field.value = source;
+  // The range boxes are minute-resolution; the observer's instant may carry
+  // seconds, which belong to the observation, not to a forecast range.
+  field.value = source.length > 16 ? source.slice(0, 16) : source;
   if (reload) loadEvents();
   setStatus(`${label}已同步为 ${source}`);
 }
@@ -15244,7 +16667,10 @@ function buildEventKinds() {
     ['full_moon', '满月'], ['last_quarter', '下弦月'],
     ['supermoon', '超级月亮'],
     ['annual_extremes', '年度之最'],
-    ['lunar_eclipse', '月食'], ['xvl', '月面 X/V/L'],
+    ['lunar_eclipse', '月食'],
+    ['planet_conjunction', '行星合月'],
+    ['planet_occultation', '月掩行星'],
+    ['xvl', '月面 X/V/L'],
     ['jewelled_handle', 'the jewelled handle'],
     ['eyes_of_clavius', 'Eyes of Clavius'],
     ['cheshire_moon', 'Cheshire Moon（Wet Moon）'],
@@ -15304,9 +16730,10 @@ async function loadEvents() {
       const payload = await post('/api/crescents', {
         when: whenPayload(), start, end, limit: 15,
       });
-      state.eventTable = (payload.items || []).map(crescentEventRow);
+      state.crescentItems = payload.items || [];
+      state.eventTable = state.crescentItems.map(crescentEventRow);
       state.eventImported = false;
-      renderCrescents(payload.items || []);
+      renderCrescents(state.crescentItems);
       afterEventRows();
     } catch (error) {
       const row = document.createElement('div');
@@ -15322,8 +16749,29 @@ async function loadEvents() {
     const payload = await post('/api/events', {
       when: whenPayload(), kind: state.eventKind, start, end,
     });
+    state.crescentItems = [];
     state.eventTable = (payload.events || []).map(eventRowFromForecast);
     state.eventImported = false;
+    // 显示掩星 only has something to draw after this forecast has been asked
+    // for: keep the occultations (the ones with a contact window) so the layer
+    // can find the event the main page's clock is inside.
+    if (state.eventKind === 'planet_occultation') {
+      state.occultationEvents = (payload.events || [])
+        .filter((event) => event.window_start_utc && event.window_end_utc
+          && event.metrics && event.metrics.planet)
+        .map((event) => ({
+          window_start_utc: event.window_start_utc,
+          window_end_utc: event.window_end_utc,
+          label: event.label,
+          metrics: event.metrics,
+        }));
+      syncOccultationTrack();
+    } else if (state.eventKind === 'planet_conjunction') {
+      // The conjunction half of the split has no covered event, so it cannot
+      // leave a stale occultation track from an earlier forecast on screen.
+      state.occultationEvents = [];
+      syncOccultationTrack();
+    }
     renderEvents(payload.events || []);
     afterEventRows();
   } catch (error) {
@@ -15378,6 +16826,10 @@ function crescentEventRow(item) {
       illumination_percent: Number.isFinite(illuminate) ? illuminate : null,
       altitude_deg: Number.isFinite(elevation) ? elevation : null,
       elongation_deg: Number.isFinite(elongation) ? elongation : null,
+      // The session's best moment carries the Sun's altitude too; 白昼 is the
+      // same question the server's event rows answer.
+      daylight: Number.isFinite(Number(item.sun_elevation_deg))
+        ? Number(item.sun_elevation_deg) > 0 : null,
     },
     window_start_utc: item.window_start_utc || null,
     window_end_utc: item.window_end_utc || null,
@@ -15397,6 +16849,19 @@ function renderCrescents(items) {
   if (!host) return;
   host.innerHTML = '';
   const tz = Number($('tz').value) || 0;
+  const shown = state.eventVisibleOnly
+    ? (items || []).filter((item) => {
+      const elevation = Number(item.moon_elevation_deg);
+      return !Number.isFinite(elevation) || elevation > 0;
+    })
+    : (items || []);
+  if (!shown.length && items && items.length) {
+    const line = document.createElement('div');
+    line.className = 'event-row';
+    line.textContent = '没有可见事件';
+    host.appendChild(line);
+    return;
+  }
   const clock = (iso) => {
     const stamp = Date.parse(iso);
     if (!Number.isFinite(stamp)) return '—';
@@ -15404,7 +16869,7 @@ function renderCrescents(items) {
   };
   const day = (iso) => new Date(Date.parse(iso) + tz * 3600 * 1000)
     .toISOString().slice(5, 10);
-  for (const item of items) {
+  for (const item of shown) {
     const row = document.createElement('div');
     row.className = 'event-row crescent-row';
     row.dataset.night = item.night === '残月' ? 'waning' : 'waxing';
@@ -15425,13 +16890,24 @@ function renderCrescents(items) {
       const stamp = Date.parse(item.best_utc);
       if (!Number.isFinite(stamp)) return;
       $('when').value = new Date(stamp + tz * 3600 * 1000)
-        .toISOString().slice(0, 16);
+        .toISOString().slice(0, 19);
       if ($('auto-refresh').checked) refreshDisk();
       setStatus(`时间已设为 ${$('when').value}（${item.night}，照亮 `
         + `${fmt(item.illumination_percent, 2)}%）`);
     });
     host.appendChild(row);
   }
+}
+
+/** Is this forecast row visible from the observer's site? */
+function eventVisible(row) {
+  return !!row && row.observable !== false;
+}
+
+/** The rows the 筛选可见 switch lets through. */
+function visibleEventRows(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  return state.eventVisibleOnly ? list.filter(eventVisible) : list;
 }
 
 /** The list itself.  One row per instant, local time, grey when it is down. */
@@ -15443,7 +16919,15 @@ function renderEvents(events) {
   const host = $('event-list');
   host.innerHTML = '';
   const tz = Number($('tz').value) || 0;
-  for (const event of events) {
+  const shown = visibleEventRows(events);
+  if (!shown.length && events && events.length) {
+    const line = document.createElement('div');
+    line.className = 'event-row';
+    line.textContent = '没有可见事件';
+    host.appendChild(line);
+    return;
+  }
+  for (const event of shown) {
     const row = document.createElement('div');
     row.className = 'event-row';
     row.dataset.observable = event.observable ? 'true' : 'false';
@@ -15484,7 +16968,9 @@ function eventLocalText(iso, tz, withDate = true) {
   const stamp = Date.parse(iso);
   if (!Number.isFinite(stamp)) return '—';
   const local = new Date(stamp + tz * 3600 * 1000).toISOString();
-  return withDate ? local.slice(5, 16).replace('T', ' ')
+  // The year is part of the date: a forecast range may cross a New Year, and
+  // a table that says only 05-01 cannot be read without guessing.
+  return withDate ? local.slice(0, 16).replace('T', ' ')
     : local.slice(11, 16);
 }
 
@@ -15506,8 +16992,11 @@ function setMainTimeFromEventRow(row) {
   }
   const tz = Number($('tz').value) || 0;
   $('when').value = new Date(stamp + tz * 3600 * 1000)
-    .toISOString().slice(0, 16);
+    .toISOString().slice(0, 19);
   if ($('auto-refresh').checked) refreshDisk();
+  // Jumping to a row is how a reader enters an occultation; the layer has to
+  // notice the clock moved even though no change event was fired.
+  syncOccultationTrack();
   const label = (row && row.label) || '事件';
   setStatus(`时间已设为 ${$('when').value.replace('T', ' ')}（${label}）`);
   const status = $('event-window-status');
@@ -15517,9 +17006,41 @@ function setMainTimeFromEventRow(row) {
 /** Refresh the count and the table after a forecast or an import. */
 function afterEventRows() {
   const count = $('event-count');
-  if (count) count.textContent = state.eventTable.length
-    ? `${state.eventTable.length} 条` : '无结果';
+  const total = state.eventTable.length;
+  const shown = visibleEventRows(state.eventTable).length;
+  if (count) {
+    count.textContent = total
+      ? (state.eventVisibleOnly ? `${shown} / ${total} 条` : `${total} 条`)
+      : '无结果';
+  }
   renderEventWindowRows();
+}
+
+/** Keep both 筛选可见 buttons in step with the one state they share. */
+function syncEventVisibleButtons() {
+  for (const id of ['event-visible-only', 'event-window-visible-only']) {
+    const button = $(id);
+    if (button) button.setAttribute('aria-pressed', String(state.eventVisibleOnly));
+  }
+}
+
+/** 筛选可见: show only the rows the observer's horizon lets them see.
+ *
+ * The sidebar list, the table window and an imported list are three views of
+ * the same rows, so one switch re-renders whichever one is live.  The count
+ * keeps both numbers ("可见 / 全部") rather than hiding how much was filtered.
+ */
+function setEventVisibleOnly(on) {
+  state.eventVisibleOnly = !!on;
+  syncEventVisibleButtons();
+  if (state.eventImported) {
+    renderImportedEventList();
+  } else if (state.eventKind === 'crescent') {
+    renderCrescents(state.crescentItems);
+  } else {
+    renderEvents(state.eventTable);
+  }
+  afterEventRows();
 }
 
 /** Date and time separately, so the table can give each its own column. */
@@ -15527,7 +17048,7 @@ function eventLocalParts(iso, tz) {
   const stamp = Date.parse(iso);
   if (!Number.isFinite(stamp)) return { date: '—', time: '—' };
   const local = new Date(stamp + tz * 3600 * 1000).toISOString();
-  return { date: local.slice(5, 10), time: local.slice(11, 16) };
+  return { date: local.slice(0, 10), time: local.slice(11, 16) };
 }
 
 /* The table columns, one definition per kind of event.  The request asked for
@@ -15545,7 +17066,8 @@ const EVENT_COLUMNS = {
   duration: '持续时长', elongation: '距角', colongitude: '余经度',
   ecliptic: '黄道-地平夹角', equator: '月球赤道-地平夹角',
   rise: '月升月落', grade: '可见程度', margin: '离外缘（°）',
-  solarIncidence: '太阳入射角', detail: '备注',
+  solarIncidence: '太阳入射角', daylight: '白昼', detail: '备注',
+  separation: '距月心（°）', planetDiameter: '行星视直径（″）',
 };
 
 const PHASE_COLUMNS = ['date', 'time', 'label', 'age', 'lunar', 'phaseAngle',
@@ -15583,19 +17105,34 @@ const EVENT_COLUMN_SETS = {
   libration_target: ['date', 'time', 'label', 'start', 'end', 'duration',
     'grade', 'margin', 'altitude', 'azimuth', 'illumination',
     'solarIncidence'],
+  planet_conjunction: ['date', 'time', 'label', 'separation', 'planetDiameter',
+    'altitude', 'azimuth', 'illumination'],
+  planet_occultation: ['date', 'label', 'start', 'end', 'duration',
+    'separation', 'planetDiameter', 'altitude', 'azimuth', 'illumination'],
   crescent: ['date', 'time', 'label', 'illumination', 'best', 'start', 'end',
     'altitude', 'azimuth', 'elongation', 'age', 'lunar', 'phaseAngle',
     'diameter', 'distance', 'surfaceBrightness'],
 };
 
 function eventColumnsFor(kind) {
-  const columns = EVENT_COLUMN_SETS[kind]
+  const base = EVENT_COLUMN_SETS[kind]
     || ['date', 'time', 'label', 'altitude', 'detail'];
+  // 白昼 is its own column on every forecast: a prose note in 备注 meant the
+  // reader had to scan the last cell to find the one property that decides
+  // whether the event can be seen at all.  It sits immediately before 备注
+  // when that column exists, so the two kinds of "note" stay separable.
+  const columns = base.filter((key) => key !== 'detail');
+  if (!columns.includes('daylight')) columns.push('daylight');
   // 备注 is appended to every forecast except tables whose columns already
-  // carry their state/geometry (Cheshire and limb-target windows).
+  // carry their state/geometry (Cheshire and limb-target windows), and the
+  // planet tables -- 距月心 and 行星视直径 are columns there, so an empty
+  // prose cell beside them would be a column of nothing.
   if (kind === 'cheshire_moon' || kind === 'libration_target'
-      || columns.includes('detail')) return columns;
-  return [...columns, 'detail'];
+      || kind === 'planet_conjunction' || kind === 'planet_occultation') {
+    return columns;
+  }
+  columns.push('detail');
+  return columns;
 }
 
 /** One numeric metric, or the row's legacy field when the CSV had none. */
@@ -15626,6 +17163,8 @@ function eventMetric(row, key) {
     equator: 'moon_equator_horizon_angle_deg', margin: 'margin_deg',
     solarIncidence: 'solar_incidence_deg',
     axis: 'moon_axis_horizon_angle_deg',
+    separation: 'separation_deg',
+    planetDiameter: 'planet_diameter_arcsec',
   }[key];
   if (!field) return null;
   const raw = metrics[field];
@@ -15659,6 +17198,9 @@ function eventSortValue(row, key) {
     return value === true ? 1 : value === false ? 0 : -Infinity;
   }
   if (key === 'label') return String(row.label || row.kind || '');
+  if (key === 'daylight') {
+    return (row.metrics || {}).daylight === true ? 1 : 0;
+  }
   if (key === 'lunar') {
     return String(((row.metrics || {}).lunar) || '');
   }
@@ -15669,7 +17211,9 @@ function eventSortValue(row, key) {
 
 function sortedEventRows() {
   const sort = state.eventSort || { key: 'date', dir: 1 };
-  const rows = state.eventTable.slice();
+  // A copy: the visible list may be state.eventTable itself, and sorting the
+  // table in place would change which kind's columns the next render uses.
+  const rows = visibleEventRows(state.eventTable).slice();
   rows.sort((left, right) => {
     const a = eventSortValue(left, sort.key);
     const b = eventSortValue(right, sort.key);
@@ -15711,7 +17255,7 @@ function eventColumnDefaultWidth(kind, key) {
     surfaceBrightness: 88, earthshine: 74, best: 88, start: 88, end: 88,
     duration: 72, elongation: 58, colongitude: 66, ecliptic: 96,
     equator: 112, rise: 62, grade: 74, margin: 84, solarIncidence: 88,
-    detail: 220,
+    daylight: 48, detail: 220,
   };
   return widths[key] || 80;
 }
@@ -15842,6 +17386,14 @@ function eventCellText(row, key, tz) {
       const value = eventMetric(row, 'elongation');
       return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
     }
+    case 'separation': {
+      const value = eventMetric(row, 'separation');
+      return Number.isFinite(value) ? `${value.toFixed(2)}°` : '—';
+    }
+    case 'planetDiameter': {
+      const value = eventMetric(row, 'planetDiameter');
+      return Number.isFinite(value) ? `${value.toFixed(1)}″` : '—';
+    }
     case 'colongitude': {
       const value = eventMetric(row, 'colongitude');
       return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
@@ -15869,6 +17421,10 @@ function eventCellText(row, key, tz) {
     case 'solarIncidence': {
       const value = eventMetric(row, 'solarIncidence');
       return Number.isFinite(value) ? `${value.toFixed(1)}°` : '—';
+    }
+    case 'daylight': {
+      const value = (row.metrics || {}).daylight;
+      return value === true ? '白昼' : value === false ? '夜间' : '—';
     }
     default: return row.detail || '—';
   }
@@ -15905,10 +17461,18 @@ function renderEventWindowRows() {
   }
   syncEventSortMarks();
   const empty = $('event-window-empty');
-  if (empty) empty.hidden = state.eventTable.length > 0;
+  const total = state.eventTable.length;
+  if (empty) {
+    empty.hidden = rows.length > 0;
+    empty.textContent = state.eventVisibleOnly && total
+      ? '没有可见事件。' : '还没有预报结果。';
+  }
   const count = $('event-window-count');
-  if (count) count.textContent = state.eventTable.length
-    ? `${state.eventTable.length} 条` : '无结果';
+  if (count) {
+    count.textContent = total
+      ? (state.eventVisibleOnly ? `${rows.length} / ${total} 条` : `${total} 条`)
+      : '无结果';
+  }
 }
 
 /** The imported rows become the sidebar list too, not a separate world. */
@@ -15917,7 +17481,15 @@ function renderImportedEventList() {
   if (!host) return;
   host.innerHTML = '';
   const tz = Number($('tz').value) || 0;
-  for (const row of state.eventTable) {
+  const rows = visibleEventRows(state.eventTable);
+  if (!rows.length && state.eventTable.length) {
+    const line = document.createElement('div');
+    line.className = 'event-row';
+    line.textContent = '没有可见事件';
+    host.appendChild(line);
+    return;
+  }
+  for (const row of rows) {
     const line = document.createElement('div');
     line.className = 'event-row';
     line.dataset.observable = row.observable === false ? 'false' : 'true';
@@ -16049,16 +17621,18 @@ function eventsFromCsv(text) {
 }
 
 function exportEventCsv() {
-  if (!state.eventTable.length) {
+  // 筛选可见 is a view of the table, so the file follows what is on screen.
+  const rows = visibleEventRows(state.eventTable);
+  if (!rows.length) {
     setStatus('还没有事件可以导出', 'error');
     return;
   }
-  const text = eventCsvText(state.eventTable);
+  const text = eventCsvText(rows);
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '');
   const name = `moon-events-${stamp}.csv`;
   downloadUrl(URL.createObjectURL(new Blob(['\ufeff' + text],
     { type: 'text/csv;charset=utf-8' })), name);
-  setStatus(`已导出 ${state.eventTable.length} 条事件到 ${name}`);
+  setStatus(`已导出 ${rows.length} 条事件到 ${name}`);
   const status = $('event-window-status');
   if (status) status.textContent = `已导出 ${name}`;
 }
@@ -17153,8 +18727,9 @@ const SPLITTERS = {
   disk:  { var: '--disk-w',  axis: 'x', sign: +1, min: 140, measure: 'view-disk' },
   raw:   { var: '--raw-h',   axis: 'y', sign: +1, min: 110, measure: 'view-info' },
   //  The divider between the two parameter columns: 模拟设置 on the left,
-  //  后期处理 / 事件预报 / 生成动画 on the right.
-  panes: { var: '--w-pane-a', axis: 'x', sign: +1, min: 180, measure: 'pane-a' },
+  //  后期处理 / 事件预报 / 生成动画 on the right.  Zero is legal: the left
+  //  pane can be dragged away and the bar it leaves behind clicks it back.
+  panes: { var: '--w-pane-a', axis: 'x', sign: +1, min: 0, measure: 'pane-a' },
 };
 
 /** How big the thing this divider sizes is *right now*, in pixels.
@@ -17204,6 +18779,51 @@ function setLeftHidden(hidden, width) {
 function leftIsHidden() {
   const layout = document.getElementById('layout');
   return !!(layout && layout.classList.contains('left-hidden'));
+}
+
+/* ── hiding the right column's parameter pane ─────────────────────────────
+ *
+ * The processing column is the one a reader watches while a forecast or an
+ * animation runs; pulling its divider all the way left hides the settings,
+ * telescope and imaging panes and gives that column the full width.  The
+ * divider becomes the handle that brings them back, exactly like 左栏.
+ */
+const PANE_SNAP_PX = 220;
+let paneAWidthOpen = 300;
+
+function setPaneAHidden(hidden, width) {
+  const root = document.documentElement;
+  const layout = document.getElementById('layout');
+  if (hidden) {
+    // The pane may still be at its `1fr` default, where the CSS variable is a
+    // string rather than a number; measure the element itself.
+    const pane = document.querySelector('.pane-a');
+    const measured = pane ? pane.getBoundingClientRect().width : 0;
+    const current = measured > 1 ? measured : parseFloat(
+      getComputedStyle(root).getPropertyValue('--w-pane-a'));
+    if (Number.isFinite(current) && current > PANE_SNAP_PX) {
+      paneAWidthOpen = current;
+    }
+    root.style.setProperty('--w-pane-a', '0px');
+  } else {
+    const ceiling = splitterCeiling(SPLITTERS.panes);
+    const open = Math.min(ceiling,
+      Math.max(PANE_MIN, width || paneAWidthOpen));
+    root.style.setProperty('--w-pane-a', Math.round(open) + 'px');
+  }
+  if (layout) layout.classList.toggle('pane-a-hidden', !!hidden);
+  const bar = document.querySelector('.splitter[data-target="panes"]');
+  if (bar) {
+    bar.title = hidden
+      ? '点击展开模拟设置栏'
+      : '拖动调整两栏宽度；向左拉到底隐藏模拟设置栏';
+  }
+  fitAll();
+}
+
+function paneAIsHidden() {
+  const layout = document.getElementById('layout');
+  return !!(layout && layout.classList.contains('pane-a-hidden'));
 }
 
 /** The largest value this divider may take, measured from the live layout.
@@ -17279,6 +18899,18 @@ function installSplitters() {
           return;
         }
         if (spec.var === '--w-left') setLeftHidden(false, next);
+        if (spec.var === '--w-pane-a') {
+          if (paneAIsHidden()) {
+            // A drag to the right from the handle opens the pane again; a
+            // click is handled on release, so a small wobble does nothing.
+            if (next <= PANE_SNAP_PX) return;
+            setPaneAHidden(false, next);
+            next = Math.max(PANE_MIN, next);
+          } else if (next < PANE_SNAP_PX) {
+            setPaneAHidden(true);
+            return;
+          }
+        }
         next = Math.max(spec.min, Math.min(splitterCeiling(spec), next));
         root.style.setProperty(spec.var, next + 'px');
         if (spec.var !== '--disk-w') clampDiskWidth();
@@ -17293,6 +18925,11 @@ function installSplitters() {
         if (!moved && spec.var === '--w-left' && leftIsHidden()) {
           setLeftHidden(false, leftWidthOpen);
           setStatus('左栏已显示');
+          return;
+        }
+        if (!moved && spec.var === '--w-pane-a' && paneAIsHidden()) {
+          setPaneAHidden(false, paneAWidthOpen);
+          setStatus('模拟设置栏已显示');
           return;
         }
         fitAll();
@@ -17888,6 +19525,12 @@ function init() {
     syncRangeTime('events-end', '结束', loadEvents);
   });
   $('event-window-open').addEventListener('click', openEventWindow);
+  for (const id of ['event-visible-only', 'event-window-visible-only']) {
+    if (!$(id)) continue;
+    $(id).addEventListener('click',
+      () => setEventVisibleOnly(!state.eventVisibleOnly));
+  }
+  syncEventVisibleButtons();
   $('event-window-close').addEventListener('click', closeEventWindow);
   $('event-window-export').addEventListener('click', exportEventCsv);
   $('event-window-import').addEventListener('change', (event) => {
@@ -18120,6 +19763,33 @@ function init() {
   // picture is bigger now, make the type fit it again" without throwing away
   // the arrangement (or the hand-placed names) the reader already has.
   $('label-refresh-font').addEventListener('click', refreshLabelFontSizes);
+  // 测量工具 is a latch, not a settings field: it changes what the pointer does
+  // on this picture and is deliberately forgotten when the page is reloaded.
+  if ($('measure-tool')) {
+    $('measure-tool').addEventListener('click', () => setMeasureOn(!measure.on));
+  }
+  // 隐藏选框 / 显示选框: one button, two labels, and the state is the label.
+  if ($('selection-visible')) {
+    $('selection-visible').addEventListener('click',
+      () => setSelectionVisible(state.selectionHidden));
+    // The label is the state, so the page writes it rather than trusting the
+    // markup: the two stay in step even when a settings file changes the rest.
+    setSelectionVisible(true);
+  }
+  // 显示掩星: a layer the reader arms by hand.  With no live occultation it
+  // simply has nothing to draw.
+  if ($('occultation-track')) {
+    const button = $('occultation-track');
+    const sync = () => {
+      button.setAttribute('aria-pressed', String(state.occultationTrack));
+      syncOccultationTrack();
+    };
+    button.addEventListener('click', () => {
+      state.occultationTrack = !state.occultationTrack;
+      sync();
+    });
+    sync();
+  }
   // Locking takes the layouts that are already on screen as the frozen ones, so
   // the very next font change is a restyle rather than a re-layout.  Unlocking
   // only *arms* the layout for the next change: it does not re-flow anything by
@@ -18366,6 +20036,9 @@ function init() {
     element.addEventListener('change', () => {
       updateHemisphereLabels();
       autoRefresh();
+      // Stepping the clock through a computed occultation moves the planet on
+      // the disc, so the live track follows the instant.
+      syncOccultationTrack();
       setStatus('观测信息已改，全月面会自动重渲染');
     });
   }
@@ -18556,7 +20229,8 @@ function init() {
     button.addEventListener('click', () => nudgeSky(button.dataset.nudge));
   }
   for (const id of ['sky-label-step', 'sky-labels', 'sky-elongation',
-                    'sky-moon-track', 'sky-sun-track', 'sky-phase-frame']) {
+                    'sky-moon-track', 'sky-sun-track', 'sky-planets',
+                    'sky-phase-frame']) {
     $(id).addEventListener('change', drawSky);
   }
   $('sky-closeup').addEventListener('change', () => {

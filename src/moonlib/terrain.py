@@ -104,6 +104,9 @@ __all__ = [
     "terrain_cache_root",
     "bake_terrain_cache",
     "clear_terrain_cache",
+    "ground_profile",
+    "PROFILE_SAMPLES",
+    "PROFILE_AZIMUTHS",
     "SurfaceMesh",
 ]
 
@@ -3316,3 +3319,139 @@ def open_region_at(
         base.cache_path,
         dict(base.manifest, windowed_from=str(chosen)),
     )
+
+# ---------------------------------------------------------------------------
+# measuring the ground: heights along a line, or across a circle's rings
+# ---------------------------------------------------------------------------
+#: Default number of heights a measured line or radius carries, and the number
+#: of azimuths averaged into one ring of a measured circle.
+PROFILE_SAMPLES = 192
+PROFILE_AZIMUTHS = 72
+#: Hard ceilings, so a request cannot ask a raster to be sampled a million
+#: times for a chart a few hundred pixels wide.
+PROFILE_SAMPLES_MAX = 1024
+PROFILE_AZIMUTHS_MAX = 360
+
+
+def _ground_unit_vectors(lon_deg: Any, lat_deg: Any) -> np.ndarray:
+    """Unit vectors for selenographic lon/lat in degrees (any array shape)."""
+    lon = np.radians(np.asarray(lon_deg, dtype=np.float64))
+    lat = np.radians(np.asarray(lat_deg, dtype=np.float64))
+    cos_lat = np.cos(lat)
+    return np.stack(
+        [cos_lat * np.cos(lon), cos_lat * np.sin(lon), np.sin(lat)], axis=-1
+    )
+
+
+def _ground_lonlat(vectors: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Inverse of :func:`_ground_unit_vectors`, over the trailing axis."""
+    array = np.asarray(vectors, dtype=np.float64)
+    flat = array.reshape(-1, 3)
+    flat = flat / np.maximum(np.linalg.norm(flat, axis=1, keepdims=True), 1e-12)
+    lat = np.degrees(np.arcsin(np.clip(flat[:, 2], -1.0, 1.0)))
+    lon = np.degrees(np.arctan2(flat[:, 1], flat[:, 0]))
+    return lon.reshape(array.shape[:-1]), lat.reshape(array.shape[:-1])
+
+
+def _profile_level(terrain: MoonTerrain, spacing_km: float) -> int:
+    """The pyramid level whose pixels match the spacing the measurement asks for."""
+    return int(terrain.dem.level_for_ground_scale(max(1e-3, float(spacing_km))))
+
+
+def ground_profile(
+    terrain: MoonTerrain,
+    *,
+    line: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
+    circle: Optional[Tuple[Tuple[float, float], float]] = None,
+    samples: int = PROFILE_SAMPLES,
+    azimuths: int = PROFILE_AZIMUTHS,
+) -> Dict[str, Any]:
+    """Heights along a ground line, or the mean height on each ring of a circle.
+
+    Exactly one of *line* and *circle* is given.  ``line`` is
+    ``((lon_a, lat_a), (lon_b, lat_b))`` and is sampled along the great circle
+    between the two points; ``circle`` is ``((lon_c, lat_c), radius_km)`` and
+    each sample is the mean of the heights all the way round a ring, so the
+    result is the radial profile a reader asks for by drawing a circle rather
+    than one arbitrary spoke of it.
+
+    Distances are measured on the 1737.4 km reference sphere, the same datum the
+    DEM's heights are relative to.  Returns a JSON-safe mapping: ``kind``,
+    ``samples``, ``distance_km``, ``heights_km``, ``min_km``, ``max_km``,
+    ``mean_km``, ``level``, and ``length_km`` (line) or ``radius_km`` and
+    ``azimuths`` (circle).
+    """
+    if (line is None) == (circle is None):
+        raise TerrainDataError("give exactly one of line or circle.")
+    count = int(max(2, min(PROFILE_SAMPLES_MAX, samples)))
+    level = 0
+    if line is not None:
+        (lon_a, lat_a), (lon_b, lat_b) = line
+        vector_a = _ground_unit_vectors(lon_a, lat_a)
+        vector_b = _ground_unit_vectors(lon_b, lat_b)
+        angle = float(np.arccos(np.clip(np.dot(vector_a, vector_b), -1.0, 1.0)))
+        length_km = angle * MOON_REFERENCE_RADIUS_KM
+        if angle < 1e-9:
+            lon = np.full(count, float(lon_a))
+            lat = np.full(count, float(lat_a))
+            distance = np.zeros(count)
+        else:
+            t = np.linspace(0.0, 1.0, count)
+            sin_angle = math.sin(angle)
+            weights_a = np.sin((1.0 - t) * angle) / sin_angle
+            weights_b = np.sin(t * angle) / sin_angle
+            lon, lat = _ground_lonlat(
+                weights_a[:, None] * vector_a + weights_b[:, None] * vector_b
+            )
+            distance = t * length_km
+        level = _profile_level(terrain, length_km / max(1, count - 1))
+        heights = np.asarray(terrain.height_km(lon, lat, level), dtype=np.float64)
+        extras: Dict[str, Any] = {"length_km": round(length_km, 4)}
+        kind = "line"
+    else:
+        (lon_c, lat_c), radius_km = circle
+        radius_km = float(radius_km)
+        if not (math.isfinite(radius_km) and radius_km > 0.0):
+            raise TerrainDataError("圆的半径必须大于 0 公里。")
+        rings = int(max(4, min(PROFILE_AZIMUTHS_MAX, azimuths)))
+        centre = _ground_unit_vectors(lon_c, lat_c)
+        pole = np.array([0.0, 0.0, 1.0])
+        east = np.cross(pole, centre)
+        east_norm = float(np.linalg.norm(east))
+        if east_norm < 1e-9:
+            # At a pole every direction is east of something; pick one so the
+            # ring is still a ring instead of a division by zero.
+            east = np.array([1.0, 0.0, 0.0])
+        else:
+            east = east / east_norm
+        north = np.cross(centre, east)
+        radii = np.linspace(0.0, radius_km, count)
+        alpha = radii / MOON_REFERENCE_RADIUS_KM
+        theta = np.linspace(0.0, 2.0 * math.pi, rings, endpoint=False)
+        spokes = np.cos(theta)[:, None] * north + np.sin(theta)[:, None] * east
+        points = (np.cos(alpha)[:, None, None] * centre
+                  + np.sin(alpha)[:, None, None] * spokes[None, :, :])
+        lon, lat = _ground_lonlat(points)
+        distance = radii
+        # The finest spacing this request actually asks for: along the radius,
+        # or around the rim of the outermost ring.
+        ring_step = 2.0 * math.pi * radius_km / rings
+        level = _profile_level(
+            terrain, min(radius_km / max(1, count - 1), ring_step))
+        stack = np.asarray(terrain.height_km(lon, lat, level), dtype=np.float64)
+        heights = stack.mean(axis=1)
+        extras = {"radius_km": round(radius_km, 4), "azimuths": rings}
+        kind = "circle"
+    heights = np.asarray(heights, dtype=np.float64).reshape(-1)
+    payload: Dict[str, Any] = {
+        "kind": kind,
+        "samples": count,
+        "distance_km": [round(float(value), 4) for value in distance],
+        "heights_km": [round(float(value), 4) for value in heights],
+        "min_km": round(float(np.min(heights)), 4),
+        "max_km": round(float(np.max(heights)), 4),
+        "mean_km": round(float(np.mean(heights)), 4),
+        "level": int(level),
+    }
+    payload.update(extras)
+    return payload

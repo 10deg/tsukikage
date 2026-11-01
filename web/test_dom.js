@@ -302,16 +302,34 @@ check('the sky window has a view lock and a main-clock sync',
   /id="sky-lock-view"[^>]*aria-pressed="true"/.test(html));
 check('the sky time-step row is on its own line',
   /\.sky-nudge\s*\{[^}]*flex:\s*1 0 100%/.test(css));
-check('the sky display options follow 同步到主界面, not a row of their own',
+check('the sky time-step buttons sit beside their button, not on a new line',
+  /class="sky-step"/.test(html) &&
+  /\.sky-step\s*\{[^}]*display:\s*inline-flex/.test(css) &&
+  /\.sky-step #sky-nudge\s*\{[^}]*flex:\s*0 0 auto/.test(css));
+check('the observation time control has a one-second step',
+  /id="when"[^>]*step="1"/.test(html));
+check('the sky display options follow 同步到主界面, and 时间步长 follows 轨迹特写',
   (() => {
     const sync = html.indexOf('id="sky-sync-main"');
     const span = html.indexOf('id="sky-span"');
     const step = html.indexOf('id="sky-label-step"');
+    const closeup = html.indexOf('id="sky-closeup"');
+    const nudge = html.indexOf('id="sky-nudge-toggle"');
     const save = html.indexOf('id="sky-save"');
-    const nudge = html.indexOf('id="sky-nudge"');
-    return sync >= 0 && span > sync && step > span && save > step && nudge > save;
+    return sync >= 0 && span > sync && step > span
+      && closeup > step && nudge > closeup && save > nudge;
   })());
 /* 事件预报的表格窗口与 CSV 出入口。 */
+check('筛选可见 sits beside the table-window button and in its toolbar',
+  (() => {
+    const open = html.indexOf('id="event-window-open"');
+    const side = html.indexOf('id="event-visible-only"');
+    const count = html.indexOf('id="event-count"');
+    const windowButton = html.indexOf('id="event-window-visible-only"');
+    const exportButton = html.indexOf('id="event-window-export"');
+    return open >= 0 && side > open && count > side
+      && windowButton > 0 && exportButton > windowButton;
+  })());
 check('the event table window has rows and CSV controls',
   htmlIds.has('event-window-backdrop') && htmlIds.has('event-window-rows') &&
   htmlIds.has('event-window-export') && htmlIds.has('event-window-import') &&
@@ -467,5 +485,11 @@ const layerZ = (selector) => {
   check("while the picture's own controls stay on top of the veil",
     layerZ('.view-tools') >= veil);
 }
+
+/* Hiding 模拟设置 takes its pane out of grid auto-placement; if the remaining
+   pane is not pinned to column 3 it slides into the 6 px splitter and the right
+   column becomes blank background. */
+check('the hidden-pane layout pins the events pane to its column',
+  /\.layout\.pane-a-hidden \.panes > \.pane-b\s*\{[^}]*grid-column:\s*3/.test(css));
 
 finish('all checks passed');
