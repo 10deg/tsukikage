@@ -100,6 +100,7 @@ __all__ = [
     "extract_region",
     "find_region_files",
     "global_dem_sources",
+    "is_global_dem_raster",
     "terrain_cache_root",
     "bake_terrain_cache",
     "clear_terrain_cache",
@@ -3019,6 +3020,33 @@ def set_preferred_dem(path: Optional[Any]) -> Optional[Path]:
 def preferred_dem() -> Optional[Path]:
     """The raster chosen with :func:`set_preferred_dem`, if any."""
     return _PREFERRED_DEM
+
+
+def is_global_dem_raster(path: Path) -> bool:
+    """True when *path* is a single-band, whole-sphere 2:1 elevation TIFF.
+
+    Header-only: the file may be a 34 GB mosaic, so nothing is decoded.  This is
+    the same criterion :func:`discover_dem_sources` applies, exposed for callers
+    that need to validate one explicit file (the browser service's data-directory
+    picker, for example) without searching the rest of the disk.
+    """
+    path = Path(path)
+    if not path.is_file() or path.suffix.lower() not in (".tif", ".tiff"):
+        return False
+    if path.with_name(path.name + ".incomplete").exists():
+        return False
+    try:
+        reader = _StrippedTiff(path, allow_compressed=True)
+    except TerrainDataError:
+        return False
+    try:
+        return (
+            reader.samples == 1
+            and reader.width >= 360
+            and reader.height * 2 == reader.width
+        )
+    finally:
+        reader.close()
 
 
 def discover_dem_sources(

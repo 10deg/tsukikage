@@ -1,0 +1,97 @@
+name: Windows service build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install minimal dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . "Pillow==11.3.0" "numpy==2.0.2" "spiceypy==6.0.0" "pyinstaller==6.22.3"
+
+      - name: Build one-file executable
+        shell: pwsh
+        env:
+          TSUKIKAGE_BUILD_DIR: out/windows-service
+        run: |
+          python -m PyInstaller --noconfirm --clean `
+            --distpath out/windows-service/dist `
+            --workpath out/windows-service/build/pyinstaller `
+            packaging/tsukikage.spec
+
+      - name: Assemble the external kernels and package zip
+        shell: pwsh
+        run: |
+          $dist = "out/windows-service/dist"
+          $bad = Get-ChildItem out/windows-service/build/pyinstaller/tsukikage -Recurse -File |
+            Where-Object { $_.Extension -in '.tif', '.tiff', '.exr' -or
+                           $_.Name -in @('naif0012.tls', 'de440s.bsp', 'pck00010.tpc',
+                                        'gm_de440.tpc', 'moon_pa_de440_200625.bpc',
+                                        'moon_de440_220930.tf', 'earth_latest_high_prec.bpc') }
+          if ($bad) {
+            $bad | ForEach-Object { Write-Error $_.FullName }
+            throw "a raster or SPICE kernel entered the exe bundle"
+          }
+          if (-not (Test-Path "$dist/Tsukikage.exe")) {
+            throw "$dist/Tsukikage.exe missing"
+          }
+          New-Item -ItemType Directory -Force -Path "$dist/kernels" | Out-Null
+          $names = @('naif0012.tls', 'de440s.bsp', 'pck00010.tpc', 'gm_de440.tpc',
+                     'moon_pa_de440_200625.bpc', 'moon_de440_220930.tf',
+                     'earth_latest_high_prec.bpc')
+          foreach ($name in $names) {
+            Copy-Item "kernels/$name" "$dist/kernels/$name" -Force
+          }
+          Copy-Item "service/KERNELS-README.txt" "$dist/kernels/README.txt" -Force
+          Copy-Item "service/WINDOWS-README.txt" "$dist/README.txt" -Force
+          Compress-Archive -Path "$dist/*" -DestinationPath "out/windows-service/Tsukikage-windows-x64.zip" -Force
+          $item = Get-Item "$dist/Tsukikage.exe"
+          "exe size: {0:N1} MB" -f ($item.Length / 1MB)
+          "kernels: {0:N1} MB" -f ((Get-ChildItem "$dist/kernels" -File | Measure-Object Length -Sum).Sum / 1MB)
+          Get-FileHash "$dist/Tsukikage.exe" -Algorithm SHA256 | Format-List
+          Get-FileHash "out/windows-service/Tsukikage-windows-x64.zip" -Algorithm SHA256 | Format-List
+
+      - name: Upload Windows zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tsukikage-windows-x64-service
+          path: out/windows-service/Tsukikage-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows zip
+        uses: actions/download-artifact@v4
+        with:
+          name: Tsukikage-windows-x64-service
+          path: out/windows-service
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/windows-service/Tsukikage-windows-x64.zip

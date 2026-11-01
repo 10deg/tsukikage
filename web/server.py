@@ -1535,6 +1535,35 @@ class MoonService:
                 self._terrain_seconds = time.time() - started
             return self._terrain
 
+    def reload_terrain(self) -> None:
+        """Forget the terrain and every frame derived from it.
+
+        The service watches the external ``kernels/`` directory.  When a DEM or
+        colour raster is added/replaced while the server is running, this drops
+        the old pyramid picks and cached frames; the next request reopens the
+        finest raster now on disk without restarting the process.
+        """
+        with self._render_lock:
+            with self._lock:
+                self._terrain = None
+                self._terrain_seconds = 0.0
+                self._dem_source = _pyramid_dem_source()
+                moonlib.set_preferred_dem(
+                    _remembered_source() or self._dem_source)
+                self._views.clear()
+                self._globe_cache = None
+                self._texture_cache.clear()
+                self._catalogue = None
+                self._feature_index = None
+                self._linear = None
+                self._linear_sunlit = None
+                self._linear_earthshine = None
+                self._linear_id = None
+                self._linear_meta.clear()
+                self._linear_context.clear()
+                self._linear_terrain = None
+                self._linear_view = None
+
     # -- 数据源 -----------------------------------------------------------
     def data_sources(self) -> Dict[str, Any]:
         """Every global DEM this install can draw, plus the ones it knows about.

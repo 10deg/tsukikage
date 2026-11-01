@@ -184,10 +184,14 @@ class _FallbackTerrain:
 class LunarMapService:
     """Tiles, features and the small readouts the map page asks for."""
 
-    def __init__(self) -> None:
+    def __init__(self, terrain=None, data_download=None) -> None:
         self._lock = threading.RLock()
-        self._terrain = None
+        self._terrain = terrain
         self._terrain_error: Optional[str] = None
+        #: Optional service-level downloader (the packaged app passes one that
+        #: saves into the external kernels directory).  Standalone map_server.py
+        #: keeps its source-tree fetch tool fallback.
+        self._data_download = data_download
         self._features: Optional[List[Dict[str, Any]]] = None
         self._tiles: "OrderedDict[Tuple[Any, ...], bytes]" = OrderedDict()
         self._detail: "OrderedDict[Tuple[int, int, int], Any]" = OrderedDict()
@@ -229,10 +233,17 @@ class LunarMapService:
             self._tiles.clear()
             self._shadows.clear()
 
+    def set_data_download(self, downloader) -> None:
+        """Install the launcher's DEM downloader (or None for the fallback)."""
+        self._data_download = downloader
+
     def data_status(self) -> Dict[str, Any]:
         terrain = self.terrain()
-        with self._download_lock:
-            download = dict(self._download)
+        if self._data_download is not None:
+            download = self._data_download.status()
+        else:
+            with self._download_lock:
+                download = dict(self._download)
         return {
             "ok": True,
             "dem": getattr(getattr(terrain, "sources", None).dem_path, "name", "flat"),
@@ -242,7 +253,9 @@ class LunarMapService:
         }
 
     def start_data_download(self) -> Dict[str, Any]:
-        """Start the existing LOLA fetch tool in the background."""
+        """Start the packaged downloader, or the source-tree fetch tool."""
+        if self._data_download is not None:
+            return self._data_download.start()
         script = ROOT / "tools" / "fetch_lola_global.py"
         if not script.is_file():
             raise moonlib.MoonlibError(f"download tool not found: {script}")
@@ -2042,8 +2055,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(500, f"{type(error).__name__}: {error}")
 
 
-def build_server(host: str, port: int) -> ThreadingHTTPServer:
-    service = LunarMapService()
+def build_server(host: str, port: int, terrain=None,
+                 data_download=None) -> ThreadingHTTPServer:
+    service = LunarMapService(terrain=terrain, data_download=data_download)
     print("opening terrain ...", flush=True)
     started = time.time()
     terrain = service.terrain()

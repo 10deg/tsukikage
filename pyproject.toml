@@ -56,6 +56,12 @@ video = ["imageio-ffmpeg>=0.4", "Pillow>=9.0"]
 hdr = ["Pillow>=9.0"]
 # Everything a normal installation wants.
 full = ["timezonefinder>=6.0", "matplotlib>=3.5", "Pillow>=9.0"]
+# The browser-service executable.  Base numpy/spiceypy come from the project's
+# own dependencies; Pillow is for labels and TIFF/EXR decoding.  Qt, matplotlib,
+# timezonefinder and imageio-ffmpeg are deliberately not included.
+service = ["Pillow>=9.0"]
+# Packaging only.
+build = ["pyinstaller>=6.11"]
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",

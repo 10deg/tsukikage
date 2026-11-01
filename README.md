@@ -83,14 +83,47 @@ print(moonlib.reporting.format_moon_report(report))
 地图服务与网页客户端共用本地的内核、地貌库和高程数据，但分别监听端口，可以同时打开。
 每个 CLI 子命令都支持 `--json`，输出与 HTTP API 完全相同的载荷。
 
+本地服务版（浏览器，主页面 + 地图）：
+
+```bash
+./.venv/bin/python -m pip install -e ".[service]"
+./.venv/bin/python -m service --service both --data-dir /path/to/kernels
+```
+
+启动后在本机 `127.0.0.1` 上开一个或多个 HTTP 服务，并打开系统默认浏览器；
+主页面和月面地图可以单独启动或一起启动。没有 Qt、没有内置 Chromium；Windows
+单文件用 `packaging\build_windows.bat` 生成 `out\windows-service\dist\Tsukikage.exe`。
+
+**7 个近期模式 SPICE 内核不再打进 exe**，而是作为必需的 `kernels\` 附件和 exe
+放在同一目录一起发布；启动时会检查并在缺失时列出具体文件名。DEM `.tif` 也放在
+这个目录，程序会自动识别新增/替换的文件；地图页内置的全球 DEM 下载器也保存到这里，
+并支持运行中自动重载。详见 [`service/README.md`](service/README.md)。
+
+本次已构建的 exe、`kernels\` 附件和 PyInstaller 中间文件在
+`out/windows-service/`（`out/` 已被 git 忽略，不会出现在 `git status` 里），
+体积构成见其中的 `build-info/SIZE-BREAKDOWN.md`。
+
+macOS 独立 App（DMG）：
+
+```bash
+packaging/build_macos_app.sh
+```
+
+产物是 `out/macos-app/Tsukikage-1.6.4-macos-arm64.dmg`。它使用 Swift/AppKit
+原生窗口 + macOS 自带的 WKWebView，并把 Python 后端作为 App 的内部组件；
+**不打开系统浏览器，也不要求用户访问本地 URL**。内核同样已打包，用户只提供
+月面 `.tif` 数据。详见 [`out/macos-app/README.md`](out/macos-app/README.md)。
+
 ## 运行所需的最少文件
 
 | 路径 | 功能 |
 |---|---|
 | `src/moonlib/` | 库本身 |
 | `pyproject.toml` | 安装、依赖声明、`moon` 命令行入口 |
-| `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，随仓库发布 |
+| `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，打包时作为 exe 同目录附件 |
 | `web/` | 非运行必需，网页客户端与月面地图服务 |
+| `service/`、`packaging/` | 非运行必需，浏览器服务版与打包 |
+| `macapp/` | 非运行必需，macOS 原生 App 外壳与 DMG |
 | `tools/` | 非运行必需 |
 | `examples/` | 非运行必需 |
 | `assets/` | 非运行必需 |
