@@ -3167,7 +3167,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         String(overlayCtx.drawn.strokes.length));
       {
         const shape = T.globeSelectionGeometry();
-        const projected = shape ? shape.corners.map(T.globePixelFromDirection) : [];
+        const sine = Math.sin(T.state.geometry.angular_diameter_deg * Math.PI / 360);
+        const projected = shape
+          ? shape.corners.map((point) => T.globePixelFromDirection(
+            point, shape.centre, 1 / sine)) : [];
         const xs = projected.map((point) => point.x);
         const ys = projected.map((point) => point.y);
         const spread = projected.length
@@ -3175,6 +3178,35 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
           : 0;
         check('the globe outline is a box, not a point', spread > 20,
           `${projected.length} corners, spread ${spread.toFixed(1)}`);
+        {
+          // Turning the sphere must carry the box with it.  Scaling the whole
+          // direction (rather than its offset from the selection centre) used
+          // to fling every corner off the canvas after the first drag.
+          const savedGlobe = { ...T.state.globe3d };
+          T.state.globe3d.lon = savedGlobe.lon + 60;
+          T.drawDisk();
+          const turned = T.globeSelectionGeometry();
+          const sine = Math.sin(
+            T.state.geometry.angular_diameter_deg * Math.PI / 360);
+          const points = turned
+            ? turned.corners.map((point) => T.globePixelFromDirection(
+              point, turned.centre, 1 / sine)) : [];
+          const disk = document.getElementById('disk');
+          const onCanvas = points.length && points.every((point) =>
+            Number.isFinite(point.x) && Number.isFinite(point.y)
+            && point.x > 1 && point.x < disk.width - 1
+            && point.y > 1 && point.y < disk.height - 1);
+          const xs = points.map((point) => point.x);
+          const ys = points.map((point) => point.y);
+          const turnedSpread = points.length
+            ? Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)
+            : 0;
+          check('turning the globe keeps the selection on the picture',
+            onCanvas && turnedSpread > 20,
+            `${points.length} corners, spread ${turnedSpread.toFixed(1)}`);
+          Object.assign(T.state.globe3d, savedGlobe);
+          T.drawDisk();
+        }
       }
       {
         // No box yet: an empty drag on the globe has to draw the first one

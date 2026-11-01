@@ -3147,29 +3147,33 @@ function globeSelectionGeometry() {
  * being dropped: the box is a control, and a control that vanishes when it
  * crosses the limb is worse than one drawn through the body.
  */
-function globePixelFromDirection(direction) {
+function globePixelFromDirection(direction, centre = null, scale = 1) {
   const { up, east, north } = globe3dBasis(state.globe3d.lon, state.globe3d.lat);
-  const depth = dot3(direction, up);
+  let aimed = direction;
+  if (centre) {
+    // A selection is a fraction of the Moon's *apparent* radius, while the
+    // globe's radius is one Moon radius on screen.  Scale only the offset from
+    // the selection's centre: scaling the whole direction moved the centre
+    // thousands of pixels away as soon as the globe was turned.
+    const along = dot3(direction, centre);
+    aimed = unit3([
+      centre[0] + (direction[0] - along * centre[0]) * scale,
+      centre[1] + (direction[1] - along * centre[1]) * scale,
+      centre[2] + (direction[2] - along * centre[2]) * scale,
+    ]);
+  }
+  const depth = dot3(aimed, up);
   const shown = depth < 0
     ? [
-      direction[0] - 2 * depth * up[0],
-      direction[1] - 2 * depth * up[1],
-      direction[2] - 2 * depth * up[2],
+      aimed[0] - 2 * depth * up[0],
+      aimed[1] - 2 * depth * up[1],
+      aimed[2] - 2 * depth * up[2],
     ]
-    : direction;
+    : aimed;
   const radius = globe3dRadius();
-  // A selection radius is a fraction of the Moon's *apparent* radius, while
-  // the globe's radius is drawn as one Moon radius on screen.  Converting the
-  // sky direction to the globe therefore needs one more factor of
-  // 1/sin(angular radius); without it a box 10% of the Moon across projects to
-  // a tenth of a pixel -- the "selection shrinks to a point" in 3D.
-  const angular = Number(state.geometry && state.geometry.angular_diameter_deg);
-  const sine = Number.isFinite(angular) && angular > 0
-    ? Math.sin(angular * Math.PI / 360) : 0;
-  const scale = sine > 1e-9 ? 1 / sine : 1;
   return {
-    x: DISK.width / 2 + dot3(shown, east) * radius * scale,
-    y: DISK.height / 2 - dot3(shown, north) * radius * scale,
+    x: DISK.width / 2 + dot3(shown, east) * radius,
+    y: DISK.height / 2 - dot3(shown, north) * radius,
   };
 }
 
@@ -3178,9 +3182,13 @@ function drawGlobeSelection(ctx, width, height, dpr) {
   const px = dpr;
   const shape = globeSelectionGeometry();
   if (!shape) return;
+  const angular = Number(state.geometry && state.geometry.angular_diameter_deg);
+  const sine = Number.isFinite(angular) && angular > 0
+    ? Math.sin(angular * Math.PI / 360) : 0;
+  const scale = sine > 1e-9 ? 1 / sine : 1;
   const overlayOf = (direction) => {
     if (!direction) return null;
-    const globe = globePixelFromDirection(direction);
+    const globe = globePixelFromDirection(direction, shape.centre, scale);
     return imageToOverlay(globe.x, globe.y);
   };
   const points = shape.directions.map(overlayOf).filter(Boolean);
