@@ -91,6 +91,8 @@ jobs:
           }
           Copy-Item "service/KERNELS-README.txt" "$dist/kernels/README.txt" -Force
           Copy-Item "service/WINDOWS-README.txt" "$dist/README.txt" -Force
+          $exeHash = (Get-FileHash "$dist/Tsukikage.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$exeHash  Tsukikage.exe" | Set-Content "$dist/Tsukikage.exe.sha256" -Encoding ascii
           Compress-Archive -Path "$dist/*" -DestinationPath "out/windows-service/Tsukikage-windows-x64.zip" -Force
           $item = Get-Item "$dist/Tsukikage.exe"
           "exe size: {0:N1} MB" -f ($item.Length / 1MB)
@@ -123,3 +125,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/windows-service/Tsukikage-windows-x64.zip
+          overwrite_files: true
