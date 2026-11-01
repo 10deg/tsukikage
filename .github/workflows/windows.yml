@@ -33,10 +33,38 @@ jobs:
         env:
           TSUKIKAGE_BUILD_DIR: out/windows-service
         run: |
+          New-Item -ItemType Directory -Force -Path out/windows-service | Out-Null
           python -m PyInstaller --noconfirm --clean `
             --distpath out/windows-service/dist `
             --workpath out/windows-service/build/pyinstaller `
-            packaging/tsukikage.spec
+            packaging/tsukikage.spec 2>&1 | Tee-Object -FilePath out/windows-service/build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          if (-not (Test-Path out/windows-service/dist/Tsukikage.exe)) {
+            throw "Tsukikage.exe was not produced"
+          }
+          if (-not (Select-String -Path out/windows-service/build.log -Pattern "Build complete!" -Quiet)) {
+            throw "PyInstaller did not report completion"
+          }
+
+      - name: Show build log on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $log = "out/windows-service/build.log"
+          if (Test-Path $log) {
+            Get-Content $log -Tail 120
+            Write-Error ((Get-Content $log -Tail 20) -join "`n")
+          }
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-log
+          path: out/windows-service/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Assemble the external kernels and package zip
         shell: pwsh
