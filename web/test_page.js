@@ -3601,6 +3601,33 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   }
 
   console.log('');
+  console.log('生成动画 · 当前选框 sends the region schema the renderer resolves');
+  {
+    /* `animation_frames()` refuses a region key it does not resolve, so the
+       animation has to be handed the renderer's schema exactly.  1.6.2 gave
+       the stills a new key (`radius_fraction`) and the animation's strip list
+       was not extended; every 当前选框 animation then failed on its first frame
+       with "region has unsupported key(s): radius_fraction". */
+    const scope = document.getElementById('anim-scope').value;
+    set('anim-scope', 'region');
+    fire('anim-scope', 'change');
+    const region = T.animationRequest().region;
+    const keys = Object.keys(region || {}).sort();
+    check('当前选框 sends lon/lat/fov/roll and no still-only key',
+      JSON.stringify(keys) ===
+        JSON.stringify(['fov_radius_arcsec', 'lat', 'lon', 'rotation_deg']),
+      JSON.stringify(region));
+    check('and the numbers are the selection\'s own',
+      region && Math.abs(region.lon - T.state.selection.lon) < 1e-9 &&
+      Math.abs(region.lat - T.state.selection.lat) < 1e-9 &&
+      Number.isFinite(region.fov_radius_arcsec) && region.fov_radius_arcsec > 0 &&
+      region.rotation_deg === (T.state.selection.rotationDeg || 0),
+      JSON.stringify(region));
+    set('anim-scope', scope);
+    fire('anim-scope', 'change');
+  }
+
+  console.log('');
   console.log('物理分辨率：菜单档位跟着本地数据下限走');
   {
     /* The regression: the 0.118 km/px row is the *published* LOLA pixel size,

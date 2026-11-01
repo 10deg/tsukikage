@@ -16465,6 +16465,28 @@ function syncAnimationStepField() {
   if (!own) custom.value = select.value;
 }
 
+/** The selection, in the one schema 生成动画 resolves.
+ *
+ *  The animation aims a rectangular close-up at a sky position and a sky angle:
+ *  it has no corrected or elliptical patch, and its frame's proportions travel
+ *  in `output`, so `selectionPayload()`'s still-only keys are not part of it.
+ *  The keys are *listed* here rather than deleted from a copy of that payload
+ *  because `animation_frames()` refuses keys it does not know: 1.6.2 added
+ *  `radius_fraction` to the stills and every 当前选框 animation then failed on
+ *  its first frame with "region has unsupported key(s)".  A key added for the
+ *  stills must not be able to reach this path by being forgotten here.
+ */
+function animationRegionPayload() {
+  const all = selectionPayload();
+  if (!all) return null;
+  return {
+    lon: all.lon,
+    lat: all.lat,
+    fov_radius_arcsec: all.fov_radius_arcsec,
+    rotation_deg: all.rotation_deg,
+  };
+}
+
 function animationRequest() {
   const step = animationStepValue();
   const unit = Number($('anim-step-unit').value) || 1;
@@ -16476,20 +16498,7 @@ function animationRequest() {
   const render = animationRenderSize();
   const output = animationOutputSize();
   const train = trainPayload();
-  // The animation's region mapping is the older shape: it carries only the
-  // keys `animation_frames()` understands.  The still-only `aspect` and the
-  // projection-corrected flag are stripped here rather than taught to the
-  // animation renderer; the animation already has its frame's proportions in
-  // `output`, and a corrected mask is a still/3D feature.
-  const region = $('anim-scope').value === 'region' ? selectionPayload() : null;
-  if (region) {
-    // The animation renderer takes the older region schema.  `aspect` and the
-    // still/3D-only keys are not part of it.
-    delete region.aspect;
-    delete region.corrected;
-    delete region.ellipse;
-    delete region.projection;
-  }
+  const region = $('anim-scope').value === 'region' ? animationRegionPayload() : null;
   return {
     when: whenPayload(),
     start: localToUtc($('anim-start').value),
