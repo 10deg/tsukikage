@@ -54,11 +54,13 @@ kernels\
 补齐后按 Enter 重新检查，输入 q 退出：
 ```
 
-月面 DEM 也放在同一个 `kernels\` 目录。用户只需要提供全球高程 `.tif`：
+月面 DEM 也放在同一个 `kernels\` 目录。**推荐的两份**是：
 
-- `ldem_*.tif`（例如 `ldem_64.tif`）
-- `SLDEM2015_512.tif`
-- `Lunar_LRO_LOLA_*.tif`
+- `ldem_64.tif`：整月面金字塔用它，启动快、占用小；
+- `SLDEM2015_512.tif`（即 SLDEM_512）：高倍缩放、测量剖面和近景用它，59 m 网格。
+
+也可以只放其中一份。其余可识别的全球高程 `.tif`：
+`ldem_*.tif`、`Lunar_LRO_LOLA_*.tif`。
 
 色彩可选：`lroc_color*.tif` 或 `lroc_color.exr`。只有高程 `.tif` 时渲染为灰度。
 把文件复制进目录后，启动时会自动扫描；程序运行期间目录发生变化也会自动重新加载。

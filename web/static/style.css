@@ -1411,16 +1411,45 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   background: rgba(4, 6, 10, .62);
 }
 .event-window {
+  position: fixed;
   display: flex;
   flex-direction: column;
   width: min(1280px, 96vw);
-  max-height: min(76vh, 760px);
+  height: min(760px, 76vh);
   overflow: hidden;
   border: 1px solid #39404e;
   border-radius: 10px;
   background: var(--panel);
   box-shadow: 0 18px 70px rgba(0, 0, 0, .62);
+  min-width: 420px;
+  min-height: 240px;
 }
+/* The window is a movable, resizable surface: the header is the move grip and
+   these eight strips are the border. */
+.event-window-head { cursor: move; }
+.event-resize { position: absolute; z-index: 2; }
+.event-resize[data-event-resize="n"],
+.event-resize[data-event-resize="s"] {
+  left: 8px; right: 8px; height: 7px; cursor: ns-resize;
+}
+.event-resize[data-event-resize="n"] { top: -2px; }
+.event-resize[data-event-resize="s"] { bottom: -2px; }
+.event-resize[data-event-resize="e"],
+.event-resize[data-event-resize="w"] {
+  top: 8px; bottom: 8px; width: 7px; cursor: ew-resize;
+}
+.event-resize[data-event-resize="e"] { right: -2px; }
+.event-resize[data-event-resize="w"] { left: -2px; }
+.event-resize[data-event-resize="ne"],
+.event-resize[data-event-resize="nw"],
+.event-resize[data-event-resize="se"],
+.event-resize[data-event-resize="sw"] {
+  width: 14px; height: 14px;
+}
+.event-resize[data-event-resize="ne"] { top: -2px; right: -2px; cursor: nesw-resize; }
+.event-resize[data-event-resize="nw"] { top: -2px; left: -2px; cursor: nwse-resize; }
+.event-resize[data-event-resize="se"] { bottom: -2px; right: -2px; cursor: nwse-resize; }
+.event-resize[data-event-resize="sw"] { bottom: -2px; left: -2px; cursor: nesw-resize; }
 .event-window-head {
   flex: 0 0 auto;
   display: flex;
@@ -1570,6 +1599,41 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   color: var(--ink-dim);
 }
 .event-window-foot #event-window-status { flex: 0 0 auto; }
+
+/* 事件预报's later kinds live behind a triangle; the nine calendar kinds stay
+   on the first row. */
+#event-kinds .event-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 20px;
+  padding: 0;
+  line-height: 0;
+  font-size: 0;
+  color: var(--ink-dim);
+}
+#event-kinds .event-more::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+  border-left: 6px solid currentColor;
+  transform: translateX(0.5px);
+  transition: transform .12s ease;
+}
+#event-kinds .event-more[aria-expanded="true"]::before {
+  transform: translateX(0.5px) rotate(90deg);
+}
+.event-kinds-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  flex-basis: 100%;
+}
+.event-kinds-more[hidden] { display: none; }
 
 /* A folded-away block of advanced settings (高级设置). */
 details.fold { margin-top: 7px; }

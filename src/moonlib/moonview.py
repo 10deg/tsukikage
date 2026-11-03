@@ -3582,6 +3582,7 @@ def selection_tile(
     projection: bool = True,
     corrected: bool = False,
     round_base: bool = False,
+    ground_box: Optional[Tuple[float, float, float, float]] = None,
 ) -> TerrainTile:
     """Cut one selection out of the DEM as a closed, flat-bottomed 3D tile.
 
@@ -3681,6 +3682,15 @@ def selection_tile(
         )
     corrected = bool(corrected)
     round_base = bool(round_base)
+    if ground_box is not None:
+        if len(ground_box) != 4 or not all(
+                math.isfinite(float(value)) for value in ground_box):
+            raise MoonlibError("ground_box must be four finite numbers.")
+        ground_box = tuple(float(value) for value in ground_box)
+        if not (ground_box[1] > ground_box[0]
+                and ground_box[3] > ground_box[2]):
+            raise MoonlibError("ground_box must have x1 > x0 and y1 > y0.")
+        corrected = True
     if corrected or round_base:
         projection = True
     projection = bool(projection)
@@ -3841,21 +3851,42 @@ def selection_tile(
         lon_min, lon_max = float(np.min(lon)), float(np.max(lon))
         lat_min, lat_max = float(np.min(lat)), float(np.max(lat))
     elif corrected:
-        correction = selection_correction(
-            view, float(lon_deg), float(lat_deg),
-            fov_radius_arcsec=fov, aspect=ratio,
-            rotation_deg=float(rotation_deg), terrain=terrain,
-        )
-        x0, x1, y0, y1 = correction.ground_box
-        width_km = correction.ground_width_km
-        height_km = correction.ground_height_km
-        model_ratio = height_km / width_km
-        boundary = correction.boundary_lonlat(81)
-        terrain = _tile_window(
-            terrain,
-            float(np.min(boundary[:, 0])), float(np.max(boundary[:, 0])),
-            float(np.min(boundary[:, 1])), float(np.max(boundary[:, 1])),
-        )
+        if ground_box is not None:
+            x0, x1, y0, y1 = ground_box
+            width_km = x1 - x0
+            height_km = y1 - y0
+            model_ratio = height_km / width_km
+            # The ground box came from the same tangent frame the camera uses.
+            # Cut the regional DEM window from the box's own lon/lat bounds.
+            probe_x = np.linspace(x0, x1, 65)
+            probe_y = np.linspace(y0, y1, 65)
+            probe_gx, probe_gy = np.meshgrid(probe_x, probe_y)
+            probe_surface = _ground_to_surface(probe_gx, probe_gy, up0, u, v)
+            probe_lon = np.degrees(np.arctan2(
+                probe_surface[..., 1], probe_surface[..., 0]))
+            probe_lat = np.degrees(np.arcsin(np.clip(
+                probe_surface[..., 2] / reference, -1.0, 1.0)))
+            terrain = _tile_window(
+                terrain,
+                float(np.min(probe_lon)), float(np.max(probe_lon)),
+                float(np.min(probe_lat)), float(np.max(probe_lat)),
+            )
+        else:
+            correction = selection_correction(
+                view, float(lon_deg), float(lat_deg),
+                fov_radius_arcsec=fov, aspect=ratio,
+                rotation_deg=float(rotation_deg), terrain=terrain,
+            )
+            x0, x1, y0, y1 = correction.ground_box
+            width_km = correction.ground_width_km
+            height_km = correction.ground_height_km
+            model_ratio = height_km / width_km
+            boundary = correction.boundary_lonlat(81)
+            terrain = _tile_window(
+                terrain,
+                float(np.min(boundary[:, 0])), float(np.max(boundary[:, 0])),
+                float(np.min(boundary[:, 1])), float(np.max(boundary[:, 1])),
+            )
         if auto:
             samples, resolution_capped = _tile_auto_samples(
                 max(width_km, height_km), terrain.dem

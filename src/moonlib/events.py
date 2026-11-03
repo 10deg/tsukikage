@@ -167,13 +167,75 @@ JEWELLED_HANDLE_SUN_ALTITUDE_MAX_DEG = 2.0
 JEWELLED_HANDLE_SUN_ALTITUDE_BEST_DEG = -2.0
 
 #: The Eyes of Clavius: sunlight first reaching two points on the crater floor.
-#: The anchor is the crater centre; the band is the one the observer supplied
-#: for this release, with 1.0° as the best moment.
-EYES_OF_CLAVIUS_ANCHOR_LON_DEG = -14.4
-EYES_OF_CLAVIUS_ANCHOR_LAT_DEG = -58.4
-EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG = 0.5
-EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG = 1.4
-EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG = 1.0
+#: The anchor and band are the ones the observer supplied for this release,
+#: with 1.1° as the best moment.
+EYES_OF_CLAVIUS_ANCHOR_LON_DEG = -13.46
+EYES_OF_CLAVIUS_ANCHOR_LAT_DEG = -57.39
+EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG = 0.8
+EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG = 1.6
+EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG = 1.1
+
+
+@dataclass(frozen=True)
+class _AnchoredRay:
+    """A sunrise/sunset ray defined by a ground point and a solar-altitude band."""
+
+    kind: str
+    title: str
+    lon_deg: float
+    lat_deg: float
+    alt_min_deg: float
+    alt_max_deg: float
+    alt_best_deg: float
+    #: Optional colongitude gate: the ray only exists near this solar longitude.
+    colong_deg: Optional[float] = None
+    colong_tolerance_deg: float = 0.0
+    #: True for a sunset phenomenon: the band is crossed downward.
+    setting: bool = False
+
+    @property
+    def normal(self) -> np.ndarray:
+        return _anchor_normal(self.lon_deg, self.lat_deg)
+
+
+@dataclass(frozen=True)
+class _ColongitudeWindow:
+    """An event defined only by a range of selenographic colongitude."""
+
+    kind: str
+    title: str
+    start_deg: float
+    end_deg: float
+    best_deg: float
+
+
+#: The anchored rays the page can forecast.  All angles are degrees; west and
+#: south are negative, the same convention the catalogue uses.
+ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
+    _AnchoredRay("platos_hook", "Plato's Hook", -8.43, 50.75, 2.5, 7.0, 4.0),
+    _AnchoredRay("hesiodus_sunrise_ray", "Hesiodus Sunrise Ray",
+                 -16.53, -29.41, 0.6, 2.0, 1.3),
+    _AnchoredRay("maginus_sunshine_ray", "Maginus Sunshine Ray",
+                 -5.57, -49.51, 0.7, 1.8, 1.2),
+    _AnchoredRay("rupes_recta", "Rupes Recta / Straight Wall",
+                 -7.19, -22.71, 0.7, 15.0, 2.5),
+    _AnchoredRay("curtiss_cross", "Curtiss Cross",
+                 -15.24, -3.94, -0.7, 0.5, 0.0,
+                 colong_deg=195.0, colong_tolerance_deg=6.0, setting=True),
+    _AnchoredRay("barrow_ray", "Barrow Ray",
+                 8.45, 71.75, 0.1, 1.4, 0.8,
+                 colong_deg=359.0, colong_tolerance_deg=5.0),
+)
+
+#: Events whose whole definition is a colongitude range.
+COLONGITUDE_WINDOWS: Tuple[_ColongitudeWindow, ...] = (
+    _ColongitudeWindow("cassini_moon_maiden", "Cassini's Moon Maiden",
+                       40.0, 60.0, 48.0),
+    _ColongitudeWindow("aries_hoofprint", "Aries' Hoofprint（Black lips）",
+                       356.0, 5.0, 0.0),
+    _ColongitudeWindow("gruithuisens_lunar_city", "Gruithuisen's Lunar City",
+                       183.0, 186.0, 185.0),
+)
 
 #: The Cheshire Moon is the "boat" orientation: the Moon's north-south axis
 #: lies nearly parallel to the horizon, so the disc looks tipped on its side.
@@ -194,10 +256,19 @@ KIND_LABELS = {
     "lowest_moon": "最低月亮",
     "lunar_eclipse": "月食",
     "xvl": "月面 X/V/L",
-    "jewelled_handle": "the jewelled handle",
+    "jewelled_handle": "Jewelled handle",
     "eyes_of_clavius": "Eyes of Clavius",
     "cheshire_moon": "Cheshire Moon（Wet Moon）",
-    "annual_extremes": "年度之最",
+    "platos_hook": "Plato's Hook",
+    "hesiodus_sunrise_ray": "Hesiodus Sunrise Ray",
+    "maginus_sunshine_ray": "Maginus Sunshine Ray",
+    "rupes_recta": "Rupes Recta / Straight Wall",
+    "curtiss_cross": "Curtiss Cross",
+    "barrow_ray": "Barrow Ray",
+    "cassini_moon_maiden": "Cassini's Moon Maiden",
+    "aries_hoofprint": "Aries' Hoofprint（Black lips）",
+    "gruithuisens_lunar_city": "Gruithuisen's Lunar City",
+    "annual_extremes": "最高/最低月",
     "libration_target": "极端天平动目标",
     "planet_conjunction": "行星合月",
     "planet_occultation": "月掩行星",
@@ -217,6 +288,9 @@ EVENT_KINDS: Tuple[str, ...] = (
     "supermoon", "micromoon", "highest_moon", "lowest_moon",
     "lunar_eclipse", "planet_conjunction", "planet_occultation",
     "xvl", "jewelled_handle", "eyes_of_clavius", "cheshire_moon",
+    "platos_hook", "hesiodus_sunrise_ray", "maginus_sunshine_ray",
+    "rupes_recta", "curtiss_cross", "barrow_ray", "cassini_moon_maiden",
+    "aries_hoofprint", "gruithuisens_lunar_city",
     "annual_extremes", "libration_target",
 )
 
@@ -601,6 +675,51 @@ def _altitude_windows(altitude_fn, start: float, end: float,
     return windows
 
 
+def _altitude_windows_setting(
+    altitude_fn, start: float, end: float,
+    minimum: float, maximum: float, best_target: float,
+    limit_hours: float = 48.0,
+) -> List[Tuple[float, float, float]]:
+    """``(start, end, best)`` for bands crossed on the *setting* side.
+
+    ``_altitude_windows`` follows the sunrise edge (rising through the lower
+    bound).  A ray that appears as the Sun goes down -- Curtiss Cross at
+    colongitude 195 -- crosses the upper bound first and the lower one later.
+    """
+    if end <= start + 60.0:
+        return []
+    windows: List[Tuple[float, float, float]] = []
+    step = 3600.0
+    moment = start
+    previous = altitude_fn(moment)
+    while moment < end:
+        following = min(moment + step, end)
+        altitude = altitude_fn(following)
+        if previous >= maximum > altitude:
+            root = bisect_root(
+                lambda et: altitude_fn(et) - maximum,
+                moment, following, tol=1e-3,
+            )
+            limit = min(end, root + limit_hours * 3600.0)
+            lower = altitude_fn(limit)
+            if lower >= minimum:
+                finish = limit
+            else:
+                finish = bisect_root(
+                    lambda et: altitude_fn(et) - minimum,
+                    root, limit, tol=1e-3,
+                )
+            if finish > root + 60.0:
+                best = bisect_root(
+                    lambda et: altitude_fn(et) - best_target,
+                    root, finish, tol=1e-3,
+                )
+                windows.append((root, finish, best))
+        previous = altitude
+        moment = following
+    return windows
+
+
 def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
     """The X/V windows inside *window*, with L folded into their notes.
 
@@ -679,8 +798,6 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
             title=title,
             detail=(
                 f"持续 {minutes:.0f} min　"
-                f"锚点 {XVL_ANCHOR_LON_DEG:g}° / {XVL_ANCHOR_LAT_DEG:g}°　"
-                f"余经度 {metrics['colongitude_deg']:.1f}°　"
                 f"{_altitude_text(moon_altitude)}　{note}"
             ),
             observable=moon_altitude > 0.0,
@@ -718,14 +835,8 @@ def _jewelled_handle_events(observer: Observer, window) -> List[MoonEvent]:
             kind="jewelled_handle",
             when_utc=to_utc(best),
             altitude_deg=moon_altitude,
-            title="the jewelled handle",
-            detail=(
-                f"持续 {minutes:.0f} min　"
-                f"锚点 {abs(JEWELLED_HANDLE_ANCHOR_LON_DEG):g}°W / "
-                f"{JEWELLED_HANDLE_ANCHOR_LAT_DEG:g}°N　"
-                f"{_altitude_text(moon_altitude)}　"
-                f"最早由 Patrick Moore 描述，又名“the golden handle”"
-            ),
+            title="Jewelled handle",
+            detail=f"持续 {minutes:.0f} min　{_altitude_text(moon_altitude)}",
             observable=moon_altitude > 0.0,
             window_start_utc=to_utc(root),
             window_end_utc=to_utc(finish),
@@ -761,21 +872,150 @@ def _eyes_of_clavius_events(observer: Observer, window) -> List[MoonEvent]:
             when_utc=to_utc(best),
             altitude_deg=moon_altitude,
             title="Eyes of Clavius",
-            detail=(
-                f"持续 {minutes:.0f} min　"
-                f"锚点 {abs(EYES_OF_CLAVIUS_ANCHOR_LON_DEG):g}°W / "
-                f"{abs(EYES_OF_CLAVIUS_ANCHOR_LAT_DEG):g}°S　"
-                f"太阳高度 "
-                f"{EYES_OF_CLAVIUS_SUN_ALTITUDE_MIN_DEG:g}–"
-                f"{EYES_OF_CLAVIUS_SUN_ALTITUDE_MAX_DEG:g}°，"
-                f"最佳 {EYES_OF_CLAVIUS_SUN_ALTITUDE_BEST_DEG:.1f}°　"
-                f"{_altitude_text(moon_altitude)}"
-            ),
+            detail=f"持续 {minutes:.0f} min　{_altitude_text(moon_altitude)}",
             observable=moon_altitude > 0.0,
             window_start_utc=to_utc(root),
             window_end_utc=to_utc(finish),
             metrics=metrics,
         ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
+def _root_on_colongitude(lo: float, hi: float, low_deg: float,
+                         target_deg: float) -> float:
+    """The instant inside ``[lo, hi]`` where the offset from *low_deg* hits *target*.
+
+    The bracket is short (one scan step, or one event window), so the shortest
+    circular change from the value at *lo* is the right branch even when the
+    colongitude wraps through 360.
+    """
+    base = _xvl_colongitude_deg(lo)
+    base_offset = (base - low_deg) % 360.0
+    # A bisection root can land a fraction of a second before the crossing, so
+    # the modulo above returns 359.999… for what is really 0.  Pick the branch
+    # nearest the requested target instead of trusting the raw modulo.
+    while base_offset - target_deg > 180.0:
+        base_offset -= 360.0
+    while base_offset - target_deg < -180.0:
+        base_offset += 360.0
+
+    def shifted(et: float) -> float:
+        value = _xvl_colongitude_deg(et)
+        delta = ((value - base + 180.0) % 360.0) - 180.0
+        return base_offset + delta - target_deg
+
+    return bisect_root(shifted, lo, hi, tol=1e-3)
+
+
+def _colongitude_windows(start: float, end: float, low_deg: float,
+                         high_deg: float,
+                         best_deg: float) -> List[Tuple[float, float, float]]:
+    """``(start, end, best)`` for every passage through a colongitude range."""
+    if end <= start + 60.0:
+        return []
+    span = (high_deg - low_deg) % 360.0
+    if not (span > 0.0):
+        return []
+    best_offset = (best_deg - low_deg) % 360.0
+    if not (0.0 < best_offset < span):
+        best_offset = span / 2.0
+    step = 1800.0
+    windows: List[Tuple[float, float, float]] = []
+    moment = start
+    previous = (_xvl_colongitude_deg(moment) - low_deg) % 360.0
+    while moment < end:
+        following = min(moment + step, end)
+        value = (_xvl_colongitude_deg(following) - low_deg) % 360.0
+        # The colongitude rises; an offset near 360 falling to near 0 is the
+        # lower edge of the range.
+        if previous > 180.0 and value < 180.0:
+            root = _root_on_colongitude(moment, following, low_deg, 360.0)
+            finish = None
+            scan = root
+            scan_offset = (_xvl_colongitude_deg(scan) - low_deg) % 360.0
+            while scan < end:
+                nxt = min(scan + step, end)
+                offset = (_xvl_colongitude_deg(nxt) - low_deg) % 360.0
+                if scan_offset < span <= offset:
+                    finish = _root_on_colongitude(scan, nxt, low_deg, span)
+                    break
+                scan_offset = offset
+                scan = nxt
+            if finish is None and scan_offset < span:
+                finish = end
+            if finish is not None and finish > root + 60.0:
+                best = _root_on_colongitude(root, finish, low_deg, best_offset)
+                windows.append((root, finish, best))
+        previous = value
+        moment = following
+    return windows
+
+
+def _ray_event(observer: Observer, kind: str, title: str, root: float,
+               finish: float, best: float,
+               metrics: Dict[str, Any]) -> MoonEvent:
+    metrics = dict(metrics)
+    metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
+    moon_altitude = float(metrics["altitude_deg"])
+    minutes = (finish - root) / 60.0
+    return MoonEvent(
+        kind=kind,
+        when_utc=to_utc(best),
+        altitude_deg=moon_altitude,
+        title=title,
+        detail=f"持续 {minutes:.0f} min　{_altitude_text(moon_altitude)}",
+        observable=moon_altitude > 0.0,
+        window_start_utc=to_utc(root),
+        window_end_utc=to_utc(finish),
+        metrics=metrics,
+    )
+
+
+def _anchored_ray_events(observer: Observer, window) -> List[MoonEvent]:
+    """The sunrise rays listed in :data:`ANCHORED_RAYS`."""
+    start = float(window.start_et)
+    end = float(window.end_et)
+    events: List[MoonEvent] = []
+    for spec in ANCHORED_RAYS:
+        normal = spec.normal
+
+        def altitude(et: float, _normal: np.ndarray = normal) -> float:
+            return _sun_altitude_at(_normal, et)
+
+        scanner = _altitude_windows_setting if spec.setting else _altitude_windows
+        for root, finish, best in scanner(
+            altitude, start, end,
+            spec.alt_min_deg, spec.alt_max_deg, spec.alt_best_deg,
+            limit_hours=48.0,
+        ):
+            if spec.colong_deg is not None:
+                colongitude = _xvl_colongitude_deg(best)
+                offset = abs(wrap_angle(
+                    colongitude - spec.colong_deg, period=360.0))
+                if offset > spec.colong_tolerance_deg:
+                    continue
+            events.append(_ray_event(
+                observer, spec.kind, spec.title, root, finish, best,
+                event_metrics(observer, best),
+            ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
+def _colongitude_event_list(observer: Observer, window) -> List[MoonEvent]:
+    """The colongitude-only events listed in :data:`COLONGITUDE_WINDOWS`."""
+    start = float(window.start_et)
+    end = float(window.end_et)
+    events: List[MoonEvent] = []
+    for spec in COLONGITUDE_WINDOWS:
+        for root, finish, best in _colongitude_windows(
+            start, end, spec.start_deg, spec.end_deg, spec.best_deg,
+        ):
+            events.append(_ray_event(
+                observer, spec.kind, spec.title, root, finish, best,
+                event_metrics(observer, best),
+            ))
     events.sort(key=lambda event: event.when_utc)
     return events
 
@@ -891,10 +1131,9 @@ def _libration_target_events(observer: Observer, window) -> List[MoonEvent]:
         })
         start = group[0].when_utc
         end = group[-1].when_utc
-        detail = (
-            f"{target.region or target.feature_type}"
-            f"　离外缘 {best.margin_deg:.1f}°　{best.grade.name_zh}"
-        )
+        # 备注 carries no anchor or judgement condition: the grade and margin
+        # are columns of their own in the forecast table.
+        detail = ""
         events.append(MoonEvent(
             kind="libration_target",
             when_utc=best.when_utc,
@@ -909,66 +1148,46 @@ def _libration_target_events(observer: Observer, window) -> List[MoonEvent]:
     return events
 
 
-def _annual_extreme_events(observer: Observer, window) -> List[MoonEvent]:
-    """The year's largest, smallest, highest and lowest full moons.
+#: How many rows each 最高/最低 category contributes.
+ANNUAL_EXTREME_TOP = 5
 
-    Unlike 超级月亮 / 最小月亮 these are single winners, not threshold bands:
-    the list answers "which full moon was the biggest of the range" rather than
-    "which ones were above a line".  The highest and lowest are judged at the
-    upper transit, the same quantity the old separate categories used.
+
+def _annual_extreme_events(observer: Observer, window) -> List[MoonEvent]:
+    """The range's five highest and five lowest of each principal phase.
+
+    Four phases times two extremes is eight categories: 最高/最低 朔月, 上弦月,
+    满月 and 下弦月.  Every category contributes up to
+    :data:`ANNUAL_EXTREME_TOP` rows, each at the upper transit that makes the
+    phase highest (or lowest) for this site.  The list is chronological, so the
+    reader sees the range unfold rather than eight separate tables.
     """
-    phases = list(find_phase_events(window, (PhaseKind.FULL_MOON,)))
-    if not phases:
-        return []
-    rows = []
-    for phase in phases:
-        distance, radius_deg, _ = _geometry(phase.et)
-        altitude = _altitude(phase.et, observer)
-        metrics = event_metrics(observer, phase.et)
-        rows.append({
-            "phase": phase, "distance": distance, "radius": radius_deg,
-            "altitude": altitude, "metrics": metrics,
-        })
-    winners = [
-        ("最大月亮", max(rows, key=lambda row: row["radius"])),
-        ("最小月亮", min(rows, key=lambda row: row["radius"])),
-    ]
+    categories = (
+        (PhaseKind.NEW_MOON, False, "最高朔月"),
+        (PhaseKind.FIRST_QUARTER, False, "最高上弦月"),
+        (PhaseKind.FULL_MOON, False, "最高满月"),
+        (PhaseKind.LAST_QUARTER, False, "最高下弦月"),
+        (PhaseKind.NEW_MOON, True, "最低朔月"),
+        (PhaseKind.FIRST_QUARTER, True, "最低上弦月"),
+        (PhaseKind.FULL_MOON, True, "最低满月"),
+        (PhaseKind.LAST_QUARTER, True, "最低下弦月"),
+    )
     events: List[MoonEvent] = []
-    for title, row in winners:
-        at = float(row["phase"].et)
-        height = float(row["altitude"])
-        detail = (
-            f"视直径 {_diameter_text(row['radius'])}　"
-            f"地心距 {row['distance']:,.0f} km　"
-            f"{_altitude_text(height)}"
-        )
-        metrics = event_metrics(observer, at)
-        events.append(MoonEvent(
-            kind="annual_extremes",
-            when_utc=to_utc(at),
-            altitude_deg=height,
-            title=title,
-            detail=detail,
-            observable=height > 0.0,
-            metrics=metrics,
-        ))
-    # The old 最高/最低 categories had one row per principal phase, not just
-    # the full moon.  Merging them into 年度之最 keeps those winners; only the
-    # *size* winners are new.
-    for kind, title in ((PhaseKind.NEW_MOON, "最高朔月"),
-                        (PhaseKind.FIRST_QUARTER, "最高上弦月"),
-                        (PhaseKind.FULL_MOON, "最高满月"),
-                        (PhaseKind.LAST_QUARTER, "最高下弦月")):
-        found = _extreme_phase_event(observer, window, kind, title, lowest=False)
-        if found is not None:
-            events.append(replace(found, kind="annual_extremes"))
-    for kind, title in ((PhaseKind.NEW_MOON, "最低朔月"),
-                        (PhaseKind.FIRST_QUARTER, "最低上弦月"),
-                        (PhaseKind.FULL_MOON, "最低满月"),
-                        (PhaseKind.LAST_QUARTER, "最低下弦月")):
-        found = _extreme_phase_event(observer, window, kind, title, lowest=True)
-        if found is not None:
-            events.append(replace(found, kind="annual_extremes"))
+    for kind, lowest, title in categories:
+        rows = []
+        for phase in find_phase_events(window, (kind,)):
+            height, transit = _transit(phase.et, observer)
+            rows.append((height, transit))
+        rows.sort(key=lambda row: row[0], reverse=not lowest)
+        for height, transit in rows[:ANNUAL_EXTREME_TOP]:
+            events.append(MoonEvent(
+                kind="annual_extremes",
+                when_utc=to_utc(transit),
+                altitude_deg=height,
+                title=title,
+                detail=f"{title}　中天高度 {height:.1f}°",
+                observable=height > 0.0,
+                metrics=event_metrics(observer, transit),
+            ))
     events.sort(key=lambda event: event.when_utc)
     return events
 
@@ -1021,11 +1240,17 @@ def _with_daylight(observer: Observer, event: MoonEvent) -> MoonEvent:
     return replace(event, metrics=metrics)
 
 
-def _transit_altitude(et: float, observer: Observer) -> float:
-    """The highest the Moon gets around *et*: a coarse scan of the day."""
+def _transit(et: float, observer: Observer) -> Tuple[float, float]:
+    """The highest altitude around *et* and the instant it happens."""
     grid = np.linspace(et - 12 * 3600.0, et + 12 * 3600.0, 49)
     values = [_altitude(float(item), observer) for item in grid]
-    return max(values)
+    index = int(np.argmax(values))
+    return float(values[index]), float(grid[index])
+
+
+def _transit_altitude(et: float, observer: Observer) -> float:
+    """The highest the Moon gets around *et*: a coarse scan of the day."""
+    return _transit(et, observer)[0]
 
 
 def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
@@ -1064,13 +1289,13 @@ def _principal_phase_events(observer: Observer, window) -> List[MoonEvent]:
         if distance <= SUPERMOON_KM:
             events.append(MoonEvent(
                 kind="supermoon", when_utc=phase.when_utc, altitude_deg=altitude,
-                detail=f"{size}　{where}（≤ {SUPERMOON_KM:,.0f}）　{height}",
+                detail=f"{size}　{where}　{height}",
                 observable=altitude > 0.0, metrics=dict(metrics),
             ))
         if distance >= MICROMOON_KM:
             events.append(MoonEvent(
                 kind="micromoon", when_utc=phase.when_utc, altitude_deg=altitude,
-                detail=f"{size}　{where}（≥ {MICROMOON_KM:,.0f}）　{height}",
+                detail=f"{size}　{where}　{height}",
                 observable=altitude > 0.0, metrics=dict(metrics),
             ))
         eclipse = _greatest_eclipse(phase.et)
@@ -1257,6 +1482,10 @@ def moon_events(
         events.extend(_jewelled_handle_events(observer, window))
     if "eyes_of_clavius" in wanted_set:
         events.extend(_eyes_of_clavius_events(observer, window))
+    if {spec.kind for spec in ANCHORED_RAYS} & wanted_set:
+        events.extend(_anchored_ray_events(observer, window))
+    if {spec.kind for spec in COLONGITUDE_WINDOWS} & wanted_set:
+        events.extend(_colongitude_event_list(observer, window))
     if "cheshire_moon" in wanted_set:
         events.extend(_cheshire_moon_events(observer, window))
     if "annual_extremes" in wanted_set:
@@ -1268,4 +1497,27 @@ def moon_events(
     keep = wanted_set
     events = [event for event in events if event.kind in keep]
     events.sort(key=lambda event: event.when_utc)
-    return [_with_daylight(observer, event) for event in events]
+    return [_planet_daylight_visibility(_with_daylight(observer, event))
+            for event in events]
+
+
+#: Planets too faint to survive a daylight sky at the Moon's elongation.
+DAYLIGHT_INVISIBLE_PLANETS = frozenset({"uranus", "neptune"})
+
+
+def _planet_daylight_visibility(event: MoonEvent) -> MoonEvent:
+    """A daytime Uranus/Neptune passage is not an observable event.
+
+    Venus, Jupiter and Saturn are routinely visible in daylight; Uranus and
+    Neptune are not, even when the Moon is up.  The row stays in the list so the
+    date is not silently missing, but it is marked not observable.
+    """
+    if event.kind not in ("planet_conjunction", "planet_occultation"):
+        return event
+    metrics = event.metrics or {}
+    if (metrics.get("daylight")
+            and str(metrics.get("planet") or "") in DAYLIGHT_INVISIBLE_PLANETS):
+        metrics = dict(metrics)
+        metrics["observable_reason"] = "daylight"
+        return replace(event, observable=False, metrics=metrics)
+    return event

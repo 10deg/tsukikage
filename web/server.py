@@ -1532,8 +1532,16 @@ class MoonService:
         #: Region downloads (数据源 → 下载此区域).  Small, guarded by its own
         #: lock, and keyed the same way the animations are.
         self._patches: Dict[str, Dict[str, Any]] = {}
+        self._patch_cancels: Dict[str, threading.Event] = {}
         self._patch_seq = 0
         self._patch_lock = threading.Lock()
+        #: 重新构建金字塔: one long bake at a time, with its own progress.
+        self._rebuild: Dict[str, Any] = {
+            "running": False, "fraction": 0.0, "message": "",
+            "error": "", "source": None, "source_name": "",
+            "started": None, "finished": None, "seconds": 0.0,
+        }
+        self._rebuild_lock = threading.Lock()
         self._counter = 0
 
     def terrain(self):
@@ -1664,6 +1672,17 @@ class MoonService:
         # and the 物理分辨率 floor are made of, immediately.
         with self._lock:
             self._views.clear()
+        self._remember_source(chosen)
+        payload = self.data_sources()
+        return {"selected": str(chosen) if chosen is not None else None,
+                "sources": payload["sources"],
+                "floor_km_per_px": payload["floor_km_per_px"],
+                # What the full disk will keep drawing from: a statement about
+                # the picture on screen, which the source choice does not move.
+                "pyramid": Path(self._dem_source).name if self._dem_source else None}
+
+    def _remember_source(self, chosen: Optional[Path]) -> None:
+        """Persist the 数据源 choice so the next start opens the same product."""
         try:
             _dem_source_file().parent.mkdir(parents=True, exist_ok=True)
             _dem_source_file().write_text(
@@ -1674,13 +1693,100 @@ class MoonService:
             )
         except OSError:  # pragma: no cover - a read-only cache is not fatal
             pass
-        payload = self.data_sources()
-        return {"selected": str(chosen) if chosen is not None else None,
-                "sources": payload["sources"],
-                "floor_km_per_px": payload["floor_km_per_px"],
-                # What the full disk will keep drawing from: a statement about
-                # the picture on screen, which the source choice does not move.
-                "pyramid": Path(self._dem_source).name if self._dem_source else None}
+
+    # -- 重新构建金字塔 ----------------------------------------------------
+    def terrain_rebuild_status(self) -> Dict[str, Any]:
+        """Progress of the one background pyramid rebuild, if any."""
+        with self._rebuild_lock:
+            return dict(self._rebuild)
+
+    def start_terrain_rebuild(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Re-bake the full-disk pyramid from the selected global DEM.
+
+        The old pyramid is left in place while the new one is written, so a
+        failed rebuild still leaves a working map.  On success the superseded
+        caches are removed and the service reopens the new product.
+        """
+        wanted = request.get("id")
+        if wanted in (None, "", "auto"):
+            source = moonlib.preferred_dem() or self._dem_source
+        else:
+            candidate = Path(str(wanted)).expanduser().resolve()
+            available = {
+                path.resolve() for path, _km in moonlib.discover_dem_sources()
+            }
+            if candidate not in available:
+                raise moonlib.MoonlibError(
+                    f"数据源不在可用列表里：{candidate.name}"
+                )
+            source = candidate
+        if source is None:
+            raise moonlib.MoonlibError("没有可用于重建金字塔的全球 DEM")
+        source = Path(source).expanduser().resolve()
+        available = {
+            path.resolve() for path, _km in moonlib.discover_dem_sources()
+        }
+        if source not in available:
+            raise moonlib.MoonlibError(f"DEM 已不在可用列表里：{source.name}")
+        with self._rebuild_lock:
+            if self._rebuild.get("running"):
+                return dict(self._rebuild)
+            started = time.time()
+            self._rebuild = {
+                "running": True, "fraction": 0.0, "message": "准备重建…",
+                "error": "", "source": str(source), "source_name": source.name,
+                "started": started, "finished": None, "seconds": 0.0,
+            }
+        thread = threading.Thread(
+            target=self._terrain_rebuild_worker, args=(source,),
+            name="terrain-rebuild", daemon=True,
+        )
+        thread.start()
+        return self.terrain_rebuild_status()
+
+    def _terrain_rebuild_worker(self, source: Path) -> None:
+        started = time.time()
+        try:
+            sources = moonlib.terrain.find_sources(dem=source)
+            finest = _finest_baked_albedo_detail(source)
+            albedo_detail = ALBEDO_DETAIL if finest is None else finest
+
+            def progress(fraction: Any, message: Any) -> None:
+                with self._rebuild_lock:
+                    try:
+                        value = float(fraction)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    self._rebuild["fraction"] = max(0.0, min(1.0, value))
+                    self._rebuild["message"] = str(message or "")
+
+            moonlib.terrain.rebuild_terrain_cache(
+                sources, albedo_detail=albedo_detail, progress=progress,
+            )
+            self._remember_source(source)
+            moonlib.set_preferred_dem(source)
+            with self._lock:
+                self._dem_source = source
+            # reload_terrain re-picks the product with a baked pyramid; only
+            # the new one is left, so this reopens exactly what was baked.
+            self.reload_terrain()
+            with self._lock:
+                self._dem_source = source
+                self._terrain = None
+            with self._rebuild_lock:
+                self._rebuild.update({
+                    "running": False, "fraction": 1.0, "message": "完成",
+                    "error": "", "finished": time.time(),
+                    "seconds": round(time.time() - started, 1),
+                })
+        except Exception as error:  # noqa: BLE001 - reported to the page
+            with self._rebuild_lock:
+                self._rebuild.update({
+                    "running": False, "message": "重建失败",
+                    "error": f"{type(error).__name__}: {error}",
+                    "finished": time.time(),
+                    "seconds": round(time.time() - started, 1),
+                })
 
     def catalogue(self) -> Tuple[Any, ...]:
         """Named landforms, read once: the gazetteer is 9 000 rows of CSV."""
@@ -2838,6 +2944,18 @@ class MoonService:
         options = request.get("mesh") or {}
         corrected = bool(selection.get("corrected"))
         round_base = bool(selection.get("ellipse"))
+        ground_box = selection.get("ground_box")
+        if ground_box is not None:
+            try:
+                ground_box = tuple(float(value) for value in ground_box)
+            except (TypeError, ValueError) as error:
+                raise moonlib.MoonlibError(
+                    "ground_box must be four numbers: x0, x1, y0, y1."
+                ) from error
+            if len(ground_box) != 4 or not all(np.isfinite(ground_box)):
+                raise moonlib.MoonlibError(
+                    "ground_box must be four finite numbers: x0, x1, y0, y1."
+                )
         projection = bool(options.get("projection", True))
         # The page sends a valid fallback number in `resolution` as well as
         # `resolution_mode`: an older server that does not know the auto mode
@@ -2861,6 +2979,7 @@ class MoonService:
             projection=projection,
             corrected=corrected,
             round_base=round_base,
+            ground_box=ground_box,
         )
         lon = _f(selection, "lon", 0.0)
         lat = _f(selection, "lat", 0.0)
@@ -3412,8 +3531,11 @@ class MoonService:
                 "error": None,
             }
             job = self._patches[job_id]
+            cancel = threading.Event()
+            self._patch_cancels[job_id] = cancel
         thread = threading.Thread(
-            target=self._run_patch, args=(job, product, bounds, destination, name),
+            target=self._run_patch,
+            args=(job, product, bounds, destination, name, cancel),
             daemon=True,
         )
         thread.start()
@@ -3423,28 +3545,62 @@ class MoonService:
                 "bounds": job["bounds"], "megabytes": round(megabytes, 1)}
 
     def _run_patch(self, job: Dict[str, Any], product: str, bounds: tuple,
-                   destination: Path, name: str) -> None:
+                   destination: Path, name: str,
+                   cancel: threading.Event) -> None:
         from moonlib import online
 
         def progress(fraction: float, message: str) -> None:
             with self._patch_lock:
+                if cancel.is_set():
+                    return
                 job["progress"] = float(fraction)
                 job["message"] = message
 
+        temporary = destination.with_name(destination.name + ".part")
         try:
             sidecar = online.fetch_patch(
                 product, bounds[0], bounds[1], bounds[2], bounds[3],
                 destination, progress=progress, name=name,
+                should_stop=cancel.is_set,
             )
             with self._patch_lock:
                 job.update(state="done", progress=1.0,
                            message=f"{sidecar['shape'][1]}×{sidecar['shape'][0]} px",
                            bytes=int(destination.stat().st_size),
                            path=str(destination), bounds=sidecar["bounds"])
+        except online.PatchCancelled:
+            temporary.unlink(missing_ok=True)
+            with self._patch_lock:
+                job.update(state="cancelled", progress=0.0,
+                           message="已终止，未完成的中间文件已清理",
+                           error=None, bytes=None)
         except Exception as error:  # pragma: no cover - surfaced to the page
+            temporary.unlink(missing_ok=True)
             with self._patch_lock:
                 job.update(state="failed", error=str(error),
                            message=f"下载失败：{error}")
+
+    def patch_cancel(self, job_id: str) -> Dict[str, Any]:
+        """Ask a running regional download to stop and clean its temporary file.
+
+        Cooperative: the worker checks the flag between range reads and before
+        it replaces the finished ``.npy``.  A previous complete patch for the
+        same rectangle is left alone -- cancelling a replacement must not erase
+        the data that was already good.
+        """
+        with self._patch_lock:
+            job = self._patches.get(job_id)
+            if job is None:
+                raise moonlib.MoonlibError(f"没有这个下载任务：{job_id}")
+            if job["state"] not in ("running", "queued", "cancelling"):
+                return dict(job)
+            event = self._patch_cancels.get(job_id)
+            if event is None:
+                raise moonlib.MoonlibError("这个下载任务已经结束。")
+            event.set()
+            job["state"] = "cancelling"
+            job["message"] = "正在终止…"
+            return dict(job)
 
     def patch_status(self, job_id: str) -> Dict[str, Any]:
         with self._patch_lock:
@@ -3957,6 +4113,7 @@ class MoonService:
             ),
             "satellite": satellite,
             "satellites": bool(request.get("satellites", True)),
+            "crater_suffix": bool(request.get("crater_suffix", False)),
             "avoid_overlap": bool(request.get("avoid_overlap", True)),
             "focus": focus,
             "related": related or None,
@@ -4448,6 +4605,7 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
         "font_px": max(6.0, min(400.0, _f(value, "font_px", DEFAULT_LABEL_FONT_PX))),
         "satellite": satellite,
         "satellites": bool(value.get("satellites", True)),
+        "crater_suffix": bool(value.get("crater_suffix", False)),
         "avoid_overlap": bool(value.get("avoid_overlap", True)),
         "lunar100": bool(value.get("lunar100", False)),
         "region": bool(value.get("region", False)),
@@ -4490,6 +4648,7 @@ class _AnimationLabelPainter:
             "only_illuminated": False,
             "satellite": spec.get("satellite", "full"),
             "satellites": bool(spec.get("satellites", True)),
+            "crater_suffix": bool(spec.get("crater_suffix", False)),
             "avoid_overlap": spec.get("avoid_overlap", True),
             "lunar100": bool(spec.get("lunar100", False)),
             "region": bool(spec.get("region", False)),
@@ -4931,7 +5090,10 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "limits": self.service.limits(),
                 "data_sources": self.service.data_sources(),
+                "terrain_rebuild": self.service.terrain_rebuild_status(),
             })
+        if path == "/api/terrain/rebuild":
+            return self._json(200, self.service.terrain_rebuild_status())
         if path == "/api/features":
             return self._json(200, self.service.features())
         if path == "/api/globe-texture":
@@ -5099,6 +5261,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.animation(request))
             if path == "/api/source":
                 return self._json(200, self.service.set_data_source(request))
+            if path == "/api/terrain/rebuild":
+                return self._json(200, self.service.start_terrain_rebuild(request))
+            match = re.fullmatch(r"/api/patch/(\d+)/cancel", path)
+            if match:
+                return self._json(200, self.service.patch_cancel(match.group(1)))
             if path == "/api/patch":
                 return self._json(200, self.service.patch_download(request))
             if path == "/api/hdr/jpeg":

@@ -22,7 +22,7 @@
        on the right, not a banner of its own. -->
   <div class="map-label-bar" id="map-label-bar" data-collapsed="true">
     <button class="ghost annotate" id="labels-toggle" aria-pressed="true"
-            title="显示或隐藏全部地貌标注：名称、点、轮廓圈与真实直径">月面地貌标注</button>
+            title="显示或隐藏全部地貌标注：名称、点与轮廓">月面地貌标注</button>
     <label class="check inline">名称
       <select id="name-language">
         <option value="zh" selected>中文</option>
@@ -30,13 +30,15 @@
       </select>
     </label>
     <label class="check inline" title="标注密度：百分比越低，画面上的名字越少">
-      密度 <input type="range" id="label-density" min="0" max="4" step="0.01" value="0.2"
-                     title="超过 100% 自动停用避让；100% 与 300% 处有断点；拉到 MAX 显示全部地貌">
-      <b id="density-value">20%</b>
+      密度 <input type="range" id="label-density" min="0" max="4" step="0.01" value="0.5"
+                     title="超过 300% 自动停用避让；100% 与 300% 处有断点；拉到 MAX 显示全部地貌">
+      <b id="density-value">50%</b>
     </label>
-    <!-- 测量工具：线量距离，Ctrl / ⌘ + 拖动量半径；数值写在图形旁边。 -->
+    <!-- 测量工具：线量距离，Shift + 拖动量半径；数值写在图形旁边。 -->
     <button class="ghost mini" id="map-measure" aria-pressed="false"
-            title="测量：在地图上拖一条线量地面距离；按住 Ctrl / ⌘ 拖动画圆量半径">测量</button>
+            title="测量：在地图上拖一条线量地面距离；按住 Shift 拖动画圆量半径">测量</button>
+    <button class="ghost mini" id="map-label-reset"
+            title="把所有地貌标注设置与分类开关复位">复位</button>
     <button class="ghost caret" id="classes-toggle" aria-expanded="false"
             title="展开标注设置"></button>
   </div>
@@ -93,13 +95,39 @@
             <option value="none">不画</option>
           </select>
         </label>
+        <button class="ghost mini format-toggle" id="label-satellite"
+                aria-pressed="true" title="切换卫星坑的标注写法：A 显示全名，a 只显示字母">A</button>
+        <label class="check inline" title="标注卫星坑：母坑名后带一个字母的小坑（如「阿贝 B」）">
+          <input type="checkbox" id="label-satellites" checked>
+          <span>卫星坑</span>
+        </label>
+        <label class="check inline" title="打开时环形坑只写名字（哥白尼、哥白尼 A）；关闭后所有环形坑都带「坑」字（哥白尼坑、哥白尼 A坑）">
+          <input type="checkbox" id="label-crater-suffix" checked>
+          <span>环形坑仅显示名字</span>
+        </label>
         <label class="check inline" title="停用避让算法，允许标注有重叠">
           <input type="checkbox" id="label-overlap">
           <span>停用避让</span>
         </label>
-        <label class="check inline" title="按地貌的真实直径画出轮廓圈">
-          <input type="checkbox" id="diameter-toggle" checked>
-          <span>真实直径</span>
+        <label class="check inline" title="按 IAU 轮廓数据绘制地貌边界：环形坑画圆，月溪与山脊沿线，月海等画区域边界">
+          <input type="checkbox" id="outline-toggle" checked>
+          <span>轮廓</span>
+        </label>
+        <label class="check inline" title="文字沿地貌走向排字：月溪、山脊、月谷按轮廓线条排，关闭后一律横排">
+          <input type="checkbox" id="text-follow-toggle" checked>
+          <span>文字跟随轮廓</span>
+        </label>
+        <label class="check inline" title="仅月海用官方直径的圆代替 IAU 轮廓，其余地貌保持轮廓路径">
+          <input type="checkbox" id="round-outline-toggle" checked>
+          <span>月海使用圆形轮廓</span>
+        </label>
+        <label class="check inline" title="显示月溪、山脊、月谷等线状地貌的轮廓（与月海这类闭合区域轮廓分开）">
+          <input type="checkbox" id="linear-outline-toggle" checked>
+          <span>显示线状地貌轮廓</span>
+        </label>
+        <label class="check inline" title="显示山脉的轮廓；取消后即使线状地貌轮廓打开，山脉也不画轮廓">
+          <input type="checkbox" id="mountain-outline-toggle" checked>
+          <span>显示山脉轮廓</span>
         </label>
         <button class="ghost mini" id="manual-clear"
                 title="清空手动标记（Ctrl / ⌘ + 点击地图添加，拖动标记移动，双击改名）">清空标记</button>
@@ -222,6 +250,8 @@
           <option value="equirect" selected>等距圆柱</option>
           <option value="mercator">墨卡托</option>
           <option value="globe">球面 / 3D</option>
+          <!-- 地球视角已封存，不提供入口；投影与交互代码保留在 map.js。
+               记录见 docs/12-地球视角封存.md。 -->
         </select>
       </label>
     </section>
@@ -266,7 +296,11 @@
     <button class="map-exit-fullscreen" id="map-exit-fullscreen" hidden>退出全屏</button>
     <div class="map-tooltip" id="map-tooltip" hidden></div>
     <div class="map-measure-chart" id="map-measure-chart" hidden>
+      <div class="map-measure-chart-bar" id="map-measure-chart-bar"
+           title="拖动移动曲线图；右下角调整大小"></div>
       <canvas id="map-measure-chart-canvas"></canvas>
+      <div class="map-measure-chart-resize" id="map-measure-chart-resize"
+           title="拖动调整曲线图大小"></div>
     </div>
     <div class="map-coords" id="map-coords">—</div>
     <div class="scale-bar" id="scale-bar">
@@ -361,8 +395,10 @@
         <div class="data-actions">
           <button class="ghost mini" id="data-refresh">刷新状态</button>
           <button class="ghost mini" id="data-download" title="下载 LOLA 256 ppd 全球 DEM（约 8.5 GB）">下载高分辨率 DEM</button>
+          <button class="ghost mini" id="data-rebuild" title="清空已烘焙的金字塔，按当前 DEM 重新烘焙整月面金字塔；耗时较长">重新构建金字塔</button>
         </div>
         <div class="hint" id="data-download-status"></div>
+        <div class="hint" id="data-rebuild-status"></div>
       </section>
     </div>
 
@@ -378,7 +414,7 @@
   <span id="status">正在连接本地地图服务…</span>
   <span id="source-label"></span>
   <span id="feature-count"></span>
-  <span class="map-version" id="map-version">1.0.2</span>
+  <span class="map-version" id="map-version">1.1.0</span>
 </footer>
 
 <div class="mask-backdrop" id="photo-mask-backdrop" hidden>

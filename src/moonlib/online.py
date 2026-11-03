@@ -37,6 +37,10 @@ from .errors import MoonlibError
 
 ProgressHook = Callable[[float, str], None]
 
+
+class PatchCancelled(Exception):
+    """The caller asked for the regional download to stop."""
+
 #: How many range requests are in flight at once.  These hosts throttle a single
 #: connection hard; ten is what turns a four-minute patch into twenty seconds.
 WORKERS = 6
@@ -239,6 +243,7 @@ def fetch_patch(
     *,
     progress: Optional[ProgressHook] = None,
     name: Optional[str] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Download one rectangle and write a regional ``.npy``/``.json`` pair.
 
@@ -250,6 +255,10 @@ def fetch_patch(
     product = CATALOGUE.get(product_id)
     if product is None:
         raise MoonlibError(f"未知的在线数据源：{product_id}")
+    def stopped() -> bool:
+        return should_stop is not None and bool(should_stop())
+    if stopped():
+        raise PatchCancelled("下载已终止")
     ppd = product["pixels_per_degree"]
     raw_lon_min, raw_lon_max = float(lon_min), float(lon_max)
     if raw_lon_max < raw_lon_min or (raw_lon_max - raw_lon_min) > 180.0:
@@ -306,6 +315,8 @@ def fetch_patch(
     lock = threading.Lock()
 
     for index, job in enumerate(jobs, start=1):
+        if stopped():
+            raise PatchCancelled("下载已终止")
         row0, row1 = job["rows"]
         col0, col1 = job["cols"]
         row_bytes = job["tile_size"][0] * dtype.itemsize
@@ -313,6 +324,8 @@ def fetch_patch(
 
         def one(offset: int, job=job, block=block, row0=row0, col0=col0,
                 col1=col1, row_bytes=row_bytes, dtype=dtype) -> None:
+            if stopped():
+                raise PatchCancelled("下载已终止")
             row = row0 + offset
             start = product["head"] + row * row_bytes + col0 * dtype.itemsize
             stop = start + (col1 - col0) * dtype.itemsize - 1
@@ -326,6 +339,8 @@ def fetch_patch(
 
         with ThreadPoolExecutor(WORKERS) as pool:
             list(pool.map(one, range(row1 - row0)))
+        if stopped():
+            raise PatchCancelled("下载已终止")
 
         py0, py1, px0, px1 = job["paste"]
         values[py0:py1, px0:px1] = np.asarray(block, dtype=np.float32) * product["to_km"]
@@ -335,8 +350,14 @@ def fetch_patch(
     # np.save appends ".npy" to a path that does not already end in it, so the
     # temporary is written through a handle instead of by name.
     temporary = destination.with_name(destination.name + ".part")
+    if stopped():
+        temporary.unlink(missing_ok=True)
+        raise PatchCancelled("下载已终止")
     with open(temporary, "wb") as handle:
         np.save(handle, values)
+    if stopped():
+        temporary.unlink(missing_ok=True)
+        raise PatchCancelled("下载已终止")
     temporary.replace(destination)
     sidecar = {
         "name": label,

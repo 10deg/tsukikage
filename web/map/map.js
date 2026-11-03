@@ -61,21 +61,39 @@ const LAYER_COLORS = {
 const POINT_CLASSES = new Set(['statio', 'lunar100', 'libration', 'impact', 'albedo', 'imp', 'other']);
 const LABEL_TIER0 = new Set(['basin', 'lunar100', 'libration']);
 const LABEL_TIER1 = new Set(['mare']);
+const TEXT_FOLLOW_CLASSES = new Set([
+  'rima', 'vallis', 'mons', 'dorsum', 'rupes', 'catena',
+]);
+
 const LABEL_TIER2 = new Set(['lacus', 'sinus', 'palus', 'rima', 'vallis',
   'mons', 'dorsum', 'rupes', 'catena', 'promontorium', 'albedo']);
 const LARGE_CRATER_KM = 100;
-const LARGE_SATELLITE_KM = 30;
 
-//: 真实直径 circles are meaningful for these classes only.  A landing site is
-//: a crosshair, a dorsum or rima is a line, and a small dome is a point: drawing
-//: a true-diameter circle for those reads as a measured rim that is not there.
-const RIM_CLASSES = new Set(['crater', 'basin', 'mare', 'lacus', 'sinus']);
 //: Region names sit across their formation, like the full-disk page, instead of
 //: hanging off a marker.
 const REGION_LABEL_CLASSES = new Set(['basin', 'mare', 'lacus', 'sinus']);
 
 const $ = (id) => document.getElementById(id);
 
+/** The IAU letter of a satellite crater, or an empty string. */
+function satelliteLetter(feature) {
+  const match = /\s([A-Z]{1,2})$/.exec(String(feature && feature.name_en || '').trim());
+  return match ? match[1] : '';
+}
+
+/** Is this row a crater for the 坑 suffix rule? */
+function craterish(feature) {
+  if (!feature) return false;
+  if (feature.class === 'crater') return true;
+  return feature.class === 'libration'
+    && /crater\s*$/i.test(String(feature.note || ''));
+}
+
+/** The name a label carries, in the current language and label modes.
+ *
+ * Search results deliberately do not use this: the A/a switch is about what a
+ * caption says, not about what the reader can find.
+ */
 function featureName(feature) {
   if (!feature) return '';
   // The Lunar 100 is published in English; its number and name stay English in
@@ -83,10 +101,40 @@ function featureName(feature) {
   if (feature.class === 'lunar100') {
     return feature.name_en || feature.name || '';
   }
-  if (state.language === 'en') {
-    return feature.name_en || feature.name_zh || feature.name || '';
+  if (satelliteLetter(feature) && !state.satelliteFull) {
+    return satelliteLetter(feature);
   }
-  return feature.name_zh || feature.name_en || feature.name || '';
+  let name = state.language === 'en'
+    ? (feature.name_en || feature.name_zh || feature.name || '')
+    : (feature.name_zh || feature.name_en || feature.name || '');
+  if (state.craterSuffix && state.language !== 'en' && craterish(feature)) {
+    name = `${name.replace(/坑\s*$/, '')}坑`;
+  }
+  return name;
+}
+
+/** The full name a search result and the selection panel should show. */
+function featureFullName(feature) {
+  if (!feature) return '';
+  if (feature.class === 'lunar100') {
+    return feature.name_en || feature.name || '';
+  }
+  return state.language === 'en'
+    ? (feature.name_en || feature.name_zh || feature.name || '')
+    : (feature.name_zh || feature.name_en || feature.name || '');
+}
+
+/** A search result: Chinese name, with the original English in parentheses. */
+function searchName(feature) {
+  if (!feature) return '';
+  if (feature.class === 'lunar100') {
+    return feature.name_en || feature.name || '';
+  }
+  const zh = String(feature.name_zh || '').trim();
+  const en = String(feature.name_en || '').trim();
+  if (state.language === 'en') return en || zh || feature.name || '';
+  if (zh && en && zh !== en) return `${zh}（${en}）`;
+  return zh || en || feature.name || '';
 }
 
 function layerLabel(layer) {
@@ -104,7 +152,14 @@ const state = {
   active: new Set(),
   labels: true,
   marksOn: true,
-  diameters: true,
+  outlines: true,
+  textFollow: true,
+  roundOutlines: true,
+  linearOutlines: true,
+  mountainOutlines: true,
+  satelliteFull: true,
+  satellites: true,
+  craterSuffix: false,
   labelFont: 0,
   labelColour: true,
   textColor: '#eef2ff',
@@ -135,6 +190,9 @@ const state = {
   featureSeq: 0,
   featureTimer: null,
   selected: null,
+  textDrag: null,
+  labelShift: {},
+  textTracks: {},
   hover: null,
   language: 'zh',
   density: {},
@@ -145,6 +203,8 @@ const state = {
   marks: { terminator: true, poles: true, subsolar: true, libration: true,
            equator: true, graticule: true },
   globe: { lon: 0, lat: 0, zoom: 1 },
+  earthPanX: 0,
+  earthPanY: 0,
   sourceCanvas: null,
   sourcePixels: null,
   sourceKey: '',
@@ -243,6 +303,75 @@ function globeRadius() {
   return Math.min(state.width, state.height) * 0.44 * state.globe.zoom;
 }
 
+/** Keep the Earth-view window over the Moon, never over empty space.
+ *
+ * The Earth view has a fixed orientation: the reader moves the window, not the
+ * sphere.  Panning is only allowed as far as the magnified disc still covers
+ * the viewport; zooming out therefore walks the pan back to the centre instead
+ * of exposing a blank margin.
+ */
+function clampEarthPan() {
+  if (state.projection !== 'earth') return;
+  const radius = Math.max(1, globeRadius());
+  const maxX = Math.max(0, 1 - state.width / (2 * radius));
+  const maxY = Math.max(0, 1 - state.height / (2 * radius));
+  state.earthPanX = clamp(state.earthPanX, -maxX, maxX);
+  state.earthPanY = clamp(state.earthPanY, -maxY, maxY);
+}
+
+/** The sphere and the Earth view share the camera, the basis and every marker
+ *  path; they differ only in the per-pixel inverse projection. */
+function isGlobeLike() {
+  return state.projection === 'globe' || state.projection === 'earth';
+}
+
+/** Earth-Moon distance in Moon radii for 地球视角. */
+function earthViewDistance() {
+  const moon = (state.lighting && state.lighting.moon) || {};
+  const km = Number(moon.distance_km);
+  const radius = 1737.4;
+  if (Number.isFinite(km) && km > radius * 1.001) return km / radius;
+  return 384400.0 / radius;
+}
+
+/** Screen radius of the apparent limb, in units of the Moon's own radius. */
+function earthLimbScale(distance) {
+  return distance / Math.sqrt(Math.max(1e-9, distance * distance - 1.0));
+}
+
+/** A body-fixed unit vector -> the Earth view's normalised screen coords. */
+function earthScreenPoint(x, y, z) {
+  const distance = earthViewDistance();
+  if (!(z > 1.0 / distance)) return null;
+  const scale = (distance / (distance - z)) / earthLimbScale(distance);
+  return {
+    x: x * scale + state.earthPanX,
+    y: y * scale + state.earthPanY,
+  };
+}
+
+/** Normalised Earth-view screen coords -> a body-fixed unit vector, or null. */
+function earthSurfacePoint(nx, ny) {
+  const distance = earthViewDistance();
+  const limb = earthLimbScale(distance);
+  const px = (nx - state.earthPanX) * limb;
+  const py = (ny - state.earthPanY) * limb;
+  const pz = -distance;
+  const norm = Math.hypot(px, py, pz);
+  if (!(norm > 0)) return null;
+  const dx = px / norm;
+  const dy = py / norm;
+  const dz = pz / norm;
+  const disc = 1.0 - distance * distance
+    + distance * distance * dz * dz;
+  if (!(disc >= 0)) return null;
+  const t = -distance * dz - Math.sqrt(disc);
+  if (!(t > 0)) return null;
+  const z = distance + t * dz;
+  if (z < 1.0 / distance - 1e-9) return null;
+  return { x: t * dx, y: t * dy, z };
+}
+
 /** The zoom level whose detail rules the current view.
  *
  * The globe's wheel changes ``globe.zoom`` rather than ``state.zoom``: the
@@ -253,7 +382,7 @@ function globeRadius() {
  * "how much detail is on screen" for all three projections.
  */
 function viewZoom() {
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     return Math.log2(Math.max(0.45, state.globe.zoom)) + 3.0;
   }
   return state.zoom;
@@ -294,7 +423,7 @@ function mercatorY(lat) {
 }
 
 function lonlatToScreen(lon, lat) {
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     const { up, east, north } = globeBasis();
     const lo = lon * Math.PI / 180;
     const la = lat * Math.PI / 180;
@@ -307,10 +436,13 @@ function lonlatToScreen(lon, lat) {
     const y = v[0] * north[0] + v[1] * north[1] + v[2] * north[2];
     const z = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
     const radius = globeRadius();
-    if (z <= 0) return { x: -10000, y: -10000, visible: false };
+    const mapped = state.projection === 'earth'
+      ? earthScreenPoint(x, y, z)
+      : (z > 0 ? { x, y } : null);
+    if (!mapped) return { x: -10000, y: -10000, visible: false };
     return {
-      x: state.width / 2 + x * radius,
-      y: state.height / 2 - y * radius,
+      x: state.width / 2 + mapped.x * radius,
+      y: state.height / 2 - mapped.y * radius,
       visible: true,
     };
   }
@@ -370,19 +502,32 @@ function lonlatToScreenRaw(lon, lat) {
 }
 
 function screenToLonLat(sx, sy) {
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     const radius = globeRadius();
     if (!(radius > 0)) return null;
     const nx = (sx - state.width / 2) / radius;
     const ny = (state.height / 2 - sy) / radius;
-    const rho = Math.hypot(nx, ny);
-    if (rho > 1) return null;
-    const nz = Math.sqrt(Math.max(0, 1 - rho * rho));
     const { up, east, north } = globeBasis();
+    let qx;
+    let qy;
+    let qz;
+    if (state.projection === 'earth') {
+      const surface = earthSurfacePoint(nx, ny);
+      if (!surface) return null;
+      qx = surface.x;
+      qy = surface.y;
+      qz = surface.z;
+    } else {
+      const rho = Math.hypot(nx, ny);
+      if (rho > 1) return null;
+      qx = nx;
+      qy = ny;
+      qz = Math.sqrt(Math.max(0, 1 - rho * rho));
+    }
     const v = [
-      nx * east[0] + ny * north[0] + nz * up[0],
-      nx * east[1] + ny * north[1] + nz * up[1],
-      nx * east[2] + ny * north[2] + nz * up[2],
+      qx * east[0] + qy * north[0] + qz * up[0],
+      qx * east[1] + qy * north[1] + qz * up[1],
+      qx * east[2] + qy * north[2] + qz * up[2],
     ];
     return {
       lon: Math.atan2(v[1], v[0]) * 180 / Math.PI,
@@ -420,7 +565,7 @@ function screenToLonLat(sx, sy) {
  */
 function clampCenter() {
   state.centerLon = wrapLon(state.centerLon);
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     state.centerLat = clamp(Number(state.centerLat) || 0, -89, 89);
     return;
   }
@@ -448,11 +593,16 @@ function clampCenter() {
 
 function fitView() {
   endInteraction();
-  if (state.projection === 'globe') {
-    state.globe = { lon: 0, lat: 0, zoom: 1 };
+  if (isGlobeLike()) {
+    const sub = (state.lighting && state.lighting.sub_earth) || {};
+    state.globe = state.projection === 'earth'
+      ? { lon: Number(sub.lon) || 0, lat: Number(sub.lat) || 0, zoom: 1 }
+      : { lon: 0, lat: 0, zoom: 1 };
     state.centerLon = 0;
     state.centerLat = 0;
     state.mercY = 0;
+    state.earthPanX = 0;
+    state.earthPanY = 0;
     flushRender();
     scheduleFeatures();
     scheduleHash();
@@ -505,10 +655,11 @@ function recenterAfterZoom(geo, pivot) {
 }
 
 function zoomTo(nextZoom, anchor) {
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     state.globe.zoom = clamp(
       state.globe.zoom * 2 ** (nextZoom - state.zoom), 0.45, GLOBE_MAX_ZOOM);
     state.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+    clampEarthPan();
     render();
     scheduleFeatures();
     return;
@@ -524,8 +675,9 @@ function zoomTo(nextZoom, anchor) {
 }
 
 function zoomBy(factor, anchor, defer) {
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     state.globe.zoom = clamp(state.globe.zoom * factor, 0.45, GLOBE_MAX_ZOOM);
+    clampEarthPan();
     if (defer) renderSoon();
     else render();
     scheduleFeatures();
@@ -564,6 +716,7 @@ function resizeCanvas() {
   canvas.height = Math.max(1, Math.round(state.height * state.dpr));
   canvas.style.width = state.width + 'px';
   canvas.style.height = state.height + 'px';
+  if (state.projection === 'earth') clampEarthPan();
   if (!state.fitted) {
     state.fitted = true;
     fitView();
@@ -687,7 +840,7 @@ function locatePhoto() {
     setStatus('照片中心落在月球外', 'error');
     return;
   }
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     state.globe.lon = point.lon;
     state.globe.lat = point.lat;
   } else {
@@ -746,7 +899,7 @@ function ensurePhotoOverlay(entry) {
     state.photoOverlays.set(id, record);
   }
   record.loading = true;
-  fetch('/api/map/photos/' + encodeURIComponent(id) + '/overlay')
+  fetch('/api/map/photos/' + encodeURIComponent(id) + '/overlay', { cache: 'no-store' })
     .then(async (response) => {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'overlay failed');
@@ -1213,7 +1366,7 @@ function drawWebGLPhotoOverlay() {
   gl.uniform2f(u.u_resolution, width, height);
   gl.uniform2f(u.u_view, state.width, state.height);
   gl.uniform1f(u.u_dpr, dpr);
-  gl.uniform1i(u.u_projection, state.projection === 'globe' ? 2
+  gl.uniform1i(u.u_projection, isGlobeLike() ? 2
     : state.projection === 'mercator' ? 1 : 0);
   gl.uniform2f(u.u_center, state.centerLon, state.centerLat);
   gl.uniform1f(u.u_px_per_deg, pxPerDeg);
@@ -1701,6 +1854,10 @@ function setRightTab(panel) {
       const note = $('data-download-status');
       if (note) note.textContent = String(error.message || error);
     });
+    loadRebuildStatus().catch((error) => {
+      const note = $('data-rebuild-status');
+      if (note) note.textContent = String(error.message || error);
+    });
   }
 }
 
@@ -1729,7 +1886,69 @@ async function loadDataStatus() {
   renderDataStatus(await response.json());
 }
 
+let rebuildTimer = null;
+let rebuildApplied = 0;
+
+function renderRebuildStatus(status) {
+  const button = $('data-rebuild');
+  const note = $('data-rebuild-status');
+  if (!button || !note) return;
+  const running = !!(status && status.running);
+  button.disabled = running;
+  button.textContent = running ? '正在重建…' : '重新构建金字塔';
+  if (running) {
+    const pct = Math.round((Number(status.fraction) || 0) * 100);
+    note.textContent = `${pct}% ${status.message || ''}`.trim();
+  } else if (status && status.error) {
+    note.textContent = status.error;
+  } else if (status && status.finished) {
+    note.textContent = `完成 ${Number(status.seconds || 0).toFixed(1)} s`;
+  } else {
+    note.textContent = '';
+  }
+}
+
+async function loadRebuildStatus() {
+  const response = await fetch('/api/map/data/rebuild');
+  if (!response.ok) throw new Error(await response.text());
+  const status = await response.json();
+  renderRebuildStatus(status);
+  if (status.running) {
+    if (rebuildTimer) clearTimeout(rebuildTimer);
+    rebuildTimer = setTimeout(loadRebuildStatus, 1000);
+  } else if (status.finished && !status.error
+             && rebuildApplied !== Number(status.finished)) {
+    rebuildApplied = Number(status.finished);
+    clearBaseCaches();
+    state.projectedBase = null;
+    loadDataStatus().catch(() => {});
+    loadHealth().catch(() => {});
+    render();
+  }
+}
+
 function wireDataSettings() {
+  if ($('data-rebuild')) {
+    $('data-rebuild').addEventListener('click', () => {
+      fetch('/api/map/data/rebuild', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+        .then((response) => response.json()
+          .then((body) => ({ response, body })))
+        .then(({ response, body }) => {
+          if (!response.ok) throw new Error(body.error || 'rebuild failed');
+          renderRebuildStatus(body);
+          if (rebuildTimer) clearTimeout(rebuildTimer);
+          rebuildTimer = setTimeout(loadRebuildStatus, 500);
+        })
+        .catch((error) => {
+          const note = $('data-rebuild-status');
+          if (note) note.textContent = String(error.message || error);
+        });
+    });
+  }
   if ($('data-refresh')) {
     $('data-refresh').addEventListener('click', () => {
       loadDataStatus().catch((error) => {
@@ -2396,6 +2615,17 @@ function flushRender() {
 }
 
 function render() {
+  // The stage's flex layout can settle a frame after the first paint.  If the
+  // canvas still carries the pre-layout size, the browser stretches it to the
+  // stage box and the globe's limb reads as a squashed ellipse until a tile
+  // happens to trigger a resize.  Measure before drawing instead.
+  const rect = stage.getBoundingClientRect();
+  if (rect.width > 1 && rect.height > 1
+      && (Math.abs(rect.width - state.width) > 0.5
+          || Math.abs(rect.height - state.height) > 0.5)) {
+    resizeCanvas();
+    return;
+  }
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
   ctx.clearRect(0, 0, state.width, state.height);
   drawBackground();
@@ -2415,7 +2645,7 @@ function render() {
     // Magnification relative to the z0 tile grid: each zoom step doubles the
     // number of map pixels on screen, so this is the factor a reader means by
     // "how far in am I", not the raw tile-pixel scale.
-    const magnification = state.projection === 'globe'
+    const magnification = isGlobeLike()
       ? state.globe.zoom
       : state.scale * 2 ** (state.zoom + 1);
     zoomLabel.textContent = `z${state.zoom} · ${magnification.toFixed(1)}x`;
@@ -2577,6 +2807,15 @@ function drawAncestor(x, y, screenX, screenY, size) {
 function lightZoneOffset() {
   const value = Number($('light-tz') && $('light-tz').value);
   return Number.isFinite(value) ? value : 0;
+}
+
+/** A UTC offset as the page writes it: the sign is always there, +8 or -5. */
+function formatZoneOffset(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '+0';
+  const rounded = Math.round(number * 10) / 10;
+  const sign = rounded >= 0 ? '+' : '';
+  return sign + (Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1));
 }
 
 /** Set the date/time controls to "now" in the chosen observer time zone. */
@@ -2753,6 +2992,12 @@ async function loadLighting() {
   if (!response.ok) throw new Error(await response.text());
   state.lighting = await response.json();
   state.lightingOn = $('light-on').checked;
+  if (state.projection === 'earth' && state.lighting.sub_earth) {
+    // The Earth view is always centred on the current sub-Earth point; moving
+    // the clock changes the libration and the view follows it.
+    state.globe.lon = Number(state.lighting.sub_earth.lon) || 0;
+    state.globe.lat = Number(state.lighting.sub_earth.lat) || 0;
+  }
   const subsolar = state.lighting.subsolar;
   state.lightingKey = state.lightingOn
     ? `${subsolar.lon.toFixed(3)},${subsolar.lat.toFixed(3)}` : '';
@@ -2798,6 +3043,10 @@ async function loadLighting() {
  */
 function projectionSourceWindow() {
   if (state.projection === 'equirect') return null;
+  // 地球视角 is sealed (no menu entry) but its projection is kept: the fixed
+  // orientation moves the window, and a local source window would leave the
+  // newly exposed ground blank.  The whole-sphere texture is the right trade.
+  if (state.projection === 'earth') return null;
   // The globe's wheel changes globe.zoom, not state.zoom.  The source texture
   // has to follow the magnification the reader is actually looking at.
   const zoomLevel = viewZoom();
@@ -2964,11 +3213,16 @@ function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
   const cx = state.width * 0.5 * scale;
   const cy = state.height * 0.5 * scale;
   const invRadius = 1 / Math.max(radius, 1e-9);
-  const x0 = Math.max(0, Math.floor(cx - radius - 0.5));
-  const x1 = Math.min(width - 1, Math.ceil(cx + radius - 0.5));
-  const y0 = Math.max(0, Math.floor(cy - radius - 0.5));
-  const y1 = Math.min(height - 1, Math.ceil(cy + radius - 0.5));
+  const earth = state.projection === 'earth';
+  const panPxX = earth ? state.earthPanX * radius : 0;
+  const panPxY = earth ? state.earthPanY * radius : 0;
+  const x0 = Math.max(0, Math.floor(cx + panPxX - radius - 0.5));
+  const x1 = Math.min(width - 1, Math.ceil(cx + panPxX + radius - 0.5));
+  const y0 = Math.max(0, Math.floor(cy - panPxY - radius - 0.5));
+  const y1 = Math.min(height - 1, Math.ceil(cy - panPxY + radius - 0.5));
   const invDeg = 180 / Math.PI;
+  const distance = earth ? earthViewDistance() : 0;
+  const limb = earth ? earthLimbScale(distance) : 1;
   const uSpan = bounds ? Math.max(1e-9, bounds.east - bounds.west) : 360;
   const vSpan = bounds ? Math.max(1e-9, bounds.north - bounds.south) : 180;
   const vScale = bounds ? -1 / vSpan : -1 / 180;
@@ -2982,12 +3236,40 @@ function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
     const row = y * width * 4;
     for (let x = x0; x <= x1; x += 1) {
       const nx = (x + 0.5 - cx) * invRadius;
-      const rho2 = nx * nx + ny2;
+      const ex = earth ? nx - state.earthPanX : nx;
+      const ey = earth ? ny - state.earthPanY : ny;
+      const rho2 = ex * ex + ey * ey;
       if (rho2 > 1) continue;
-      const nz = Math.sqrt(1 - rho2);
-      const vx = nx * east[0] + ny * north[0] + nz * up[0];
-      const vy = nx * east[1] + ny * north[1] + nz * up[1];
-      const vz = nx * east[2] + ny * north[2] + nz * up[2];
+      let qx;
+      let qy;
+      let qz;
+      if (earth) {
+        // Perspective: the camera is at (0, 0, d) in the sub-Earth frame and
+        // the screen plane is scaled so the apparent limb sits at radius 1.
+        const px = ex * limb;
+        const py = ey * limb;
+        const pz = -distance;
+        const norm = Math.sqrt(px * px + py * py + pz * pz);
+        const dx = px / norm;
+        const dy = py / norm;
+        const dz = pz / norm;
+        const disc = 1.0 - distance * distance
+          + distance * distance * dz * dz;
+        if (disc < 0) continue;
+        const t = -distance * dz - Math.sqrt(disc);
+        if (!(t > 0)) continue;
+        qz = distance + t * dz;
+        if (qz < 1.0 / distance - 1e-9) continue;
+        qx = t * dx;
+        qy = t * dy;
+      } else {
+        qx = ex;
+        qy = ey;
+        qz = Math.sqrt(1 - rho2);
+      }
+      const vx = qx * east[0] + qy * north[0] + qz * up[0];
+      const vy = qx * east[1] + qy * north[1] + qz * up[1];
+      const vz = qx * east[2] + qy * north[2] + qz * up[2];
       const lon = Math.atan2(vy, vx) * invDeg;
       // The source window may cross the dateline; measure from its west edge
       // circularly, so a window 170°..190° still maps 185° into the middle
@@ -3023,7 +3305,7 @@ function drawProjectedBase() {
   // drawImage stretch it; the base is sharp again as soon as the pointer (or
   // wheel) stops.  The budget is in pixels, so a large display gets a coarser
   // moving base instead of dropping more frames than a small one.
-  const resolution = state.interacting && state.projection === 'globe'
+  const resolution = state.interacting && isGlobeLike()
     ? Math.max(0.25, Math.min(1,
       Math.sqrt(GLOBE_MOVING_PIXELS / Math.max(1, state.width * state.height))))
     : 1;
@@ -3032,6 +3314,7 @@ function drawProjectedBase() {
   const cacheKey = [
     state.projection, state.centerLon, state.centerLat, state.mercY,
     state.globe.lon, state.globe.lat, state.globe.zoom,
+    state.earthPanX, state.earthPanY,
     width, height, resolution, state.scale, state.sourceReadyKey,
     state.brightness,
   ].join('|');
@@ -3110,12 +3393,17 @@ function drawProjectedBase() {
 }
 
 function drawGlobeOutline() {
-  if (state.projection !== 'globe') return;
+  if (!isGlobeLike()) return;
   ctx.save();
   ctx.strokeStyle = 'rgba(160, 190, 235, .28)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.arc(state.width / 2, state.height / 2, globeRadius(), 0, Math.PI * 2);
+  const radius = globeRadius();
+  const panX = state.projection === 'earth' ? state.earthPanX : 0;
+  const panY = state.projection === 'earth' ? state.earthPanY : 0;
+  ctx.arc(state.width / 2 + panX * radius,
+          state.height / 2 - panY * radius,
+          radius, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
@@ -3124,7 +3412,7 @@ function graticuleStep() {
   // Deliberately much coarser than the old 30°/10°/5° ladder: the grid is an
   // orientation aid, not a second set of landform labels, and it was reading
   // as one.  The globe uses its own magnification, not the 2D tile zoom.
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     const zoom = state.globe.zoom;
     return zoom >= 8 ? 10 : zoom >= 4 ? 15 : zoom >= 2 ? 30 : 60;
   }
@@ -3145,7 +3433,7 @@ function graticuleParallels(step) {
 function drawGraticule() {
   if (!state.marksOn || !state.marks.graticule) return;
   const step = graticuleStep();
-  const globe = state.projection === 'globe';
+  const globe = isGlobeLike();
   const font = '9px "PingFang SC", system-ui, sans-serif';
   // Neutral grey, not a class colour: the orange grid competed with the
   // landform captions and repeated the warm tones of basins and maria.
@@ -3238,10 +3526,10 @@ function activeFeatureClasses() {
   return [...state.active].filter((key) => known.has(key));
 }
 
-/** Avoidance is switched off automatically once any class is over 100%. */
+/** Avoidance is switched off automatically once any class is over 300%. */
 function labelAvoidanceEnabled() {
   if (!state.avoidOverlap) return false;
-  return !Object.values(state.density || {}).some((value) => Number(value) > 1);
+  return !Object.values(state.density || {}).some((value) => Number(value) > 3);
 }
 
 /** Is the density slider at its MAX notch: every catalogue feature, no size floor?
@@ -3334,7 +3622,7 @@ async function refreshFeatures() {
   let east;
   let north;
   let south;
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     const bounds = globeFeatureBounds();
     west = bounds.west;
     east = bounds.east;
@@ -3357,6 +3645,9 @@ async function refreshFeatures() {
     west: String(west), east: String(east),
     south: String(south), north: String(north),
     classes: classes.join(','),
+    // Text-follow needs the paths even when the outline itself is hidden,
+    // so the query carries them whenever either switch is on.
+    outlines: (state.outlines || state.textFollow) ? '1' : '0',
     // The tile zoom stays the flat map's; the catalogue's size floor follows
     // the *magnification* the reader is actually looking at.
     zoom: String(max ? 8 : Math.floor(viewZoom())),
@@ -3370,6 +3661,24 @@ async function refreshFeatures() {
     if (seq !== state.featureSeq) return;
     state.features = payload.features || [];
     state.featureTotal = Number(payload.total) || state.features.length;
+    // The outline file is a download, not a build product: a checkout without
+    // it still runs the map, just with the switch disabled.
+    const outlineToggle = $('outline-toggle');
+    if (outlineToggle && payload.outlines_available !== undefined) {
+      const available = payload.outlines_available !== false;
+      outlineToggle.title = available
+        ? '按 IAU 轮廓数据绘制地貌边界：环形坑画圆，月溪与山脊沿线，月海等画区域边界'
+        : '未找到 moon_outlines.geojson：先运行 tools/fetch_moon_outlines.py';
+      // Without the download the page still has the old diameter circles, so
+      // it degrades to them instead of losing the outline layer altogether.
+      const roundToggle = $('round-outline-toggle');
+      if (!available && roundToggle) {
+        state.roundOutlines = true;
+        roundToggle.checked = true;
+        roundToggle.disabled = true;
+        roundToggle.title = '未找到 moon_outlines.geojson：月海只能使用圆形轮廓';
+      }
+    }
     updateFeatureCount();
     render();
   } catch (error) {
@@ -3385,7 +3694,7 @@ function featurePixels(feature) {
     / ((world.w / 360) * state.scale);
   const diameter = Math.max(0, Number(feature.diameter_km) || 0);
   let radius;
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     radius = Math.max(2.2, Math.min(48,
       (diameter / 3474.8) * globeRadius() * 2));
   } else {
@@ -3406,6 +3715,25 @@ function insideScreen(point, margin) {
   const pad = margin || 12;
   return point.x >= -pad && point.x <= state.width + pad
     && point.y >= -pad && point.y <= state.height + pad;
+}
+
+/** Does any part of a feature's outline cross the view?
+ *
+ * The marker is the catalogue centre, and at high magnification a long rille's
+ * centre is often outside the frame while the rille itself runs right through
+ * it.  Filtering on the centre alone is why some rilles vanished exactly when
+ * the reader zoomed in to look at them.
+ */
+function outlineOnScreen(feature, margin) {
+  const outline = feature && feature.outline;
+  const points = outline && (outline.path || outline.ring);
+  if (!points || points.length < 2) return false;
+  const step = Math.max(1, Math.floor(points.length / 96));
+  for (let index = 0; index < points.length; index += step) {
+    const point = lonlatToScreen(points[index][0], points[index][1]);
+    if (point.visible !== false && insideScreen(point, margin)) return true;
+  }
+  return false;
 }
 
 /** Font size for the map's names, or the reader's typed value. */
@@ -3435,26 +3763,120 @@ function labelTier(feature) {
   if (LABEL_TIER2.has(key)) return 2;
   const diameter = Number(feature.diameter_km) || 0;
   if (key === 'crater') {
-    const satellite = /\s[A-Z]{1,2}$/.test(String(feature.name_en || ''));
-    if (satellite) return diameter >= LARGE_SATELLITE_KM ? 3 : 4;
+    // A satellite crater never outranks its parent: the parent is the place,
+    // the letter is a detail on it.  Within the satellite tier the ordinary
+    // diameter sort puts the larger ones first.
+    if (satelliteLetter(feature)) return 4;
     return diameter >= LARGE_CRATER_KM ? 2 : 3;
   }
   return 5;
 }
 
+/** Caption size by priority tier: a nudge, except 月海 which is much larger. */
+function labelFontFor(feature) {
+  const tier = labelTier(feature);
+  const delta = tier === 0 ? 1.0
+    : tier === 1 ? 3.5
+      : tier === 2 ? 0.5
+        : tier === 3 ? 0
+          : -0.5;
+  return Math.max(6, labelFontPx() + delta);
+}
+
+/** Put the label layer and the class switches back to their first-paint state.
+ *
+ * The page starts with 轮廓, 文字跟随轮廓 and 月海使用圆形轮廓 on, every
+ * ordinary class on except the atlas lists, and 50% density.  Resetting to
+ * anything else would be a different page from the one just opened.
+ */
+function resetLabelSettings() {
+  const setValue = (id, value) => {
+    const node = $(id);
+    if (!node) return;
+    if (node.type === 'checkbox') node.checked = !!value;
+    else node.value = String(value);
+  };
+  state.labelFont = 0;
+  state.labelColour = true;
+  state.textColor = '#eef2ff';
+  state.textStroke = '#030509';
+  state.textStrokeWidth = 1.2;
+  state.markerStroke = '#030509';
+  state.markerStrokeWidth = 0.6;
+  state.textBold = false;
+  state.outlineColor = '#b4d6ff';
+  state.outlineWidth = 1;
+  state.outlineStyle = 'solid';
+  state.avoidOverlap = true;
+  state.outlines = true;
+  state.textFollow = true;
+  state.roundOutlines = true;
+  state.linearOutlines = true;
+  state.mountainOutlines = true;
+  state.satelliteFull = true;
+  state.satellites = true;
+  state.craterSuffix = false;
+  setValue('label-font', '');
+  setValue('label-colour', true);
+  setValue('text-color', '#eef2ff');
+  setValue('text-stroke', '#030509');
+  setValue('text-stroke-width', '1.2');
+  setValue('marker-stroke', '#030509');
+  setValue('marker-stroke-width', '0.6');
+  setValue('text-bold', false);
+  setValue('outline-color', '#b4d6ff');
+  setValue('outline-width', '1');
+  setValue('outline-style', 'solid');
+  setValue('label-overlap', false);
+  setValue('outline-toggle', true);
+  setValue('text-follow-toggle', true);
+  setValue('round-outline-toggle', true);
+  setValue('linear-outline-toggle', true);
+  setValue('mountain-outline-toggle', true);
+  setValue('label-satellites', true);
+  setValue('label-crater-suffix', true);
+  if ($('label-satellite')) {
+    $('label-satellite').setAttribute('aria-pressed', 'true');
+    $('label-satellite').textContent = 'A';
+  }
+  const density = $('label-density');
+  if (density) density.value = '0.5';
+  if ($('density-value')) $('density-value').textContent = '50%';
+  for (const layer of (state.layers && state.layers.layers) || []) {
+    if (layer.type !== 'features') continue;
+    state.density[layer.id] = 0.5;
+  }
+  for (const input of document.querySelectorAll('#label-classes input')) {
+    const key = input.dataset.layer;
+    const layer = ((state.layers && state.layers.layers) || [])
+      .find((row) => row.id === key);
+    if (!layer) continue;
+    input.checked = Boolean(layer.default);
+    if (layer.default) state.active.add(key);
+    else state.active.delete(key);
+    const chip = input.closest('.cls-chip');
+    if (chip) chip.dataset.on = String(input.checked);
+  }
+  updateLayerHint();
+  refreshFeatures();
+  render();
+}
+
 function drawFeatures() {
   state.labelHits = [];
+  state.textTracks = {};
   if (!state.labels) return;
   const classes = new Set(activeFeatureClasses());
   if (!classes.size) return;
   const items = [];
   for (const feature of state.features) {
     if (!classes.has(feature.class)) continue;
+    if (!state.satellites && satelliteLetter(feature)) continue;
     const tier = labelTier(feature);
     // Tier 0 is an overlay list: density never hides it.
     if (tier !== 0 && !densityPasses(feature)) continue;
     const pixels = featurePixels(feature);
-    if (!insideScreen(pixels.screen, 30)) continue;
+    if (!insideScreen(pixels.screen, 30) && !outlineOnScreen(feature, 30)) continue;
     items.push({ feature, ...pixels, tier });
   }
   items.sort((left, right) => left.tier - right.tier
@@ -3511,7 +3933,7 @@ function featureRimSegments(feature) {
   ];
   const cosR = Math.cos(angular);
   const sinR = Math.sin(angular);
-  const globe = state.projection === 'globe';
+  const globe = isGlobeLike();
   // Pick the longitude copy nearest the middle of the view.  For a flat map
   // the rim is then built in unwrapped longitude, so it stays one continuous
   // ring; the half outside the canvas is simply clipped, never mirrored to the
@@ -3565,6 +3987,326 @@ function featureRimSegments(feature) {
   return segments.length ? { segments, closed: segments.length === 1 } : null;
 }
 
+/** Project one catalogue path (or ring) into screen-space segments. */
+function projectOutlineSegments(outline) {
+  const points = outline.path || outline.ring;
+  if (!points || points.length < 2) return null;
+  const globe = isGlobeLike();
+  const closed = !!outline.ring;
+  const segments = [];
+  let current = [];
+  let previous = null;
+  let reference = points[0][0];
+  const flush = () => {
+    if (current.length >= 2) segments.push(current);
+    current = [];
+  };
+  for (const [lon, lat] of points) {
+    let unwrapped = lon;
+    while (unwrapped - reference > 180) unwrapped -= 360;
+    while (unwrapped - reference < -180) unwrapped += 360;
+    reference = unwrapped;
+    const point = globe
+      ? lonlatToScreen(unwrapped, lat)
+      : lonlatToScreenRaw(unwrapped, lat);
+    if (point.visible === false) { flush(); previous = null; continue; }
+    if (globe && previous && Math.abs(point.x - previous.x) > state.width * 0.5) {
+      flush();
+    }
+    current.push(point);
+    previous = point;
+  }
+  flush();
+  if (closed && segments.length === 1 && segments[0].length > 2) {
+    const first = segments[0][0];
+    const last = segments[0][segments[0].length - 1];
+    // GeoJSON rings already repeat their first point; only close an open one.
+    if (Math.hypot(first.x - last.x, first.y - last.y) > 0.01) {
+      segments[0].push(first);
+    }
+  }
+  return segments.length ? segments : null;
+}
+
+/** Paint the feature's outline; true when something was actually stroked. */
+function drawFeatureOutline(item) {
+  const { feature } = item;
+  const outline = feature.outline;
+  // 月海使用圆形轮廓: only a mare goes back to the old diameter circle.  It
+  // needs no catalogue entry, so the mode still works without the download.
+  if (state.roundOutlines && feature.class === 'mare') {
+    if (item.radius <= 3) return false;
+    const ring = featureRimSegments(feature);
+    if (!ring) return false;
+    strokeRim(ring.segments, feature);
+    return true;
+  }
+  if (!outline) return false;
+  // 显示线状地貌轮廓: the open paths (rilles, ridges, valleys) have their own
+  // switch; closed rings are area outlines.
+  if (!state.linearOutlines
+      && (outline.kind === 'line' || outline.kind === 'centerline')) {
+    return false;
+  }
+  // 显示山脉轮廓 is a veto on top of the linear switch: turning it off hides
+  // the mountains even while the rilles and ridges stay drawn.
+  if (!state.mountainOutlines && feature.class === 'mons') return false;
+  let segments = null;
+  if (outline.kind === 'circle') {
+    const radiusKm = Number(outline.radius_km) || 0;
+    if (!(radiusKm > 0)) return false;
+    const apparent = item.kmPerPixel > 0 ? (radiusKm * 2) / item.kmPerPixel : 0;
+    if (apparent < 2.4) return false;   // a two-pixel circle is just noise
+    const rim = featureRimSegments({
+      lon: feature.lon, lat: feature.lat, diameter_km: radiusKm * 2,
+    });
+    if (!rim) return false;
+    segments = rim.segments;
+  } else {
+    segments = projectOutlineSegments(outline);
+    if (!segments) return false;
+  }
+  strokeRim(segments, feature);
+  return true;
+}
+
+/** Stroke projected segments in the outline style. */
+function strokeRim(segments, feature) {
+  // 彩色: the stroke follows the feature's class colour, the same one the name
+  // uses; with 彩色 off the dedicated outline colour is the reader's choice.
+  const colour = state.labelColour
+    ? labelColourFor(feature)
+    : (state.outlineColor || labelColourFor(feature));
+  const highlight = state.selected === feature;
+  ctx.save();
+  ctx.strokeStyle = colour;
+  ctx.globalAlpha = highlight ? 0.95 : 0.62;
+  ctx.lineWidth = Math.max(0.6, Number(state.outlineWidth) || 1)
+    + (highlight ? 1.0 : 0);
+  ctx.setLineDash(outlineDash());
+  ctx.beginPath();
+  for (const segment of segments) {
+    ctx.moveTo(segment[0].x, segment[0].y);
+    for (let index = 1; index < segment.length; index += 1) {
+      ctx.lineTo(segment[index].x, segment[index].y);
+    }
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/** Two Chaikin passes over a projected outline: no zig-zags under the glyphs. */
+function smoothPathPoints(points, passes = 2) {
+  let current = points;
+  for (let pass = 0; pass < passes; pass += 1) {
+    if (!current || current.length < 3) break;
+    const next = [current[0]];
+    for (let index = 0; index < current.length - 1; index += 1) {
+      const a = current[index];
+      const b = current[index + 1];
+      next.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 });
+      next.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 });
+    }
+    next.push(current[current.length - 1]);
+    current = next;
+  }
+  return current;
+}
+
+/** Stable key for a feature's per-session text-placement offset. */
+function textTrackKey(feature) {
+  return feature.id === undefined || feature.id === null
+    ? String(feature.name_en || '') : feature.id;
+}
+
+/** Set a caption along its outline path; returns the box it occupies. */
+function textAlongPath(item, text, fontPx, colour, highlight) {
+  const segments = projectOutlineSegments(item.feature.outline);
+  if (!segments) return null;
+  let route = null;
+  for (const segment of segments) {
+    let length = 0;
+    for (let index = 1; index < segment.length; index += 1) {
+      length += Math.hypot(segment[index].x - segment[index - 1].x,
+                           segment[index].y - segment[index - 1].y);
+    }
+    if (!route || length > route.length) route = { segment, length };
+  }
+  if (!route) return null;
+  let points = smoothPathPoints(route.segment, 2);
+  const chars = Array.from(String(text));
+  const spacing = Math.max(0.8, fontPx * 0.12);
+  const widths = chars.map((char) => ctx.measureText(char).width);
+  const total = widths.reduce((sum, width) => sum + width, 0)
+    + spacing * Math.max(0, chars.length - 1);
+
+  const measurePath = (path) => {
+    const cumulative = [0];
+    let length = 0;
+    for (let index = 1; index < path.length; index += 1) {
+      length += Math.hypot(path[index].x - path[index - 1].x,
+                           path[index].y - path[index - 1].y);
+      cumulative.push(length);
+    }
+    const place = (distance) => {
+      let index = 1;
+      while (index < cumulative.length - 1 && cumulative[index] < distance) {
+        index += 1;
+      }
+      const span = cumulative[index] - cumulative[index - 1] || 1;
+      const t = Math.max(0, Math.min(1,
+        (distance - cumulative[index - 1]) / span));
+      const a = path[index - 1], b = path[index];
+      return {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        angle: Math.atan2(b.y - a.y, b.x - a.x),
+      };
+    };
+    return { path, cumulative, length, place };
+  };
+
+  /** The straightest, most upright window on this path for the caption.
+   *
+   * A looped rille has an endpoint direction that says nothing about the arc
+   * the text lands on; scoring the whole path on both orientations keeps the
+   * run from starting on the return leg and reading backwards.
+   */
+  const bestWindow = (measured) => {
+    const { length, place } = measured;
+    if (length < total) return null;
+    const step = Math.max(1, total / 16);
+    let best = null;
+    for (let start = 0; start <= length - total; start += step) {
+      const angles = [];
+      for (let sample = 0; sample <= 6; sample += 1) {
+        angles.push(place(start + total * sample / 6).angle);
+      }
+      for (let index = 1; index < angles.length; index += 1) {
+        while (angles[index] - angles[index - 1] > Math.PI) {
+          angles[index] -= Math.PI * 2;
+        }
+        while (angles[index] - angles[index - 1] < -Math.PI) {
+          angles[index] += Math.PI * 2;
+        }
+      }
+      const spread = Math.max(...angles) - Math.min(...angles);
+      const middle = angles[3];
+      const horizontal = Math.abs(Math.cos(middle))
+        >= Math.abs(Math.sin(middle));
+      const upright = horizontal ? Math.cos(middle) : Math.sin(middle);
+      const centre = 1 - Math.abs((start + total / 2) - length / 2)
+        / Math.max(length / 2, 1e-6);
+      const score = (1 - Math.min(1, spread / Math.PI)) * 2
+        + Math.max(0, upright) * 1.6 + centre * 0.35;
+      if (!best || score > best.score) best = { start, score };
+    }
+    return best;
+  };
+
+  const forward = measurePath(points);
+  const backward = measurePath(points.slice().reverse());
+  const forwardChoice = bestWindow(forward);
+  const backwardChoice = bestWindow(backward);
+  const chosen = backwardChoice && (!forwardChoice
+    || backwardChoice.score > forwardChoice.score + 1e-6)
+    ? backward : forward;
+  const choice = chosen === forward ? forwardChoice : backwardChoice;
+  if (!choice) return null;
+  points = chosen.path;
+  const length = chosen.length;
+  const place = chosen.place;
+  if (length < total * 0.75) return null;
+  // A selected linear feature can be nudged along its own trace.  The shift is
+  // a fraction of the available start range, so it survives zooming; it is
+  // kept in state (not in the URL or settings) and is lost on refresh.
+  const key = textTrackKey(item.feature);
+  const shift = Number(state.labelShift[key]) || 0;
+  const range = Math.max(1, length - total);
+  let start = choice.start + shift * range;
+  const first = points[0], last = points[points.length - 1];
+  const loop = !!item.feature.outline.ring
+    || Math.hypot(last.x - first.x, last.y - first.y) < length * 0.18;
+  if (loop) {
+    start = ((start % range) + range) % range;
+  } else {
+    start = clamp(start, 0, range);
+  }
+  state.textTracks[key] = {
+    length,
+    range,
+    base: choice.start,
+    start,
+    loop,
+    tangent: place(start + total / 2).angle,
+  };
+  const need = (left, right) => (left + right) / 2
+    + Math.max(1.2, spacing * 0.9);
+  const layout = (start) => {
+    const spots = [];
+    let position = start;
+    let previous = null;
+    for (let index = 0; index < chars.length; index += 1) {
+      let spot = place(position + widths[index] / 2);
+      let guard = 0;
+      while (previous && guard < 4000
+             && Math.hypot(spot.x - previous.x, spot.y - previous.y)
+                < need(widths[index - 1], widths[index])) {
+        position += 0.5;
+        spot = place(position + widths[index] / 2);
+        guard += 1;
+      }
+      if (position + widths[index] / 2 > length) return null;
+      spots.push(spot);
+      previous = spot;
+      position += widths[index] + (index + 1 < chars.length ? spacing : 0);
+    }
+    return { spots, end: position };
+  };
+  const placed = layout(start);
+  if (!placed) return null;
+  const spots = placed.spots;
+  const boxes = [];
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  const strokeWidth = Number(state.textStrokeWidth) || 0;
+  chars.forEach((char, index) => {
+    const spot = spots[index];
+    let angle = spot.angle;
+    if (angle > Math.PI / 2) angle -= Math.PI;
+    else if (angle < -Math.PI / 2) angle += Math.PI;
+    ctx.save();
+    ctx.translate(spot.x, spot.y);
+    ctx.rotate(angle);
+    if (strokeWidth > 0) {
+      ctx.lineWidth = Math.min(6, strokeWidth);
+      ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
+      ctx.strokeText(char, 0, 0);
+    }
+    ctx.fillStyle = highlight ? '#ffffff' : colour;
+    if (highlight) {
+      ctx.shadowColor = colour;
+      ctx.shadowBlur = 8;
+    }
+    ctx.fillText(char, 0, 0);
+    ctx.restore();
+    boxes.push({ x: spot.x, y: spot.y });
+  });
+  ctx.restore();
+  if (!boxes.length) return null;
+  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+  for (const box of boxes) {
+    left = Math.min(left, box.x);
+    right = Math.max(right, box.x);
+    top = Math.min(top, box.y - fontPx * 0.7);
+    bottom = Math.max(bottom, box.y + fontPx * 0.7);
+  }
+  return { left, right, top, bottom };
+}
+
 function drawFeatureMarker(item) {
   const { feature, screen, radius } = item;
   const colour = labelColourFor(feature);
@@ -3572,29 +4314,11 @@ function drawFeatureMarker(item) {
   let rimDrawn = false;
   const highlight = state.selected === feature;
   ctx.save();
-  // 真实直径: only the classes whose edge is a real, measurable rim get this
-  // circle.  A point feature keeps its dot/cross.
-  if (state.diameters && RIM_CLASSES.has(feature.class)
-      && radius > 3 && state.outlineStyle !== 'none') {
-    const rim = featureRimSegments(feature);
-    if (rim) {
-      ctx.strokeStyle = state.outlineColor || colour;
-      ctx.globalAlpha = highlight ? 0.95 : 0.62;
-      ctx.lineWidth = Math.max(0.6, Number(state.outlineWidth) || 1)
-        + (highlight ? 1.0 : 0);
-      ctx.setLineDash(outlineDash());
-      ctx.beginPath();
-      for (const segment of rim.segments) {
-        ctx.moveTo(segment[0].x, segment[0].y);
-        for (let index = 1; index < segment.length; index += 1) {
-          ctx.lineTo(segment[index].x, segment[index].y);
-        }
-        if (rim.closed) ctx.closePath();
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-      rimDrawn = true;
-    }
+  // 轮廓: the catalogue's own shape — circle, traced path or ring.  A feature
+  // with no outline keeps its marker so it is still locatable.
+  if (state.outlines && (state.roundOutlines || feature.outline)
+      && state.outlineStyle !== 'none') {
+    rimDrawn = drawFeatureOutline(item);
   }
   if (feature.class === 'statio') {
     // A landing site is a crosshair, like the full-disk page: the diamond was
@@ -3645,7 +4369,7 @@ function placeFeatureLabel(item, occupied, force = false) {
   const visible = force || densityIsMax() || zoom >= 3
     || feature.diameter_km >= 45 || pointVisible;
   if (!visible) return null;
-  const fontPx = labelFontPx() + (feature.class === 'mare' ? 2 : 0);
+  const fontPx = labelFontFor(feature);
   const highlight = state.selected === feature;
   const bold = (state.textBold || highlight) ? '600 ' : '';
   ctx.save();
@@ -3653,11 +4377,22 @@ function placeFeatureLabel(item, occupied, force = false) {
   ctx.textBaseline = 'middle';
   const width = ctx.measureText(text).width;
   const height = fontPx * 1.35;
+  // 文字跟随轮廓: a rille or a ridge carries its name along the traced path.
+  // When the path is too short for the name the ordinary horizontal caption
+  // below still runs, so a cramped feature is never left unlabelled.
+  if (textFollowFeature(feature)) {
+    const along = textAlongPath(item, text, fontPx, colour, highlight);
+    if (along) {
+      ctx.restore();
+      return along;
+    }
+  }
   // A name sits just outside the marker, or outside the true-diameter ring
   // when that ring is actually drawn.  Using the *apparent* radius when the
   // ring is off pushed names of large maria a whole feature away from their
   // point.
-  const ringDrawn = state.diameters && radius > 3 && state.outlineStyle !== 'none';
+  const ringDrawn = state.outlines && !!feature.outline
+    && state.outlineStyle !== 'none';
   // Point features put their name immediately to the right of the locator, so
   // the first character is the one nearest the point.  The ring, when drawn, is
   // context rather than a no-go zone, so it no longer pushes the name a full
@@ -3872,6 +4607,10 @@ const measure = {
   profile: null,      // the last /api/map/profile answer
   token: 0,           // only the newest answer may replace the chart
   timer: null,
+  //: The chart's own box, in stage pixels.  The old fixed 248x96 panel is the
+  //: default; the top strip moves it and the bottom-right grip resizes it.
+  chart: { left: 12, top: 12, width: 252, height: 112 },
+  chartDrag: null,
 };
 
 /** Radius distances are measured on. */
@@ -3960,7 +4699,7 @@ function measureTextKm(km) {
 
 /** Unwrapped longitude for a flat map: one continuous shape, no seam jump. */
 function measureFlatLon(lon, previous) {
-  if (state.projection === 'globe' || previous === undefined || previous === null) {
+  if (isGlobeLike() || previous === undefined || previous === null) {
     return lon;
   }
   let value = lon;
@@ -3971,7 +4710,7 @@ function measureFlatLon(lon, previous) {
 
 /** Project a ground path for this view, broken where the sphere hides it. */
 function measurePath(points) {
-  const globe = state.projection === 'globe';
+  const globe = isGlobeLike();
   const segments = [];
   let current = [];
   let previousLon = null;
@@ -4179,6 +4918,71 @@ function measureAxisText(value, step) {
 }
 
 /** White profile on a translucent black panel, with both axes ticked. */
+/** Put the chart where the reader last dragged it, inside the stage. */
+function applyMeasureChartBox() {
+  const box = $('map-measure-chart');
+  const canvas = $('map-measure-chart-canvas');
+  if (!box || !canvas) return;
+  const chart = measure.chart;
+  chart.width = clamp(chart.width, 180, Math.max(180, state.width - 8));
+  chart.height = clamp(chart.height, 84, Math.max(84, state.height - 8));
+  chart.left = clamp(chart.left, 4, Math.max(4, state.width - chart.width - 4));
+  chart.top = clamp(chart.top, 4, Math.max(4, state.height - chart.height - 4));
+  box.style.left = `${chart.left}px`;
+  box.style.top = `${chart.top}px`;
+  box.style.width = `${chart.width}px`;
+  box.style.height = `${chart.height}px`;
+  canvas.style.width = '100%';
+  canvas.style.height = `${Math.max(48, chart.height - 15)}px`;
+}
+
+function wireMeasureChart() {
+  const box = $('map-measure-chart');
+  const bar = $('map-measure-chart-bar');
+  const grip = $('map-measure-chart-resize');
+  if (!box) return;
+  // The chart floats over the map; without this the stage would also start a
+  // pan or a new measurement under the pointer.
+  box.addEventListener('pointerdown', (event) => event.stopPropagation());
+  const begin = (event, mode) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const chart = measure.chart;
+    measure.chartDrag = {
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      chart: { ...chart },
+    };
+  };
+  if (bar) bar.addEventListener('pointerdown', (event) => begin(event, 'move'));
+  if (grip) grip.addEventListener('pointerdown', (event) => begin(event, 'resize'));
+  window.addEventListener('pointermove', (event) => {
+    const drag = measure.chartDrag;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (drag.mode === 'move') {
+      measure.chart.left = drag.chart.left + dx;
+      measure.chart.top = drag.chart.top + dy;
+    } else {
+      measure.chart.width = drag.chart.width + dx;
+      measure.chart.height = drag.chart.height + dy;
+    }
+    applyMeasureChartBox();
+    drawMapMeasureChart();
+    event.preventDefault();
+  });
+  const end = () => {
+    if (!measure.chartDrag) return;
+    measure.chartDrag = null;
+    applyMeasureChartBox();
+  };
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+}
+
 function drawMapMeasureChart() {
   const box = $('map-measure-chart');
   const canvas = $('map-measure-chart-canvas');
@@ -4187,6 +4991,7 @@ function drawMapMeasureChart() {
     && Array.isArray(profile.heights_km) && profile.heights_km.length > 1);
   if (box) box.hidden = !usable;
   if (!canvas || !usable) return;
+  applyMeasureChartBox();
   const dpr = Number(state.dpr) || window.devicePixelRatio || 1;
   const width = Math.max(120, Math.round(canvas.clientWidth || 248));
   const height = Math.max(56, Math.round(canvas.clientHeight || 96));
@@ -4310,6 +5115,16 @@ function drawMapMeasureChart() {
   ctx.fillText('距离 km', width - 6, height - 1);
 }
 
+/** Distance from a point to one screen-space segment. */
+function pointSegmentDistance(x, y, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  if (!(length > 1e-12)) return Math.hypot(x - a.x, y - a.y);
+  const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / length));
+  return Math.hypot(x - (a.x + dx * t), y - (a.y + dy * t));
+}
+
 function measureHitTest(x, y) {
   if (!measure.on) return null;
   const screen = measureScreen(measure.shape);
@@ -4317,6 +5132,17 @@ function measureHitTest(x, y) {
   for (const handle of screen.handles) {
     if (Math.hypot(x - handle.at.x, y - handle.at.y) <= MEASURE_GRAB_PX) {
       return handle.kind;
+    }
+  }
+  // A drawn line can be grabbed anywhere along it, not only at its endpoints.
+  if (screen.kind === 'line') {
+    for (const segment of screen.segments) {
+      for (let index = 1; index < segment.length; index += 1) {
+        if (pointSegmentDistance(x, y, segment[index - 1], segment[index])
+            <= MEASURE_GRAB_PX) {
+          return 'move';
+        }
+      }
     }
   }
   return null;
@@ -4344,12 +5170,24 @@ function measureDown(event, point) {
   if (!measure.on) return false;
   const hit = measureHitTest(point.x, point.y);
   if (hit) {
-    measure.drag = { mode: hit };
+    if (hit === 'move') {
+      const ground = screenToLonLat(point.x, point.y);
+      if (!ground || measure.shape.kind !== 'line') return false;
+      measure.drag = {
+        mode: 'move', ground,
+        start: {
+          a: { ...measure.shape.a },
+          b: { ...measure.shape.b },
+        },
+      };
+    } else {
+      measure.drag = { mode: hit };
+    }
     return true;
   }
   const ground = screenToLonLat(point.x, point.y);
   if (!ground) return false;
-  if (event.ctrlKey || event.metaKey) {
+  if (event.shiftKey) {
     measure.shape = {
       kind: 'circle', lon: ground.lon, lat: ground.lat, radiusKm: 0, angle: 0,
     };
@@ -4385,6 +5223,19 @@ function measureMove(point) {
     shape.radiusKm = measureDistanceKm(
       { lon: shape.lon, lat: shape.lat }, ground);
     shape.angle = measureAzimuth(shape.lon, shape.lat, ground);
+  } else if (drag.mode === 'move') {
+    // Move the whole line by the ground offset under the pointer.  Applying
+    // the offset to both endpoints keeps its length and bearing.
+    const dLon = wrapLon(ground.lon - drag.ground.lon);
+    const dLat = ground.lat - drag.ground.lat;
+    shape.a = {
+      lon: wrapLon(drag.start.a.lon + dLon),
+      lat: clamp(drag.start.a.lat + dLat, -89.9, 89.9),
+    };
+    shape.b = {
+      lon: wrapLon(drag.start.b.lon + dLon),
+      lat: clamp(drag.start.b.lat + dLat, -89.9, 89.9),
+    };
   }
   measureSchedule(160);
   return true;
@@ -4396,9 +5247,11 @@ function measureUp() {
   measure.drag = null;
   const shape = measure.shape;
   if (shape) {
+    // Only a click with no drag at all is discarded: a 0.1 km feature is a
+    // perfectly good measurement, and the old 0.5 km floor was deleting it.
     const tiny = shape.kind === 'line'
-      ? measureDistanceKm(shape.a, shape.b) < 0.5
-      : !(shape.radiusKm > 0.5);
+      ? measureDistanceKm(shape.a, shape.b) < 0.001
+      : !(shape.radiusKm > 0.001);
     const fresh = drag.mode === 'new-line' || drag.mode === 'new-circle';
     if (tiny && fresh) measure.shape = null;
   }
@@ -4409,6 +5262,69 @@ function measureUp() {
     drawMapMeasureChart();
   }
   return true;
+}
+
+/** Is this a linear feature whose name is following its outline? */
+function textFollowFeature(feature) {
+  return !!(state.textFollow && feature && feature.outline
+    && TEXT_FOLLOW_CLASSES.has(feature.class)
+    && (feature.outline.kind === 'line' || feature.outline.kind === 'centerline'));
+}
+
+/** The selected linear label under the pointer, if any. */
+function selectedTextHit(x, y) {
+  const feature = state.selected;
+  if (!feature || !textFollowFeature(feature)) return null;
+  for (let index = state.labelHits.length - 1; index >= 0; index -= 1) {
+    const hit = state.labelHits[index];
+    if (hit.feature !== feature) continue;
+    if (x >= hit.left - 3 && x <= hit.right + 3
+        && y >= hit.top - 3 && y <= hit.bottom + 3) {
+      return feature;
+    }
+  }
+  return null;
+}
+
+function beginTextDrag(event, feature) {
+  const key = textTrackKey(feature);
+  const track = state.textTracks[key];
+  if (!track) return false;
+  state.textDrag = {
+    key,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    start: track.start,
+    base: track.base,
+    range: track.range,
+    loop: track.loop,
+    tangent: track.tangent,
+  };
+  stage.setPointerCapture(event.pointerId);
+  stage.style.cursor = 'grabbing';
+  setStatus('拖动沿轮廓移动名称');
+  return true;
+}
+
+/** Move the selected caption by the pointer's component along its own trace. */
+function textDragMove(event) {
+  const drag = state.textDrag;
+  if (!drag) return;
+  const dx = event.clientX - drag.lastX;
+  const dy = event.clientY - drag.lastY;
+  drag.lastX = event.clientX;
+  drag.lastY = event.clientY;
+  const track = state.textTracks[drag.key];
+  const tangent = track && Number.isFinite(track.tangent)
+    ? track.tangent : drag.tangent;
+  const along = dx * Math.cos(tangent) + dy * Math.sin(tangent);
+  const range = Math.max(1, drag.range);
+  let start = drag.start + along;
+  if (drag.loop) start = ((start % range) + range) % range;
+  else start = clamp(start, 0, range);
+  drag.start = start;
+  state.labelShift[drag.key] = (start - drag.base) / range;
+  renderSoon();
 }
 
 function selectFeature(feature) {
@@ -4462,10 +5378,11 @@ function focusFeature(feature) {
   state.scale = 1.2;
   state.centerLon = feature.lon;
   state.centerLat = feature.lat;
-  if (state.projection === 'globe') {
+  if (isGlobeLike()) {
     state.globe.lon = feature.lon;
     state.globe.lat = feature.lat;
     state.globe.zoom = Math.max(1.4, state.globe.zoom);
+    clampEarthPan();
   }
   clampCenter();
   selectFeature(feature);
@@ -4512,8 +5429,10 @@ function updatePositionReadout(lon, lat, screen) {
 async function samplePoint(lon, lat) {
   const seq = ++state.pointSeq;
   try {
+    const zoom = Math.max(0, Math.min(12, Math.floor(viewZoom())));
     const response = await fetch(
-      `/api/map/point?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
+      `/api/map/point?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`
+      + `&zoom=${zoom}`);
     if (!response.ok) throw new Error(await response.text());
     const payload = await response.json();
     if (seq !== state.pointSeq) return;
@@ -4687,7 +5606,7 @@ function renderSearchResults(results) {
     item.className = 'search-result';
     item.tabIndex = 0;
     const left = document.createElement('b');
-    left.textContent = featureName(row);
+    left.textContent = searchName(row);
     const right = document.createElement('small');
     const rowLayer = (state.layers && state.layers.layers || [])
       .find((item) => item.id === row.class);
@@ -4697,7 +5616,7 @@ function renderSearchResults(results) {
     item.appendChild(right);
     const choose = () => {
       box.hidden = true;
-      $('search-input').value = featureName(row);
+      $('search-input').value = searchName(row);
       focusFeature(row);
     };
     item.addEventListener('click', choose);
@@ -4711,7 +5630,10 @@ function renderSearchResults(results) {
 
 async function runSearch(event) {
   if (event) event.preventDefault();
-  const text = $('search-input').value.trim();
+  // A chosen result is written as "中文（English）"; searching again should use
+  // the Chinese half rather than the display form.
+  const raw = $('search-input').value.trim();
+  const text = raw.replace(/（[^）]*）$/, '').trim() || raw;
   if (!text) return;
   try {
     const response = await fetch('/api/map/search?q=' + encodeURIComponent(text));
@@ -4898,6 +5820,9 @@ function beginStagePan(event, point) {
     geo: dragGeo,
     globeLon: state.globe.lon,
     globeLat: state.globe.lat,
+    earth: state.projection === 'earth',
+    earthPanX: state.earthPanX,
+    earthPanY: state.earthPanY,
   };
   stage.classList.add('dragging');
   stage.style.cursor = 'grabbing';
@@ -4916,11 +5841,16 @@ stage.addEventListener('pointerdown', (event) => {
     return;
   }
   if (event.button !== 0) return;
-  // 测量工具 owns the left button while it is armed: a drag draws, a press on a
-  // handle moves it, and Ctrl-drag (the manual-mark gesture) draws a circle.
+  // 测量工具 owns the left button while it is armed: a drag draws, a press on
+  // the line or a handle moves it, and Shift-drag draws a circle.
   if (measure.on && measureDown(event, point)) {
     stage.setPointerCapture(event.pointerId);
     stage.classList.add('measuring');
+    event.preventDefault();
+    return;
+  }
+  const textHit = selectedTextHit(point.x, point.y);
+  if (textHit && beginTextDrag(event, textHit)) {
     event.preventDefault();
     return;
   }
@@ -4950,13 +5880,24 @@ stage.addEventListener('pointerdown', (event) => {
 stage.addEventListener('pointermove', (event) => {
   const point = stagePoint(event);
   const geo = screenToLonLat(point.x, point.y);
+  if (state.textDrag) {
+    textDragMove(event);
+    hideTooltip();
+    event.preventDefault();
+    return;
+  }
   // A pan drag outranks the measuring tool: the middle button can start one
   // while 测量 is armed, and the picture has to follow it.
   if (state.drag && !state.manualDrag) {
     if (geo) updatePositionReadout(geo.lon, geo.lat, point);
     const dx = event.clientX - state.drag.x;
     const dy = event.clientY - state.drag.y;
-    if (state.projection === 'globe') {
+    if (state.drag.earth) {
+      const radius = Math.max(1, globeRadius());
+      state.earthPanX = state.drag.earthPanX + dx / radius;
+      state.earthPanY = state.drag.earthPanY - dy / radius;
+      clampEarthPan();
+    } else if (isGlobeLike()) {
       const radius = Math.max(1, globeRadius());
       state.globe.lon = ((state.drag.globeLon - dx / radius * 90 + 180) % 360) - 180;
       state.globe.lat = clamp(state.drag.globeLat + dy / radius * 90, -89, 89);
@@ -5023,6 +5964,15 @@ stage.addEventListener('pointermove', (event) => {
 });
 
 function endDrag(event) {
+  if (state.textDrag) {
+    state.textDrag = null;
+    stage.style.cursor = measure.on ? 'crosshair' : '';
+    if (event && event.pointerId !== undefined) {
+      try { stage.releasePointerCapture(event.pointerId); } catch (error) { /* noop */ }
+    }
+    flushRender();
+    return;
+  }
   if (measure.drag) {
     measureUp();
     stage.classList.remove('measuring');
@@ -5520,8 +6470,35 @@ function wire() {
     input.addEventListener('input', apply);
     input.addEventListener('change', apply);
   }
+  // 卫星坑 A/a: the caption mode, not a different feature set.
+  if ($('label-satellite')) {
+    $('label-satellite').addEventListener('click', () => {
+      const button = $('label-satellite');
+      const full = button.getAttribute('aria-pressed') === 'false';
+      state.satelliteFull = full;
+      button.setAttribute('aria-pressed', String(full));
+      button.textContent = full ? 'A' : 'a';
+      render();
+    });
+  }
+  if ($('label-satellites')) {
+    $('label-satellites').addEventListener('change', (event) => {
+      state.satellites = event.target.checked;
+      render();
+    });
+  }
+  if ($('label-crater-suffix')) {
+    $('label-crater-suffix').addEventListener('change', (event) => {
+      state.craterSuffix = !event.target.checked;
+      render();
+    });
+  }
+  if ($('map-label-reset')) {
+    $('map-label-reset').addEventListener('click', () => { resetLabelSettings(); });
+  }
   $('projection').addEventListener('change', (event) => {
-    state.projection = ['mercator', 'globe'].includes(event.target.value)
+    resizeCanvas();
+    state.projection = ['mercator', 'globe', 'earth'].includes(event.target.value)
       ? event.target.value : 'equirect';
     // A projection change reinterprets the camera's vertical coordinate.
     // Mercator stores it as a log tangent, so the shared centre has to be
@@ -5529,6 +6506,15 @@ function wire() {
     if (state.projection === 'mercator') {
       state.mercY = mercatorY(clamp(state.centerLat, -85, 85));
     }
+    if (state.projection === 'earth') {
+      // Earth view has no free rotation: the sub-Earth point is the centre.
+      const sub = (state.lighting && state.lighting.sub_earth) || {};
+      state.globe.lon = Number(sub.lon) || 0;
+      state.globe.lat = Number(sub.lat) || 0;
+      state.globe.zoom = 1;
+    }
+    state.earthPanX = 0;
+    state.earthPanY = 0;
     clampCenter();
     state.tiles.clear();
     state.sourceCanvas = null;
@@ -5537,6 +6523,7 @@ function wire() {
     state.sourceReadyKey = '';
     render();
     scheduleFeatures();
+    if (isGlobeLike()) settleCanvasUntilLoaded();
   });
 
   // Observation: every edit is the request; there is no apply button left.
@@ -5545,6 +6532,7 @@ function wire() {
     const input = $(id);
     if (!input) continue;
     input.addEventListener('change', () => {
+      if (id === 'light-tz') input.value = formatZoneOffset(input.value);
       updateMapHemispheres();
       applyLightingSoon(true);
     });
@@ -5594,16 +6582,36 @@ function wire() {
   readMarks();
   syncMarkChips();
   wireSplitters();
+  wireMeasureChart();
   wirePhotoLibrary();
   wireRightTabs();
 
   if ($('light-tz')) {
-    $('light-tz').value = String(-new Date().getTimezoneOffset() / 60);
+    $('light-tz').value = formatZoneOffset(-new Date().getTimezoneOffset() / 60);
   }
   setLightNow();
   applyLightingSoon(true);
-  $('diameter-toggle').addEventListener('change', (event) => {
-    state.diameters = event.target.checked;
+  $('outline-toggle').addEventListener('change', (event) => {
+    state.outlines = event.target.checked;
+    // The outline geometry rides along with the feature query, so a fresh
+    // query is what turns the layer on or off.
+    refreshFeatures();
+  });
+  $('text-follow-toggle').addEventListener('change', (event) => {
+    state.textFollow = event.target.checked;
+    // Turning it on may be the first thing that asks for outline paths.
+    refreshFeatures();
+  });
+  $('round-outline-toggle').addEventListener('change', (event) => {
+    state.roundOutlines = event.target.checked;
+    render();
+  });
+  $('linear-outline-toggle').addEventListener('change', (event) => {
+    state.linearOutlines = event.target.checked;
+    render();
+  });
+  $('mountain-outline-toggle').addEventListener('change', (event) => {
+    state.mountainOutlines = event.target.checked;
     render();
   });
   if ($('base-on')) {
@@ -5731,9 +6739,53 @@ function panBy(fractionX, fractionY) {
   scheduleHash();
 }
 
+/** Re-measure while the first projected texture is still being fetched.
+ *
+ * The stage can settle after the first canvas measurement, and a projection
+ * switch clears the source.  A few measured frames (instead of one) catch both
+ * cases: each frame either resizes the backing store or redraws the frame on
+ * the canvas the browser is actually showing.  It stops as soon as the first
+ * source is ready, so it does not add work to a normal pan.
+ */
+function settleCanvasUntilLoaded() {
+  if (typeof requestAnimationFrame !== 'function') return;
+  let frames = 0;
+  const step = () => {
+    const rect = stage.getBoundingClientRect();
+    if (rect.width > 1 && rect.height > 1
+        && (Math.abs(rect.width - state.width) > 0.5
+            || Math.abs(rect.height - state.height) > 0.5)) {
+      resizeCanvas();
+    } else if (!state.sourceReadyKey) {
+      render();
+    }
+    frames += 1;
+    if (frames < 30 && !state.sourceReadyKey) {
+      requestAnimationFrame(step);
+    }
+  };
+  requestAnimationFrame(step);
+}
+
 async function boot() {
   wire();
   resizeCanvas();
+  settleCanvasUntilLoaded();
+  // A side panel can still be finishing its CSS transition after the first
+  // frames.  Re-measure once the transition has certainly stopped; this is a
+  // no-op when the canvas already matches and the source is ready.
+  for (const delay of [120, 400, 1200]) {
+    setTimeout(() => {
+      const rect = stage.getBoundingClientRect();
+      if (rect.width > 1 && rect.height > 1
+          && (Math.abs(rect.width - state.width) > 0.5
+              || Math.abs(rect.height - state.height) > 0.5)) {
+        resizeCanvas();
+      } else if (!state.sourceReadyKey) {
+        render();
+      }
+    }, delay);
+  }
   readHash();
   clampCenter();
   try {

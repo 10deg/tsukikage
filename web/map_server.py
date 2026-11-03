@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 from collections import OrderedDict
 
 from PIL import Image, ImageOps
@@ -59,8 +60,12 @@ from moonlib.annotations import (  # noqa: E402
     annotation_catalogue,
     feature_class,
 )
+from moonlib.outlines import (  # noqa: E402
+    outline_for,
+    outlines_available,
+)
 
-MAP_VERSION = "1.0.2"
+MAP_VERSION = "1.1.0"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -104,11 +109,11 @@ _MIN_DIAMETER_BY_ZOOM = {
 #: filter above must not drop them.
 _POINT_CLASSES = frozenset({"statio", "lunar100", "libration", "impact", "albedo", "imp", "other"})
 #: The simulator's DEFAULT_OFF_CLASSES: a first look at the Moon is not a
-#: catalogue of domes, landing sites or observing lists.  Keep both pages on
-#: the same first paint.
+#: catalogue of domes or observing lists; 着陆点 is on from the start.  Keep
+#: both pages on the same first paint.
 DEFAULT_OFF_CLASSES = frozenset({
     "basin", "dome", "pit", "pyroclastic", "imp", "impact",
-    "statio", "lunar100", "libration", "other",
+    "lunar100", "libration", "other",
 })
 
 
@@ -120,6 +125,65 @@ def _finite(value: Any, default: float = float("nan")) -> float:
     return number if math.isfinite(number) else default
 
 
+def _fold_search(text: Any) -> str:
+    """Fold a search string for the letters a keyboard may not carry.
+
+    ``Stöfler`` has to be found by typing ``stoufler`` or ``stofller`` -- the
+    combining marks of NFKD disappear, and the German/CJK alternatives that do
+    not decompose are spelled out.  The same fold is applied to both the query
+    and the haystack.
+    """
+    folded = unicodedata.normalize("NFKD", str(text or ""))
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    folded = folded.casefold()
+    for source, target in (("ß", "ss"), ("ø", "o"), ("æ", "ae"), ("œ", "oe"),
+                           ("ł", "l"), ("đ", "d")):
+        folded = folded.replace(source, target)
+    return " ".join(folded.split())
+
+
+def _outline_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce an outline catalogue entry to what the map needs to paint it.
+
+    Circles travel as a centre plus radius, linear features as a path, and
+    area features (maria, lacus, ...) as the outer ring of their simplified
+    polygon.  Everything else in the catalogue entry stays on the server.
+    """
+    kind = str(entry.get("kind") or "point")
+    payload: Dict[str, Any] = {"kind": kind}
+    if entry.get("center"):
+        payload["center"] = entry["center"]
+    if entry.get("bbox_only"):
+        # Only a bounding box in the source: a centre and a heading, no shape.
+        payload["bbox_only"] = True
+        return payload
+    if kind == "circle":
+        payload["radius_km"] = entry.get("radius_km")
+        payload["radius_deg"] = entry.get("radius_deg")
+        payload["radius_deg_lon"] = entry.get("radius_deg_lon")
+        return payload
+    if kind in ("line", "centerline"):
+        payload["path"] = entry.get("path") or []
+        payload["rotation_deg"] = entry.get("rotation_deg")
+        return payload
+    geometry = entry.get("geometry") or {}
+    coordinates = geometry.get("coordinates")
+    if geometry.get("type") == "Polygon" and coordinates:
+        payload["ring"] = coordinates[0]
+    elif geometry.get("type") == "MultiPolygon" and coordinates:
+        payload["ring"] = coordinates[0][0]
+    return payload
+
+
+def _with_outline(row: Dict[str, Any]) -> Dict[str, Any]:
+    entry = outline_for(str(row.get("name_en") or row.get("name") or ""))
+    if not entry:
+        return row
+    merged = dict(row)
+    merged["outline"] = _outline_payload(entry)
+    return merged
+
+
 def _ground_pair(value: Any, label: str) -> Tuple[float, float]:
     """One selenographic point from ``{"lon": ..., "lat": ...}``."""
     if not isinstance(value, dict):
@@ -129,6 +193,15 @@ def _ground_pair(value: Any, label: str) -> Tuple[float, float]:
     if not (math.isfinite(lon) and math.isfinite(lat) and -90.0 <= lat <= 90.0):
         raise moonlib.MoonlibError(f"{label} needs finite lon and lat, lat in -90..90.")
     return float(lon), float(lat)
+
+
+def _ground_distance_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    """Great-circle distance between two selenographic points, on 1737.4 km."""
+    lon_a, lat_a = math.radians(a[0]), math.radians(a[1])
+    lon_b, lat_b = math.radians(b[0]), math.radians(b[1])
+    cosine = (math.sin(lat_a) * math.sin(lat_b)
+              + math.cos(lat_a) * math.cos(lat_b) * math.cos(lon_b - lon_a))
+    return math.acos(max(-1.0, min(1.0, cosine))) * 1737.4
 
 
 def _tile_counts(zoom: int) -> Tuple[int, int]:
@@ -218,11 +291,18 @@ class LunarMapService:
         self._photo_coverage: "OrderedDict[str, Any]" = OrderedDict()
         self._photo_mask: "OrderedDict[str, Any]" = OrderedDict()
         self._detail_source = None
+        self._detail_ready = False
         self._download: Dict[str, Any] = {
             "running": False, "last_line": "", "error": "",
             "returncode": None,
         }
         self._download_lock = threading.Lock()
+        self._rebuild: Dict[str, Any] = {
+            "running": False, "fraction": 0.0, "message": "",
+            "error": "", "source": None, "source_name": "",
+            "started": None, "finished": None, "seconds": 0.0,
+        }
+        self._rebuild_lock = threading.Lock()
 
     # -- data ------------------------------------------------------------
     def terrain(self):
@@ -245,6 +325,7 @@ class LunarMapService:
             self._terrain = None
             self._terrain_error = None
             self._detail_source = None
+            self._detail_ready = False
             self._detail.clear()
             self._tiles.clear()
             self._shadows.clear()
@@ -319,27 +400,145 @@ class LunarMapService:
                 self._download["running"] = False
                 self._download["error"] = f"{type(error).__name__}: {error}"
 
-    def _detail_source_path(self):
-        """The finest suitable global raster for a high-zoom regional window."""
-        if self._detail_source is not None:
-            return self._detail_source
+    # -- 重新构建金字塔 ----------------------------------------------------
+    def terrain_rebuild_status(self) -> Dict[str, Any]:
+        with self._rebuild_lock:
+            return dict(self._rebuild)
+
+    def start_terrain_rebuild(self, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Re-bake the map's full-disk pyramid from the selected global DEM.
+
+        The 数据源 preference is shared with the simulator when both run in one
+        process; using it here is what makes the map's base follow an explicit
+        source choice instead of silently staying on the old pyramid.
+        """
+        request = request or {}
+        wanted = request.get("id")
+        source = None
+        if wanted not in (None, "", "auto"):
+            candidate = Path(str(wanted)).expanduser().resolve()
+            source = candidate
+        else:
+            preferred = moonlib.preferred_dem()
+            if preferred is not None:
+                source = preferred
+        if source is None:
+            try:
+                source = Path(self.terrain().sources.dem_path)
+            except Exception:
+                source = None
+        if source is None:
+            try:
+                found = moonlib.terrain.discover_dem_sources()
+            except Exception:
+                found = []
+            source = found[0][0] if found else None
+        if source is None:
+            raise moonlib.MoonlibError("没有可用于重建金字塔的全球 DEM")
+        source = Path(source).expanduser().resolve()
+        available = {
+            path.resolve() for path, _km in moonlib.terrain.discover_dem_sources()
+        }
+        if source not in available:
+            raise moonlib.MoonlibError(f"DEM 已不在可用列表里：{source.name}")
+        with self._rebuild_lock:
+            if self._rebuild.get("running"):
+                return dict(self._rebuild)
+            started = time.time()
+            self._rebuild = {
+                "running": True, "fraction": 0.0, "message": "准备重建…",
+                "error": "", "source": str(source), "source_name": source.name,
+                "started": started, "finished": None, "seconds": 0.0,
+            }
+        thread = threading.Thread(
+            target=self._terrain_rebuild_worker, args=(source,),
+            name="map-terrain-rebuild", daemon=True,
+        )
+        thread.start()
+        return self.terrain_rebuild_status()
+
+    def _terrain_rebuild_worker(self, source: Path) -> None:
+        started = time.time()
         try:
-            sources = moonlib.terrain.global_dem_sources()
+            sources = moonlib.terrain.find_sources(dem=source)
+
+            def progress(fraction: Any, message: Any) -> None:
+                with self._rebuild_lock:
+                    try:
+                        value = float(fraction)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    self._rebuild["fraction"] = max(0.0, min(1.0, value))
+                    self._rebuild["message"] = str(message or "")
+
+            moonlib.terrain.rebuild_terrain_cache(sources, progress=progress)
+            moonlib.set_preferred_dem(source)
+            self.reload_terrain()
+            with self._rebuild_lock:
+                self._rebuild.update({
+                    "running": False, "fraction": 1.0, "message": "完成",
+                    "error": "", "finished": time.time(),
+                    "seconds": round(time.time() - started, 1),
+                })
+        except Exception as error:  # noqa: BLE001 - reported to the page
+            with self._rebuild_lock:
+                self._rebuild.update({
+                    "running": False, "message": "重建失败",
+                    "error": f"{type(error).__name__}: {error}",
+                    "finished": time.time(),
+                    "seconds": round(time.time() - started, 1),
+                })
+
+    def _detail_source_path(self):
+        """The finest global raster that is finer than the baked pyramid.
+
+        This deliberately uses :func:`discover_dem_sources`, **not**
+        :func:`global_dem_sources`: the latter is filtered by
+        ``set_preferred_dem()``, and the simulator sets that preference to the
+        product it already has a pyramid for.  Using the filtered list here is
+        how a machine holding both ``ldem_64.tif`` and the USGS 118 m mosaic
+        ended up magnifying the *64 ppd* raster: it never saw the other one.
+
+        The pyramid's own source is skipped -- the path exists to bypass the
+        pyramid, and re-reading the same raster at half its resolution only
+        buys a factor of two.  Nothing finer means ``None``: the tile keeps the
+        pyramid instead of upsampling a coarser window.
+        """
+        if self._detail_ready:
+            return self._detail_source
+        self._detail_ready = True
+        try:
+            sources = moonlib.terrain.discover_dem_sources()
         except Exception:
             sources = []
-        # SLDEM2015 is the 59 m product; the USGS 118 m mosaic is the fallback
-        # when only that is readable.  Never return the 64 ppd pyramid here:
-        # that is the very source this path exists to bypass.
+        pyramid = self.terrain()
+        try:
+            pyramid_source = Path(
+                pyramid.sources.dem_path).expanduser().resolve()
+        except Exception:
+            pyramid_source = None
+        try:
+            base_km = float(pyramid.dem.km_per_pixel(0))
+        except Exception:
+            base_km = float("inf")
         chosen = None
-        for path, _km in sources:
-            name = Path(path).name.lower()
-            if "sldem" in name:
-                chosen = path
-                break
-            if "118m" in name and chosen is None:
-                chosen = path
-        if chosen is None and sources:
-            chosen = sources[0][0]
+        seen = set()
+        for path, km in sources:
+            try:
+                resolved = Path(path).expanduser().resolve()
+            except OSError:  # pragma: no cover - pathological path
+                resolved = Path(path)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if pyramid_source is not None and resolved == pyramid_source:
+                continue
+            # A raster at (or coarser than) the pyramid's own level 0 cannot
+            # add detail: the baked level already carries that scale.
+            if not (float(km) < base_km * 0.98):
+                continue
+            chosen = path
+            break
         self._detail_source = chosen
         return chosen
 
@@ -532,6 +731,7 @@ class LunarMapService:
                 return west <= lon <= east
             return lon >= west or lon <= east
 
+        want_outlines = str(query.get("outlines", "") or "") in ("1", "true", "yes")
         shown: List[Dict[str, Any]] = []
         total = 0
         for row in rows:
@@ -545,6 +745,8 @@ class LunarMapService:
                 continue
             total += 1
             if len(shown) < limit:
+                if want_outlines:
+                    row = _with_outline(row)
                 shown.append(row)
         return {
             "features": shown,
@@ -553,23 +755,26 @@ class LunarMapService:
             "classes": sorted(classes),
             "min_diameter_km": min_diameter,
             "zoom": zoom,
+            "outlines": want_outlines,
+            "outlines_available": outlines_available(),
         }
 
     def search(self, query: Dict[str, Any]) -> Dict[str, Any]:
-        text = str(query.get("q", "") or "").strip().casefold()
+        text = _fold_search(query.get("q", ""))
         if not text:
             return {"query": "", "results": []}
         limit = int(max(1, min(50, _finite(query.get("limit"), 20.0))))
         found = []
         for row in self.features():
-            haystack = " ".join(
+            haystack = _fold_search(" ".join(
                 part for part in (row["name"], row["name_en"], row["name_zh"]) if part
-            ).casefold()
+            ))
             if text not in haystack:
                 continue
             found.append(row)
-        found.sort(key=lambda row: (not row["name"].casefold().startswith(text),
-                                    -row["diameter_km"]))
+        found.sort(key=lambda row: (
+            not _fold_search(row["name"]).startswith(text),
+            -row["diameter_km"]))
         return {"query": text, "results": found[:limit]}
 
     def point(self, query: Dict[str, Any]) -> Dict[str, Any]:
@@ -577,7 +782,18 @@ class LunarMapService:
         lat = _finite(query.get("lat"))
         if not (math.isfinite(lon) and math.isfinite(lat) and -90.0 <= lat <= 90.0):
             raise moonlib.MoonlibError("lon/lat must be finite; lat in -90..90.")
+        try:
+            zoom = int(_finite(query.get("zoom"), 0.0))
+        except (TypeError, ValueError):
+            zoom = 0
+        zoom = max(MIN_ZOOM, min(MAX_ZOOM, zoom))
         terrain = self.terrain()
+        if zoom >= DETAIL_ZOOM:
+            # The readout should describe the same ground the tile is drawing.
+            cols, rows = _tile_counts(zoom)
+            x = min(cols - 1, max(0, int((lon + 180.0) / 360.0 * cols)))
+            y = min(rows - 1, max(0, int((90.0 - lat) / 180.0 * rows)))
+            terrain = self._tile_terrain(zoom, x, y)
         level = 0
         try:
             level = int(terrain.dem.level_for_ground_scale(0.25))
@@ -593,6 +809,28 @@ class LunarMapService:
         }
 
     # -- 测量工具 ---------------------------------------------------------
+    #: A profile shorter than this is cut from the high-zoom DEM window rather
+    #: than the whole-disk pyramid.  A 0.5 km crater on the 474 m pyramid is one
+    #: or two samples; on the 59 m SLDEM it is eight or nine.
+    PROFILE_DETAIL_MAX_KM = 300.0
+
+    def _profile_terrain(self, lon_min: float, lon_max: float,
+                         lat_min: float, lat_max: float) -> Any:
+        """The global pyramid, or a regional window at the tile's own detail."""
+        source = self._detail_source_path()
+        if source is None:
+            return self.terrain()
+        pad = max(0.01, (lon_max - lon_min) * 0.25,
+                  (lat_max - lat_min) * 0.25)
+        try:
+            return moonlib.terrain.open_region_box(
+                lon_min - pad, lon_max + pad,
+                lat_min - pad, lat_max + pad,
+                source=source, terrain=self.terrain(),
+            )
+        except Exception:
+            return self.terrain()
+
     def profile(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Heights along a measured line, or across a measured circle.
 
@@ -600,6 +838,10 @@ class LunarMapService:
         the page plots under that value -- the same question the simulator's
         full-disk page asks of the same DEM, so the sampling lives in the
         library and both services only parse the request.
+
+        Short profiles are cut from the same high-resolution window the tiles
+        use.  Reading the whole-disk pyramid here made a 0.5 km measurement a
+        one-pixel line even when the map was already drawing 59 m terrain.
         """
         started = time.time()
         kind = str(payload.get("kind") or "line").strip().lower()
@@ -611,6 +853,15 @@ class LunarMapService:
         if kind == "line":
             a = _ground_pair(payload.get("a"), "a")
             b = _ground_pair(payload.get("b"), "b")
+            length = _ground_distance_km(a, b)
+            if length <= self.PROFILE_DETAIL_MAX_KM:
+                lons = (a[0], b[0])
+                lats = (a[1], b[1])
+                # Keep the window on one side of the dateline.
+                if abs(lons[1] - lons[0]) > 180.0:
+                    lons = (lons[0], lons[1] + (360.0 if lons[1] < lons[0] else -360.0))
+                terrain = self._profile_terrain(
+                    min(lons), max(lons), min(lats), max(lats))
             body = moonlib.terrain.ground_profile(
                 terrain, line=(a, b), samples=samples)
         else:
@@ -619,6 +870,13 @@ class LunarMapService:
             azimuths = int(round(_finite(
                 payload.get("azimuths"),
                 float(moonlib.terrain.PROFILE_AZIMUTHS))))
+            if 0.0 < radius_km <= self.PROFILE_DETAIL_MAX_KM / 2.0:
+                half = max(0.02, radius_km / 111.0)
+                half_lon = max(0.02, radius_km / (
+                    111.0 * max(0.05, math.cos(math.radians(centre[1])))))
+                terrain = self._profile_terrain(
+                    centre[0] - half_lon, centre[0] + half_lon,
+                    centre[1] - half, centre[1] + half)
             body = moonlib.terrain.ground_profile(
                 terrain, circle=(centre, radius_km), samples=samples,
                 azimuths=azimuths)
@@ -1027,7 +1285,9 @@ class LunarMapService:
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 if meta.get("version") == 4:
-                    meta["url"] = f"/api/map/photos/{photo_id}/overlay.png"
+                    stamp = image_path.stat().st_mtime_ns
+                    meta["url"] = (
+                        f"/api/map/photos/{photo_id}/overlay.png?v={stamp}")
                     return meta
             except (OSError, ValueError):
                 pass
@@ -1716,8 +1976,12 @@ def _photo_summary(directory: Path) -> Optional[Dict[str, Any]]:
     summary["date"] = when[:10] if len(when) >= 10 else None
     summary["age_days"] = _photo_age_days(when)
     mask = directory / "mask.png"
-    summary["mask_url"] = (f"/api/map/photos/{directory.name}/mask"
-                           if mask.is_file() else None)
+    if mask.is_file():
+        summary["mask_url"] = (
+            f"/api/map/photos/{directory.name}/mask"
+            f"?v={mask.stat().st_mtime_ns}")
+    else:
+        summary["mask_url"] = None
     return summary
 
 
@@ -1966,6 +2230,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.layers())
             if path == "/api/map/data":
                 return self._json(200, self.service.data_status())
+            if path == "/api/map/data/rebuild":
+                return self._json(200, self.service.terrain_rebuild_status())
             if path == "/api/map/features":
                 return self._json(200, self.service.feature_query(query))
             if path == "/api/map/search":
@@ -2059,6 +2325,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/map/data/download":
                 return self._json(200, self.service.start_data_download())
+            if path == "/api/map/data/rebuild":
+                payload = self._read_json_body()
+                return self._json(200, self.service.start_terrain_rebuild(payload))
             if path == "/api/map/profile":
                 payload = self._read_json_body()
                 return self._json(200, self.service.profile(payload))

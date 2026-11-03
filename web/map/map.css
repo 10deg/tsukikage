@@ -50,6 +50,14 @@ button.primary {
 }
 button.primary:hover { background: #efc97f; }
 button.ghost { background: transparent; }
+/* The A/a satellite switch is a one-glyph button; the default button padding
+   made its box read as a larger control than the check labels beside it. */
+button.format-toggle {
+  min-width: 24px;
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+}
 button.caret {
   display: inline-flex;
   align-items: center;
@@ -913,24 +921,47 @@ body.map-fullscreen .map-stage { grid-column: 1; }
 }
 
 /* 测量工具's profile: white curve on a translucent black panel, units on both
-   axes, no axes drawn.  It is a reading, not a control. */
+   axes, no axes drawn.  It is a reading, and its border is a control: the top
+   strip moves it, the bottom-right corner resizes it. */
 .map-measure-chart {
   position: absolute;
   top: 12px;
   left: 12px;
   z-index: 7;
-  pointer-events: none;
   padding: 2px;
   border: 1px solid rgba(255, 255, 255, .28);
   border-radius: 4px;
   background: rgba(0, 0, 0, .58);
   line-height: 0;
+  touch-action: none;
 }
 .map-measure-chart[hidden] { display: none; }
-.map-measure-chart canvas {
+.map-measure-chart canvas { display: block; }
+.map-measure-chart-bar {
+  height: 9px;
+  margin: -2px -2px 2px;
+  border-radius: 3px 3px 0 0;
+  background: rgba(255, 255, 255, .10);
+  cursor: move;
+}
+.map-measure-chart-bar::after {
+  content: "";
   display: block;
-  width: 248px;
-  height: 96px;
+  width: 26px;
+  height: 1px;
+  margin: 4px auto 0;
+  background: rgba(255, 255, 255, .35);
+}
+.map-measure-chart-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 50%, rgba(255, 255, 255, .38) 50%,
+      rgba(255, 255, 255, .38) 62%, transparent 62%);
 }
 
 .map-tooltip {

@@ -77,6 +77,8 @@ const state = {
   skyCloseupTouched: false, // the reader has chosen the close-up mode themselves
   skyViewLocked: true,  // keep the current axes while time and span change
   eventTable: [],      // rows currently shown by the forecast (and its window)
+  eventWindowBox: null, // {left, top, width, height} of the floating table
+  eventWindowDrag: null,
   eventImported: false, // the rows came from a CSV, not from the server
   eventVisibleOnly: false, // 筛选可见: only rows above the observer's horizon
   crescentItems: [],   // raw 极低照明度 rows, so the filter can re-render them
@@ -182,12 +184,12 @@ const LAND_CLASSES = [
   { key: 'rupes',        zh: '峭壁',                 en: 'Rupes',                color: '#d4a179' },
   { key: 'catena',       zh: '坑链',                 en: 'Catena',               color: '#9aa8cc' },
   { key: 'promontorium', zh: '海角',                 en: 'Promontorium',         color: '#9ed4b4' },
+  { key: 'albedo',       zh: '反照率特征',           en: 'Albedo feature',       color: '#c9c9dc' },
   { key: 'statio',       zh: '着陆点',               en: 'Statio',               color: '#e9a86b' },
   { key: 'pit',          zh: 'Lunar pits',           en: 'Lunar pit',            color: '#9fd0c0' },
   { key: 'pyroclastic',  zh: '火成碎屑', en: 'Pyroclastic',        color: '#d9a0b4' },
   { key: 'imp',          zh: '不规则月海斑块',  en: 'Irregular mare patch', color: '#bcd0a0' },
   { key: 'impact',       zh: '撞击闪光',    en: 'NELIOTA impact',       color: '#f0c0a0' },
-  { key: 'albedo',       zh: '反射率特征点',          en: 'Albedo feature',       color: '#c9c9dc' },
   /* A curated observing list, not a geological family.  The tooltip is part
      of the control: the first three entries are about the Moon as a whole and
      have no point to put on a map, which would otherwise look like a bug. */
@@ -204,13 +206,12 @@ const LAND_CLASSES = [
 ];
 
 /* Switched off to begin with: these families are either catalogues of their own
-   (the atlas's domes, pits and pyroclastic areas), a list of *instants* rather
-   than of places (the NELIOTA impact flashes), or -- in the case of 着陆点 -- a
-   set of small sites that only mean something once you are looking at a
-   landing region up close.  A first look at the Moon is not covered in them.
-   `resetClasses()` reads this list, so "复位" and the first paint agree. */
+   (the atlas's domes, pits and pyroclastic areas) or a list of *instants*
+   rather than of places (the NELIOTA impact flashes).  着陆点 is on from the
+   first paint, like the map service.  `resetClasses()` reads this list, so
+   "复位" and the first paint agree. */
 const DEFAULT_OFF_CLASSES = ['basin', 'dome', 'pit', 'pyroclastic', 'imp', 'impact',
-                             'statio', 'lunar100', 'libration', 'other'];
+                             'lunar100', 'libration', 'other'];
 
 /* The classes in the order the switches show them: the ones that are on to
  * begin with first, the ones that start switched off after them.
@@ -484,6 +485,7 @@ function selectionPayload() {
   clampSelectionInPlace();
   const s = state.selection;
   if (!s) return null;
+  const ground = state.view3d ? selectionGroundBox() : null;
   return {
     lon: s.lon,
     lat: s.lat,
@@ -493,6 +495,9 @@ function selectionPayload() {
     // ignores this extra key, the 3D endpoint needs it to reconstruct the
     // selection's true aspect.
     aspect: shapeAspect(),
+    // On the 3D globe the box is a fixed tangent-plane rectangle; hand the
+    // exporter that exact ground box so its four sides are the drawn ones.
+    ...(ground ? { ground_box: [ground.x0, ground.x1, ground.y0, ground.y1] } : {}),
     // The irregular preimage of a ground rectangle.  The server rebuilds the
     // exact same shape from the same numbers; this flag is what tells it to.
     corrected: selectionCorrected(),
@@ -701,9 +706,12 @@ const PROC_FIELDS = [
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
   'label-lock', 'label-overlap', 'label-region', 'label-satellites',
+  'label-crater-suffix',
   'text-bold', 'text-color', 'text-stroke', 'text-stroke-width',
   'marker-stroke', 'marker-stroke-width',
   'outline-style', 'outline-width', 'outline-color',
+  'label-outline', 'label-text-follow', 'label-round-outline', 'label-linear-outline',
+  'label-mountain-outline',
 ];
 
 /** The current instant as the wall clock of the page's own time zone. */
@@ -991,6 +999,10 @@ function selectionArcsec() {
 const LUNAR_REFERENCE_RADIUS_KM = 1737.4;
 
 function selectionCorrected() {
+  // The 3D globe has no outer limb to clamp against, and a sky rectangle
+  // changes shape as it moves; force the ground patch there so the selection
+  // is a rigid shape on the sphere.
+  if (state.view3d) return true;
   const box = $('mesh-corrected');
   return !!(box && box.checked);
 }
@@ -1109,6 +1121,20 @@ function selectionGroundBox() {
   const camera = selectionCameraGeometry();
   const half = selectionSkyHalfAngles();
   if (!camera || !half) return null;
+  if (state.view3d && !selectionEllipse()) {
+    // The 3D rectangle is a tangent-plane footprint, not the sky box's
+    // centre-dependent ground footprint.  Its size is fixed by the selection
+    // fraction and aspect, so moving it cannot change its shape.
+    const aspect = Math.max(1e-6, shapeAspect());
+    const shortKm = Math.max(0, Number(state.selection.radiusFraction) || 0)
+      * camera.radiusKm;
+    const halfW = aspect >= 1 ? shortKm : shortKm / aspect;
+    const halfH = aspect >= 1 ? shortKm * aspect : shortKm;
+    return {
+      camera, half,
+      x0: -halfW, x1: halfW, y0: -halfH, y1: halfH,
+    };
+  }
   if (selectionEllipse() && selectionCorrected()) {
     // The corrected ellipse is already a ground patch.  Its box is the
     // patch's own tangent-plane box, not the footprint of the sky ellipse
@@ -1372,10 +1398,11 @@ function selectionGroundEllipse(rotationDeg) {
   let maxDelta = Math.acos(Math.min(1, Math.max(0, far / camera.radiusKm)));
   // Safety net for a selection loaded or typed without going through the
   // centre clamp: shrink the patch to the visible cap rather than let part of
-  // it cross the limb.  Normal dragging never reaches this branch because
-  // clampSelectionCentre() has already kept the centre inside.
+  // it cross the limb.  The 3D globe has no such cap -- the patch may cross
+  // the limb and is still a valid patch of the sphere -- so skip the shrink
+  // entirely in that view.
   let shrink = 1;
-  if (delta > maxDelta + 1e-12 && far > 0) {
+  if (!state.view3d && delta > maxDelta + 1e-12 && far > 0) {
     const limit = camera.radiusKm * Math.max(0, cosDelta) * (1 - 1e-9);
     shrink = Math.min(1, limit / far);
     halfW *= shrink;
@@ -1383,6 +1410,7 @@ function selectionGroundEllipse(rotationDeg) {
     far *= shrink;
     maxDelta = Math.acos(Math.min(1, Math.max(0, far / camera.radiusKm)));
   }
+  if (state.view3d) maxDelta = Math.PI;
   return {
     camera,
     halfW,
@@ -1497,6 +1525,9 @@ function clampSelectionCentre(lon, lat) {
 
 /** Apply the centre cap to the live selection, if it is an ellipse. */
 function clampSelectionInPlace() {
+  // A 3D globe has no outer circle to stay inside: the patch may be centred
+  // anywhere, including past the limb.  The flat preview still uses the cap.
+  if (state.view3d) return false;
   const s = state.selection;
   if (!s || !selectionEllipse() || !selectionCorrected()) return false;
   const clamped = clampSelectionCentre(s.lon, s.lat);
@@ -1556,17 +1587,12 @@ function classicEllipseBoundarySegments() {
   if (!camera || !half) return null;
   const tu = Math.tan(half.w);
   const tv = Math.tan(half.h);
-  const radiusKm = camera.radiusKm;
-  const originDistance = Math.hypot(
-    camera.origin[0], camera.origin[1], camera.origin[2]);
-  const uOrigin = camera.origin.map((value) => value / originDistance);
-  const segments = [];
-  let current = [];
-  let breaks = 0;
-  const finish = () => {
-    if (current.length >= 2) segments.push(current);
-    current = [];
-  };
+  // An uncorrected selection is an ellipse in the *sky*, not a patch of ground.
+  // Projecting each ray through the disk camera (including the rays that miss
+  // the Moon) keeps the whole ellipse on the preview; intersecting the sphere
+  // and folding the misses onto the limb was what cut it off at the outer
+  // circle.
+  const points = [];
   const count = 480;
   for (let index = 0; index <= count; index += 1) {
     const angle = (index % count) / count * Math.PI * 2;
@@ -1578,38 +1604,12 @@ function classicEllipseBoundarySegments() {
       camera.forward[2] + Math.cos(angle) * tu * camera.right[2]
         + Math.sin(angle) * tv * camera.up[2],
     ]);
-    let point = moonSphereHit(camera.origin, direction, radiusKm);
-    if (!point) {
-      // Fold the missed ray onto the visible limb so the outline continues
-      // along the edge instead of vanishing.
-      const along = dot3(direction, uOrigin);
-      const perpRaw = [
-        direction[0] - along * uOrigin[0],
-        direction[1] - along * uOrigin[1],
-        direction[2] - along * uOrigin[2],
-      ];
-      const perp = Math.hypot(perpRaw[0], perpRaw[1], perpRaw[2]);
-      if (!(perp > 1e-12)) { breaks += 1; finish(); continue; }
-      const sinT = radiusKm / originDistance;
-      const cosT = Math.sqrt(Math.max(0, 1 - sinT * sinT));
-      const tangent = [
-        perpRaw[0] / perp * sinT - uOrigin[0] * cosT,
-        perpRaw[1] / perp * sinT - uOrigin[1] * cosT,
-        perpRaw[2] / perp * sinT - uOrigin[2] * cosT,
-      ];
-      const travel = -dot3(camera.origin, tangent);
-      point = camera.origin.map((value, i) => value + travel * tangent[i]);
-    }
-    const projected = projectMoonPoint(point);
-    if (projected.depth > 1e-6) { breaks += 1; finish(); continue; }
-    current.push({ x: projected.x, y: projected.y });
+    const projected = diskDirectionToPixel(direction);
+    if (!projected) continue;
+    points.push(projected);
   }
-  finish();
-  if (!segments.length) return null;
-  return {
-    segments,
-    closed: breaks === 0 && segments.length === 1 && segments[0].length >= 3,
-  };
+  if (points.length < 3) return null;
+  return { segments: [points], closed: true };
 }
 
 /** The elliptical selector's boundary, as a curve on the Moon.
@@ -2266,6 +2266,19 @@ function drawGlobe3d() {
 }
 
 function setView3d(on) {
+  const correctedBox = $('mesh-corrected');
+  if (!state.view3d && on && correctedBox) {
+    // Remember the 2D choice; 3D is always corrected and shows that as a
+    // locked control rather than silently disagreeing with the checkbox.
+    state.correctedBefore3d = correctedBox.checked;
+    correctedBox.checked = true;
+    correctedBox.disabled = true;
+  } else if (state.view3d && !on && correctedBox) {
+    correctedBox.disabled = false;
+    if (state.correctedBefore3d !== undefined) {
+      correctedBox.checked = !!state.correctedBefore3d;
+    }
+  }
   state.view3d = !!on;
   const button = $('view-3d');
   if (button) button.setAttribute('aria-pressed', String(state.view3d));
@@ -2301,6 +2314,7 @@ function drawDisk() {
   if (state.view3d) {
     drawGlobe3d();
     drawSelection();
+    drawMagnifier();
     return;
   }
   const ctx = DISK.getContext('2d');
@@ -2629,9 +2643,19 @@ function previewPixels() {
   return clampPx(num('preview-px') || 1000, 240, LIMITS.preview_px);
 }
 
+/** Is the save menu asking for the picture the preview already carries? */
+function nativeSaveWanted(selectId) {
+  const select = $(selectId);
+  return !!select && select.value === 'native';
+}
+
 /** The size the *saved* full disk is rendered at -- its own number, up to the
- *  server's much higher ceiling for this one picture. */
+ *  server's much higher ceiling for this one picture.  "原始分辨率" is the
+ *  preview's own frame: nothing is re-rendered, the file is that picture. */
 function diskPixels() {
+  if (nativeSaveWanted('disk-preset') && state.diskImage) {
+    return state.diskImage.width;
+  }
   return clampPx(num('disk-px') || 2400, 240, LIMITS.disk_px);
 }
 
@@ -2647,6 +2671,12 @@ function syncResolutionPicker(inputId, selectId) {
   const input = $(inputId);
   const select = $(selectId);
   if (!input || !select) return;
+  // 原始分辨率 is a mode, not a number: the hidden field keeps its last value
+  // but must not drag the menu back to 自定义.
+  if (select.value === 'native') {
+    input.hidden = true;
+    return;
+  }
   const value = String(num(inputId) === null ? '' : num(inputId));
   const known = [...select.options].some((option) => option.value === value);
   select.value = known ? value : 'custom';
@@ -2663,6 +2693,12 @@ function wireResolutionPicker(inputId, selectId) {
       input.hidden = false;
       if (input.focus) input.focus();
       if (input.select) input.select();
+      return;
+    }
+    if (select.value === 'native') {
+      input.hidden = true;
+      if (inputId === 'disk-px') updateDiskScale();
+      else if (inputId === 'out-px') updateSaveInfo();
       return;
     }
     input.value = select.value;
@@ -2710,6 +2746,10 @@ function renderedAspect() {
  * choice left is which side the number is about.
  */
 function outputPixels() {
+  if (nativeSaveWanted('out-preset')) {
+    const source = state.resultImage || state.rawImage;
+    if (source) return { width: source.width, height: source.height };
+  }
   const a = Math.max(1e-6, renderedAspect());     // height / width
   const typed = clampPx(num('out-px') || 1200, 64, LIMITS.output_px);
   const reference = $('out-ref') && $('out-ref').value === 'short' ? 'short' : 'long';
@@ -3055,66 +3095,159 @@ const SELECTION_SHADOW = 'rgba(10, 12, 16, .65)';
  * sky half-angles or its ground patch -- and never asks whether a flat disc
  * pixel exists.  The ellipse checkbox is honoured here too.
  */
+/** A fallback patch centred on the selection's own surface normal.
+ *
+ * Used when the Earth-side footprint is not defined -- the box is on the far
+ * side, or the globe has been turned away from the observer.  It keeps the
+ * same fraction of the globe radius, so the control stays the same size and
+ * stays grabbable wherever the reader turns the sphere.
+ */
+function surfacePatchGeometry(s, ellipse) {
+  const n = unit3(moonVector(s.lon, s.lat));
+  const pole = [0, 0, 1];
+  let east = unit3(cross3(pole, n));
+  if (!Number.isFinite(east[0])
+      || Math.hypot(east[0], east[1], east[2]) < 0.5) {
+    east = unit3([1, 0, 0]);
+  }
+  const north = unit3(cross3(n, east));
+  const turn = (Number(s.rotationDeg) || 0) * Math.PI / 180;
+  const cos = Math.cos(turn), sin = Math.sin(turn);
+  const u = [
+    east[0] * cos + north[0] * sin,
+    east[1] * cos + north[1] * sin,
+    east[2] * cos + north[2] * sin,
+  ];
+  const v = [
+    -east[0] * sin + north[0] * cos,
+    -east[1] * sin + north[1] * cos,
+    -east[2] * sin + north[2] * cos,
+  ];
+  const fraction = Math.max(0.004,
+    Math.min(0.999, Number(s.radiusFraction) || 0.1));
+  const aspect = Math.max(0.05, Math.min(20, shapeAspect()));
+  const halfU = Math.asin(Math.min(0.999, fraction));
+  const halfV = Math.asin(Math.min(0.999, fraction * aspect));
+  const at = (x, y) => {
+    const tx = x * halfU;
+    const ty = y * halfV;
+    const tangent = [
+      u[0] * tx + v[0] * ty,
+      u[1] * tx + v[1] * ty,
+      u[2] * tx + v[2] * ty,
+    ];
+    const r = Math.hypot(tangent[0], tangent[1], tangent[2]);
+    if (!(r > 1e-12)) return n;
+    const c = Math.cos(r), sn = Math.sin(r);
+    return unit3([
+      n[0] * c + tangent[0] / r * sn,
+      n[1] * c + tangent[1] / r * sn,
+      n[2] * c + tangent[2] / r * sn,
+    ]);
+  };
+  const directions = [];
+  let corners = [];
+  let top = null;
+  if (ellipse) {
+    for (let index = 0; index <= 96; index += 1) {
+      const angle = 2 * Math.PI * index / 96;
+      directions.push(at(Math.cos(angle), Math.sin(angle)));
+    }
+    corners = [at(1, 0), at(0, 1), at(-1, 0), at(0, -1)];
+    top = at(0, -1);
+  } else {
+    const edge = (u0, v0, u1, v1) => {
+      for (let step = 0; step <= 16; step += 1) {
+        const t = step / 16;
+        directions.push(at(u0 + (u1 - u0) * t, v0 + (v1 - v0) * t));
+      }
+    };
+    edge(-1, -1, 1, -1);
+    edge(1, -1, 1, 1);
+    edge(1, 1, -1, 1);
+    edge(-1, 1, -1, -1);
+    corners = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
+    top = at(0, -1);
+  }
+  return { directions, corners, top, centre: n, surface: true };
+}
+
 function globeSelectionGeometry() {
   const s = state.selection;
   if (!s || !state.geometry) return null;
   const ellipse = selectionEllipse();
   const corrected = selectionCorrected();
-  const directions = [];
-  let corners = [];
-  let top = null;
-  let centre = null;
-  if (corrected && ellipse) {
-    const ground = selectionGroundEllipse();
-    if (!ground) return null;
-    const { camera, halfW, halfH } = ground;
-    const at = (angle) => {
-      const point = groundSurfacePoint(
-        camera, Math.cos(angle) * halfW, Math.sin(angle) * halfH,
-      );
-      return point ? unit3(point) : null;
-    };
-    for (let index = 0; index <= 96; index += 1) {
-      directions.push(at(2 * Math.PI * index / 96));
-    }
-    corners = [at(0), at(Math.PI / 2), at(Math.PI), at(3 * Math.PI / 2)];
-    top = at(3 * Math.PI / 2);
-    centre = unit3(ground.camera.up0);
-  } else if (corrected) {
-    const ground = selectionGroundBox();
-    if (!ground) return null;
-    const { camera, x0, x1, y0, y1 } = ground;
-    const at = (x, y) => {
-      const point = groundSurfacePoint(camera, x, y);
-      return point ? unit3(point) : null;
-    };
-    const edge = (ax, ay, bx, by) => {
-      for (let step = 0; step <= 16; step += 1) {
-        const t = step / 16;
-        directions.push(at(ax + (bx - ax) * t, ay + (by - ay) * t));
+  if (corrected) {
+    // The corrected box is already a ground patch: project its own points and
+    // do *not* scale the result.  In 3D, selectionGroundBox()/Ellipse() use
+    // fixed ground extents (see 3D branches) so moving it cannot change its
+    // shape or shrink it at the limb.
+    const directions = [];
+    let corners = [];
+    let top = null;
+    let centre = null;
+    if (ellipse) {
+      const ground = selectionGroundEllipse();
+      if (ground) {
+        const { camera, halfW, halfH } = ground;
+        const at = (angle) => {
+          const point = groundSurfacePoint(
+            camera, Math.cos(angle) * halfW, Math.sin(angle) * halfH,
+          );
+          return point ? unit3(point) : null;
+        };
+        for (let index = 0; index <= 96; index += 1) {
+          directions.push(at(2 * Math.PI * index / 96));
+        }
+        corners = [at(0), at(Math.PI / 2), at(Math.PI), at(3 * Math.PI / 2)];
+        top = at(3 * Math.PI / 2);
+        centre = unit3(camera.up0);
       }
-    };
-    edge(x0, y0, x1, y0);
-    edge(x1, y0, x1, y1);
-    edge(x1, y1, x0, y1);
-    edge(x0, y1, x0, y0);
-    corners = [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)];
-    top = at(0.5 * (x0 + x1), y0);
-    centre = unit3(camera.up0);
-  } else {
-    const camera = selectionCameraGeometry();
-    const half = selectionSkyHalfAngles();
-    if (!camera || !half) return null;
+    } else {
+      const ground = selectionGroundBox();
+      if (ground) {
+        const { camera, x0, x1, y0, y1 } = ground;
+        const at = (x, y) => {
+          const point = groundSurfacePoint(camera, x, y);
+          return point ? unit3(point) : null;
+        };
+        const edge = (ax, ay, bx, by) => {
+          for (let step = 0; step <= 16; step += 1) {
+            const t = step / 16;
+            directions.push(at(ax + (bx - ax) * t, ay + (by - ay) * t));
+          }
+        };
+        edge(x0, y0, x1, y0);
+        edge(x1, y0, x1, y1);
+        edge(x1, y1, x0, y1);
+        edge(x0, y1, x0, y0);
+        corners = [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)];
+        top = at(0.5 * (x0 + x1), y0);
+        centre = unit3(camera.up0);
+      }
+    }
+    if (centre && directions.filter(Boolean).length >= 4) {
+      return { directions, corners, top, centre, surface: true };
+    }
+    return surfacePatchGeometry(s, ellipse);
+  }
+  // The ordinary box is a sky rectangle.  Where the observer's rays still meet
+  // the ground, draw the actual footprint: that is the shape the preview shows,
+  // including its stretch near the limb.
+  const camera = selectionCameraGeometry();
+  const half = selectionSkyHalfAngles();
+  if (camera && half) {
     const tu = Math.tan(half.w);
     const tv = Math.tan(half.h);
-    const at = (u, v) => unit3([
-      camera.forward[0] + u * tu * camera.right[0]
-        + v * tv * camera.up[0],
-      camera.forward[1] + u * tu * camera.right[1]
-        + v * tv * camera.up[1],
-      camera.forward[2] + u * tu * camera.right[2]
-        + v * tv * camera.up[2],
-    ]);
+    const at = (u, v) => {
+      const ground = skyGroundPoint(camera, u * tu, v * tv);
+      if (!ground) return null;
+      const point = groundSurfacePoint(camera, ground.x, ground.y);
+      return point ? unit3(point) : null;
+    };
+    const directions = [];
+    let corners = [];
+    let top = null;
     if (ellipse) {
       for (let index = 0; index <= 96; index += 1) {
         const angle = 2 * Math.PI * index / 96;
@@ -3136,9 +3269,13 @@ function globeSelectionGeometry() {
       corners = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
       top = at(0, -1);
     }
-    centre = unit3(camera.forward);
+    if (directions.filter(Boolean).length >= 4) {
+      return {
+        directions, corners, top, centre: unit3(camera.up0), surface: true,
+      };
+    }
   }
-  return { directions, corners, top, centre };
+  return surfacePatchGeometry(s, ellipse);
 }
 
 /** A MOON_ME direction on the 3D globe, in preview-image pixels.
@@ -3177,6 +3314,189 @@ function globePixelFromDirection(direction, centre = null, scale = 1) {
   };
 }
 
+/** The 3D selection's boundary and handles, in preview-image pixels.
+ *
+ * The flat frame cannot answer hit tests once the globe has been turned to the
+ * far side: ``lonLatToPixel`` returns null there, so the drawn box was visible
+ * but ungrabbable.  This is the same geometry the painter uses, kept in the
+ * preview's pixels for the pointer.
+ */
+function globeSelectionScreen() {
+  const shape = globeSelectionGeometry();
+  if (!shape) return null;
+  const angular = Number(state.geometry && state.geometry.angular_diameter_deg);
+  const sine = Number.isFinite(angular) && angular > 0
+    ? Math.sin(angular * Math.PI / 360) : 0;
+  const scale = shape.surface ? 1 : (sine > 1e-9 ? 1 / sine : 1);
+  const at = (direction) => direction
+    ? globePixelFromDirection(direction, shape.centre, scale) : null;
+  const points = shape.directions.map(at).filter(Boolean);
+  const corners = shape.corners.map(at).filter(Boolean);
+  return {
+    points, corners,
+    top: at(shape.top),
+    centre: at(shape.centre),
+  };
+}
+
+function globeSelectionHandle(shape) {
+  if (!shape || !shape.centre || !shape.top) return null;
+  const dx = shape.top.x - shape.centre.x;
+  const dy = shape.top.y - shape.centre.y;
+  const length = Math.max(1e-6, Math.hypot(dx, dy));
+  return {
+    x: shape.top.x + dx / length * HANDLE_GAP,
+    y: shape.top.y + dy / length * HANDLE_GAP,
+  };
+}
+
+function pointInPolygon(p, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    const a = points[i];
+    const b = points[j];
+    if (((a.y > p.y) !== (b.y > p.y))
+        && (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function distanceToSegment(p, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  if (!(length > 1e-12)) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1,
+    ((p.x - a.x) * dx + (p.y - a.y) * dy) / length));
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
+/** 3D only: handle / corner / edge / inside, in the preview's own pixels. */
+function globeSelectionHit(p, shape) {
+  if (!p || !shape) return null;
+  const grab = 11;
+  const handle = globeSelectionHandle(shape);
+  if (handle && Math.hypot(p.x - handle.x, p.y - handle.y) <= grab + 3) {
+    return 'rotate';
+  }
+  for (const corner of shape.corners) {
+    if (Math.hypot(p.x - corner.x, p.y - corner.y) <= grab) return 'corner';
+  }
+  // The inside test is the polygon, but the projected centre is the one point
+  // that must never be ambiguous: a footprint that crosses the limb can have
+  // an open or self-touching ring, and the middle of the box is still the
+  // middle of the box.
+  if (shape.centre
+      && Math.hypot(p.x - shape.centre.x, p.y - shape.centre.y) <= grab) {
+    return 'move';
+  }
+  for (let index = 1; index < shape.points.length; index += 1) {
+    if (distanceToSegment(p, shape.points[index - 1], shape.points[index])
+        <= grab - 3) {
+      return 'edge';
+    }
+  }
+  if (shape.points.length > 2 && pointInPolygon(p, shape.points)) return 'move';
+  return null;
+}
+
+/** Angular distance between two selenographic points, degrees. */
+function groundAngleDeg(a, b) {
+  const u = unit3([Math.cos(a.lat * Math.PI / 180) * Math.cos(a.lon * Math.PI / 180),
+                   Math.cos(a.lat * Math.PI / 180) * Math.sin(a.lon * Math.PI / 180),
+                   Math.sin(a.lat * Math.PI / 180)]);
+  const v = unit3([Math.cos(b.lat * Math.PI / 180) * Math.cos(b.lon * Math.PI / 180),
+                   Math.cos(b.lat * Math.PI / 180) * Math.sin(b.lon * Math.PI / 180),
+                   Math.sin(b.lat * Math.PI / 180)]);
+  return Math.acos(clamp(dot3(u, v), -1, 1)) * 180 / Math.PI;
+}
+
+/** Start a 3D edit from the drawn box; falls back to a fresh box. */
+function beginGlobeSelectionDrag(p, allowNew) {
+  if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return false;
+  const shape = globeSelectionScreen();
+  const hit = shape ? globeSelectionHit(p, shape) : null;
+  const geo = globeScreenToLonLat(p.x, p.y);
+  if (hit === 'rotate' && shape && shape.centre) {
+    state.dragging = {
+      mode: 'rotate3d', start: { ...state.selection },
+      centre: shape.centre,
+      grabAngle: Math.atan2(p.y - shape.centre.y, p.x - shape.centre.x),
+    };
+    return true;
+  }
+  if ((hit === 'corner' || hit === 'edge') && geo) {
+    const startAngle = groundAngleDeg(
+      { lon: state.selection.lon, lat: state.selection.lat }, geo);
+    state.dragging = {
+      mode: 'resize3d', start: { ...state.selection },
+      ground: geo, startAngle: Math.max(1e-4, startAngle),
+    };
+    return true;
+  }
+  if (hit === 'move' && geo) {
+    state.dragging = { mode: 'move3d', start: { ...state.selection }, ground: geo };
+    return true;
+  }
+  if (!allowNew || !geo) return false;
+  const apparent = Number(state.geometry && state.geometry.angular_diameter_deg);
+  const half = apparent > 0 ? apparent / 2 : 0.25;
+  state.dragging = { mode: 'new3d', anchor: p, ground: geo };
+  state.selection = {
+    lon: geo.lon, lat: geo.lat,
+    radiusFraction: Math.max(0.004, Math.min(0.2, 0.02 / Math.max(half, 1e-6))),
+    rotationDeg: 0,
+    aspect: lockActive() ? cameraAspect() : 1,
+  };
+  return true;
+}
+
+/** Pointer move for a 3D selection edit. */
+function moveGlobeSelection(event, drag) {
+  const p = diskPixelPoint(event);
+  const geo = globeScreenToLonLat(p.x, p.y);
+  if (!geo) return;
+  const start = drag.start;
+  if (drag.mode === 'move3d') {
+    const dLon = ((geo.lon - drag.ground.lon + 540) % 360) - 180;
+    const dLat = geo.lat - drag.ground.lat;
+    state.selection = {
+      ...start,
+      lon: ((start.lon + dLon + 540) % 360) - 180,
+      lat: Math.max(-89.9, Math.min(89.9, start.lat + dLat)),
+    };
+  } else if (drag.mode === 'resize3d') {
+    const angle = groundAngleDeg(
+      { lon: start.lon, lat: start.lat }, geo);
+    const ratio = angle / Math.max(drag.startAngle, 1e-4);
+    state.selection = {
+      ...start,
+      radiusFraction: Math.max(0.004,
+        Math.min(1.4, start.radiusFraction * ratio)),
+    };
+  } else if (drag.mode === 'new3d') {
+    const dx = p.x - drag.anchor.x;
+    const dy = p.y - drag.anchor.y;
+    const radius = Math.hypot(dx, dy) / Math.max(1, globe3dRadius());
+    const aspect = lockActive() ? cameraAspect()
+      : (Math.abs(dx) > 1e-6 ? Math.abs(dy / dx) : 1);
+    state.selection = {
+      lon: drag.ground.lon, lat: drag.ground.lat,
+      radiusFraction: Math.max(0.004, Math.min(1.4, radius)),
+      rotationDeg: 0,
+      aspect: Math.max(0.05, Math.min(20, aspect)),
+    };
+  } else if (drag.mode === 'rotate3d') {
+    const centre = drag.centre;
+    const angle = Math.atan2(p.y - centre.y, p.x - centre.x);
+    let deg = start.rotationDeg - (angle - drag.grabAngle) * 180 / Math.PI;
+    deg = ((deg % 360) + 540) % 360 - 180;
+    state.selection = { ...start, rotationDeg: deg };
+  }
+}
+
 /** The selection box carried onto the 3D globe. */
 function drawGlobeSelection(ctx, width, height, dpr) {
   const px = dpr;
@@ -3185,7 +3505,7 @@ function drawGlobeSelection(ctx, width, height, dpr) {
   const angular = Number(state.geometry && state.geometry.angular_diameter_deg);
   const sine = Number.isFinite(angular) && angular > 0
     ? Math.sin(angular * Math.PI / 360) : 0;
-  const scale = sine > 1e-9 ? 1 / sine : 1;
+  const scale = shape.surface ? 1 : (sine > 1e-9 ? 1 / sine : 1);
   const overlayOf = (direction) => {
     if (!direction) return null;
     const globe = globePixelFromDirection(direction, shape.centre, scale);
@@ -3382,7 +3702,12 @@ function drawSelection() {
    ten pixels of the slider. */
 const DENSITY_RANGE = {
   labels: [12, 30, 300],
-  min_radius_px: [4.5, 1.5, 0.55],
+  //: The floor is expressed at the 1000 px reference frame and scaled with the
+  //: actual frame, so changing the preview resolution does not change which
+  //: features are eligible.  The MAX notch goes well below a pixel: that is
+  //: what lets the density slider -- rather than the render size -- decide how
+  //: many names the full disk carries.
+  min_radius_px: [4.5, 1.5, 0.15],
 };
 const DENSITY_MAX = 1.5;
 
@@ -3507,6 +3832,27 @@ function lunar100Wanted() {
   return false;
 }
 
+/** A class switch's text in the language the captions are using. */
+function classChipLabel(entry) {
+  const language = labelLanguage();
+  if (language === 'en') return entry.en;
+  if (language === 'both') return `${entry.zh} ${entry.en}`;
+  return entry.zh;
+}
+
+/** Re-letter every class chip after the language switch moves. */
+function refreshClassLabels() {
+  for (const chip of document.querySelectorAll('.cls-chip')) {
+    const key = String(chip.dataset.class || '');
+    const entry = LAND_CLASSES.find((item) => item.key === key);
+    if (!entry) continue;
+    const name = Array.from(chip.children).find((child) =>
+      String(child.className || '').split(/\s+/).includes('cls-name'));
+    if (name) name.textContent = classChipLabel(entry);
+    chip.title = `${entry.zh} / ${entry.en}`;
+  }
+}
+
 /** The switches themselves, built from LAND_CLASSES rather than written out.
  *
  *  Sixteen chips of markup would be sixteen places to forget when a class is
@@ -3521,6 +3867,7 @@ function buildClassToggles() {
     const chip = document.createElement('label');
     chip.className = 'cls-chip';
     chip.dataset.on = DEFAULT_OFF_CLASSES.includes(entry.key) ? 'false' : 'true';
+    chip.dataset.class = entry.key;
     chip.title = entry.title || `${entry.zh} / ${entry.en}`;
     const box = document.createElement('input');
     box.type = 'checkbox';
@@ -3531,7 +3878,8 @@ function buildClassToggles() {
     dot.className = 'cls-dot';
     dot.style.color = entry.color;
     const text = document.createElement('span');
-    text.textContent = entry.zh;
+    text.className = 'cls-name';
+    text.textContent = classChipLabel(entry);
     const count = document.createElement('em');
     count.dataset.count = entry.key;
     count.textContent = '';
@@ -3644,11 +3992,17 @@ function labelStyleFor(viewName, frameFactor = 1) {
     markerStrokeColor: $('marker-stroke').value,
     markerStrokeWidth: Math.max(0, Math.min(3, Number.isFinite(markerWidth) ? markerWidth : 1)) / scale,
     bold: $('text-bold').checked,
+    outlines: $('label-outline').checked,
+    textFollow: $('label-text-follow').checked,
+    roundOutline: $('label-round-outline').checked,
+    linearOutlines: $('label-linear-outline').checked,
+    mountainOutlines: $('label-mountain-outline').checked,
     classColors: CLASS_COLORS,
     // 彩色 on = every label takes its own class's colour; off = one colour for
     // the lot, which is the "one colour" switch the reader reaches for when the
     // palette is in the way.
     uniform: !$('label-colour').checked,
+    textView: viewName,
   };
 }
 
@@ -3792,6 +4146,208 @@ function leaderStart(item) {
   return { x: x + dx * start, y: y + dy * start };
 }
 
+/** Smooth a traced outline before text is laid on it.
+ *
+ * Two Chaikin passes remove the metre-scale zig-zags a simplified coastline or
+ * rille trace carries.  Without them the per-character tangent turns a word
+ * over itself at every bend, which is what made some captions read upside down
+ * or run right to left.  Endpoints stay put so the run still spans the feature.
+ */
+function smoothOutlinePath(points, passes = 2) {
+  let current = points;
+  for (let pass = 0; pass < passes; pass += 1) {
+    if (!current || current.length < 3) break;
+    const next = [current[0]];
+    for (let index = 0; index < current.length - 1; index += 1) {
+      const a = current[index];
+      const b = current[index + 1];
+      next.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+      next.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+    }
+    next.push(current[current.length - 1]);
+    current = next;
+  }
+  return current;
+}
+
+/** Set one caption along its outline path, in frame pixels.
+ *
+ * Returns false when the path is too short for the name, so the caller can fall
+ * back to the ordinary box placement.  Characters are placed at their own
+ * advance widths, so CJK and Latin mix without gaps.
+ *
+ * The path is smoothed and then oriented so the run keeps a left-to-right
+ * trend (top-to-bottom when the feature is nearly vertical).  That is what
+ * stops a rille traced from east to west from carrying its name backwards.
+ */
+function paintTextAlongPath(ctx, item, fontPx, colour, strokeWidth, strokeColor, viewName) {
+  if (!item.outline_path || item.outline_path.length < 2) return false;
+  let points = smoothOutlinePath(item.outline_path, 2);
+  const chars = Array.from(String(item.label || ''));
+  if (!chars.length) return false;
+  const spacing = Math.max(0.8, fontPx * 0.12);
+  const widths = chars.map((char) => ctx.measureText(char).width);
+  const total = widths.reduce((sum, width) => sum + width, 0)
+    + spacing * Math.max(0, chars.length - 1);
+
+  /** Cumulative length and the point at a distance on one orientation. */
+  const measurePath = (path) => {
+    const cumulative = [0];
+    let length = 0;
+    for (let index = 1; index < path.length; index += 1) {
+      length += Math.hypot(path[index][0] - path[index - 1][0],
+                           path[index][1] - path[index - 1][1]);
+      cumulative.push(length);
+    }
+    const at = (distance) => {
+      let index = 1;
+      while (index < cumulative.length - 1 && cumulative[index] < distance) {
+        index += 1;
+      }
+      const span = cumulative[index] - cumulative[index - 1] || 1;
+      const t = Math.max(0, Math.min(1,
+        (distance - cumulative[index - 1]) / span));
+      const a = path[index - 1];
+      const b = path[index];
+      return {
+        x: a[0] + (b[0] - a[0]) * t,
+        y: a[1] + (b[1] - a[1]) * t,
+        angle: Math.atan2(b[1] - a[1], b[0] - a[0]),
+      };
+    };
+    return { path, cumulative, length, at };
+  };
+
+  /** The straightest, most upright window of this path for the caption.
+   *
+   * A rille can loop back on itself.  Orienting the whole path by its two
+   * endpoints then says nothing about the tangent where the text actually
+   * lands: the run can start on the return arc and read right-to-left or
+   * upside-down.  Score windows along the path instead, on both orientations,
+   * and put the text on the one whose tangent stays upright and changes least.
+   */
+  const bestWindow = (measured) => {
+    const { length, at } = measured;
+    if (length < total) return null;
+    const step = Math.max(1, total / 16);
+    let best = null;
+    for (let start = 0; start <= length - total; start += step) {
+      const angles = [];
+      for (let sample = 0; sample <= 6; sample += 1) {
+        angles.push(at(start + total * sample / 6).angle);
+      }
+      for (let index = 1; index < angles.length; index += 1) {
+        while (angles[index] - angles[index - 1] > Math.PI) {
+          angles[index] -= Math.PI * 2;
+        }
+        while (angles[index] - angles[index - 1] < -Math.PI) {
+          angles[index] += Math.PI * 2;
+        }
+      }
+      const spread = Math.max(...angles) - Math.min(...angles);
+      const middle = angles[3];
+      const horizontal = Math.abs(Math.cos(middle))
+        >= Math.abs(Math.sin(middle));
+      const upright = horizontal ? Math.cos(middle) : Math.sin(middle);
+      const centre = 1 - Math.abs((start + total / 2) - length / 2)
+        / Math.max(length / 2, 1e-6);
+      const score = (1 - Math.min(1, spread / Math.PI)) * 2
+        + Math.max(0, upright) * 1.6 + centre * 0.35;
+      if (!best || score > best.score) best = { start, score };
+    }
+    return best;
+  };
+
+  const forward = measurePath(points);
+  const backward = measurePath(points.slice().reverse());
+  const forwardChoice = bestWindow(forward);
+  const backwardChoice = bestWindow(backward);
+  const chosen = backwardChoice && (!forwardChoice
+    || backwardChoice.score > forwardChoice.score + 1e-6)
+    ? backward : forward;
+  const choice = chosen === forward ? forwardChoice : backwardChoice;
+  if (!choice) return false;
+  points = chosen.path;
+  const cumulative = chosen.cumulative;
+  const length = chosen.length;
+  const at = chosen.at;
+  // A path shorter than most of the name cannot carry it; the box placement
+  // below is the better answer for a cramped feature.
+  if (length < total * 0.75) return false;
+  const store = viewName === 'raw' || viewName === 'proc' ? 'region' : 'disk';
+  const trackKey = labelKey(item);
+  const shift = Number((labelTextShift[store] || {})[trackKey]) || 0;
+  const range = Math.max(1, length - total);
+  let start = choice.start + shift * range;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const loop = !!item.outline_closed
+    || Math.hypot(lastPoint[0] - firstPoint[0],
+                  lastPoint[1] - firstPoint[1]) < length * 0.18;
+  if (loop) start = ((start % range) + range) % range;
+  else start = Math.max(0, Math.min(range, start));
+  if (!labelTextTracks[store]) labelTextTracks[store] = {};
+  labelTextTracks[store][trackKey] = {
+    start,
+    base: choice.start,
+    range,
+    loop,
+    tangent: at(start + total / 2).angle,
+  };
+  // On a tight bend the arc between two glyph centres is longer than the
+  // chord, so advancing by the glyph width alone makes the rotated glyphs
+  // collide.  Lay the run out twice: once from zero to measure what it needs,
+  // then centred on the path.
+  const need = (left, right) => (left + right) / 2
+    + Math.max(1.2, spacing * 0.9);
+  const layout = (start) => {
+    const spots = [];
+    let position = start;
+    let previous = null;
+    for (let index = 0; index < chars.length; index += 1) {
+      let spot = at(position + widths[index] / 2);
+      let guard = 0;
+      while (previous && guard < 4000
+             && Math.hypot(spot.x - previous.x, spot.y - previous.y)
+                < need(widths[index - 1], widths[index])) {
+        position += 0.5;
+        spot = at(position + widths[index] / 2);
+        guard += 1;
+      }
+      if (position + widths[index] / 2 > length) return null;
+      spots.push(spot);
+      previous = spot;
+      position += widths[index] + (index + 1 < chars.length ? spacing : 0);
+    }
+    return { spots, end: position };
+  };
+  const placed = layout(start);
+  if (!placed) return false;
+  const spots = placed.spots;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  chars.forEach((char, index) => {
+    const spot = spots[index];
+    let angle = spot.angle;
+    if (angle > Math.PI / 2) angle -= Math.PI;
+    else if (angle < -Math.PI / 2) angle += Math.PI;
+    ctx.save();
+    ctx.translate(spot.x, spot.y);
+    ctx.rotate(angle);
+    if (strokeWidth > 0) {
+      ctx.lineWidth = strokeWidth;
+      ctx.strokeStyle = strokeColor;
+      ctx.strokeText(char, 0, 0);
+    }
+    ctx.fillStyle = colour;
+    ctx.fillText(char, 0, 0);
+    ctx.restore();
+  });
+  ctx.restore();
+  return true;
+}
+
 function paintLabels(ctx, plan, style) {
   if (!ctx || !plan || !plan.items || !plan.items.length) return;
   // The plan carries the size its boxes were laid out for; a *locked* layout is
@@ -3865,11 +4421,17 @@ function paintLabels(ctx, plan, style) {
   // dark pass for contrast on bright terrain, a coloured one on top to read
   // against the shadows.  The dark pass is what makes a pale class colour work
   // over a bright highland as well as over a dark mare.
-  if (rim.style !== 'none') {
+  if (ink.outlines !== false && rim.style !== 'none') {
     ctx.lineWidth = Math.max(0.4, rim.width + 1.1);
     ctx.setLineDash((rim.dash || []).map((value) => value * rim.width));
+    // 月海使用圆形轮廓: only a mare goes back to the old diameter circle.  Any
+    // other feature with a catalogue path paints that path instead of its rim
+    // circle (a circle on top of its own ring is the bug this avoids).
+    const roundMare = ink.roundOutline === true;
     for (const item of plan.items) {
       if (!item.outline || !item.outline.length) continue;
+      if (!(roundMare && item.class === 'mare')
+          && item.outline_path && item.outline_path.length) continue;
       if (isSatelliteMember(item)) continue;
       ctx.globalAlpha = alphaFor(item);
       ctx.strokeStyle = 'rgba(12, 14, 20, .55)';
@@ -3877,6 +4439,8 @@ function paintLabels(ctx, plan, style) {
     }
     for (const item of plan.items) {
       if (!item.outline || !item.outline.length) continue;
+      if (!(roundMare && item.class === 'mare')
+          && item.outline_path && item.outline_path.length) continue;
       // A satellite of the selected crater is a *marker*, not an outline: its
       // ring is exactly what the reader asked not to see, and at a typical
       // preview size those rims are only a few pixels wide anyway.
@@ -3893,10 +4457,53 @@ function paintLabels(ctx, plan, style) {
         : ink.uniform ? rim.color : itemColor(item, ink);
       strokeRing(item);
     }
+    // The catalogue's linear and area outlines: a rille's traced path, a
+    // mare's ring.  Crater circles came from the rim pass above.  Same two-
+    // pass treatment as the circles: a dark underlay, then the class colour,
+    // so a pale line still reads over bright highland.
+    const strokeOutlinePath = (item) => {
+      ctx.beginPath();
+      item.outline_path.forEach(([x, y], index) => {
+        if (index) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      });
+      if (item.outline_closed) ctx.closePath();
+      ctx.stroke();
+    };
+    for (const item of plan.items) {
+      if (roundMare && item.class === 'mare') continue;
+      // 显示线状地貌轮廓: open paths are the rilles and ridges; closed rings
+      // are area outlines and stay under the 轮廓 switch alone.
+      if (ink.linearOutlines === false && !item.outline_closed) continue;
+      if (ink.mountainOutlines === false && item.class === 'mons') continue;
+      if (!item.outline_path || item.outline_path.length < 2) continue;
+      if (isSatelliteMember(item)) continue;
+      ctx.globalAlpha = alphaFor(item);
+      ctx.strokeStyle = 'rgba(12, 14, 20, .55)';
+      ctx.lineWidth = Math.max(0.4, rim.width + 1.1);
+      strokeOutlinePath(item);
+    }
+    for (const item of plan.items) {
+      if (roundMare && item.class === 'mare') continue;
+      // 显示线状地貌轮廓: open paths are the rilles and ridges; closed rings
+      // are area outlines and stay under the 轮廓 switch alone.
+      if (ink.linearOutlines === false && !item.outline_closed) continue;
+      if (ink.mountainOutlines === false && item.class === 'mons') continue;
+      if (!item.outline_path || item.outline_path.length < 2) continue;
+      if (isSatelliteMember(item)) continue;
+      ctx.globalAlpha = alphaFor(item);
+      ctx.lineWidth = item.highlight
+        ? Math.max(0.8, rim.width * 1.9 + 0.8)
+        : Math.max(0.4, rim.width);
+      ctx.strokeStyle = item.highlight ? highlightColor
+        : ink.uniform ? rim.color : itemColor(item, ink);
+      strokeOutlinePath(item);
+    }
     ctx.setLineDash([]);
   }
   for (const item of plan.items) {
-    const shape = markerShape(item, fontPx, rim.style !== 'none', scale);
+    const shape = markerShape(item, fontPx,
+      ink.outlines !== false && rim.style !== 'none', scale);
     if (shape.kind === 'none') continue;
     ctx.globalAlpha = alphaFor(item);
     const colour = item.highlight ? highlightColor
@@ -3944,6 +4551,14 @@ function paintLabels(ctx, plan, style) {
     const right = left + item.label_w;
     const bottom = top + item.label_h;
     const midY = 0.5 * (top + bottom);
+    // 文字跟随轮廓: a rille, ridge or valley sets its name along the traced
+    // path.  This replaces the boxed caption for that item; the box the plan
+    // laid out is still what reserves space in the avoidance pass.
+    if (ink.textFollow && TEXT_FOLLOW_CLASSES.has(item.class)
+        && item.outline_path && item.outline_path.length >= 2
+        && paintTextAlongPath(ctx, item, itemFont, colour, strokeWidth, strokeColor, ink.textView)) {
+      continue;
+    }
     if (item.leader) {
       const start = leaderStart(item);
       if (start) {
@@ -4020,6 +4635,13 @@ function manualItemsFor(viewName, ctx, style, frameOverride, mirrorForView = tru
   for (const mark of state.manualMarks) {
     const at = manualFramePoint(viewName, mark, frame);
     if (!at) continue;
+    // A close-up is a window on the ground: a pin outside it must not be
+    // clamped to the corner and shown there as if it were in the picture.
+    if (viewName !== 'disk'
+        && (at.x < -2 || at.x > frame.width + 2
+          || at.y < -2 || at.y > frame.height + 2)) {
+      continue;
+    }
     const width = Math.max(fontPx * 1.2, ctx.measureText(mark.text).width) + 6;
     let labelX = at.x + marker + 4;
     if (labelX + width > frame.width - 2) labelX = at.x - marker - 4 - width;
@@ -5239,8 +5861,12 @@ function drawViewLabels(viewName) {
     && regionMarksWanted();
   const hasNames = !!(plan && plan.items && plan.items.length);
   // Manual anchors are the reader's own, so they obey the label switch but not
-  // the landform-class filters or the close-ups' 地貌 export checkbox.
-  const manual = state.labelsOn && state.manualMarks.length > 0;
+  // the landform-class filters.  In the close-ups they also follow 地貌: a
+  // reader who has just hidden the landform names does not want a pin caption
+  // floating over the picture either.
+  const manual = state.labelsOn && state.manualMarks.length > 0
+    && (viewName === 'disk' || regionLabelsWanted(viewName));
+  if (!manual) state.manualLayout[viewName] = [];
   // 测量工具 is a layer of its own: it is drawn with the labels but does not
   // need them, and a picture with no names on it must still show the line.
   const measuring = viewName === 'disk' && measure.on && !!measure.shape
@@ -5329,6 +5955,9 @@ function drawViewAndTwin(viewName) {
  * a change of language and an export at another resolution.
  */
 const labelEdits = { disk: {}, region: {} };        // key -> {dx, dy}, frame px
+const labelTextShift = { disk: {}, region: {} };   // key -> fraction along a linear trace
+const labelTextTracks = { disk: {}, region: {} };  // current start/tangent, rebuilt per paint
+const TEXT_FOLLOW_CLASSES = new Set(['rima', 'vallis', 'mons', 'dorsum', 'rupes', 'catena']);
 const labelHidden = { disk: new Set(), region: new Set() };
 /* key -> the class the name was wearing when it was edited.  Kept beside the
    edit because the *plan* is not always there to be asked: a name nudged on a
@@ -5387,6 +6016,7 @@ function resetAllLabelEdits() {
   for (const store of ['disk', 'region']) {
     count += Object.keys(labelEdits[store]).length + labelHidden[store].size;
     labelEdits[store] = {};
+    labelTextShift[store] = {};
     labelHidden[store] = new Set();
     labelClass[store] = {};
   }
@@ -5419,6 +6049,12 @@ function applyLabelEdits(plan, viewName) {
       outline: item.outline
         ? item.outline.map(([x, y]) => [x + edit.dx, y + edit.dy])
         : item.outline,
+      // The catalogue path is absolute frame pixels, so a nudge that moves the
+      // marker has to move the path with it; otherwise the name drifts off its
+      // feature while the old circle (when there was one) followed.
+      outline_path: item.outline_path
+        ? item.outline_path.map(([x, y]) => [x + edit.dx, y + edit.dy])
+        : item.outline_path,
     });
   }
   return { ...plan, items };
@@ -5828,6 +6464,18 @@ function paintMeasure(ctx, viewName) {
   ctx.restore();
 }
 
+/** Distance from a point to one screen-space segment. */
+function measurePointSegmentDistance(point, a, b) {
+  if (!a || !b) return Infinity;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const length = dx * dx + dy * dy;
+  if (!(length > 1e-12)) return Math.hypot(point.x - a.x, point.y - a.y);
+  const t = Math.max(0, Math.min(1,
+    ((point.x - a.x) * dx + (point.y - a.y) * dy) / length));
+  return Math.hypot(point.x - (a.x + dx * t), point.y - (a.y + dy * t));
+}
+
 /** The grab targets, in the device pixels the pointer is measured in. */
 function measureHitTest(point) {
   if (!measure.on || !measure.shape || !point) return null;
@@ -5837,6 +6485,15 @@ function measureHitTest(point) {
   for (const handle of screen.handles) {
     if (Math.hypot(point.x - handle.at.x, point.y - handle.at.y) <= grab) {
       return handle.kind;
+    }
+  }
+  // The stroke itself is a handle: press anywhere along a drawn line to move it.
+  if (screen.kind === 'line') {
+    for (let index = 1; index < screen.points.length; index += 1) {
+      if (measurePointSegmentDistance(point, screen.points[index - 1],
+        screen.points[index]) <= grab) {
+        return 'move';
+      }
     }
   }
   return null;
@@ -6109,7 +6766,19 @@ function measureDown(event) {
   if (!frame) return false;
   const hit = measureHitTest(point);
   if (hit) {
-    measure.drag = { mode: hit };
+    if (hit === 'move') {
+      const ground = pixelToLonLat(frame.x, frame.y);
+      if (!ground || measure.shape.kind !== 'line') return false;
+      measure.drag = {
+        mode: 'move', ground,
+        start: {
+          a: { ...measure.shape.a },
+          b: { ...measure.shape.b },
+        },
+      };
+    } else {
+      measure.drag = { mode: hit };
+    }
     return true;
   }
   const ground = pixelToLonLat(frame.x, frame.y);
@@ -6154,6 +6823,17 @@ function measureMove(event) {
     const dx = measureDistanceKm({ lon: shape.lon, lat: shape.lat }, ground);
     shape.radiusKm = dx;
     shape.angle = measureAzimuth(shape.lon, shape.lat, ground);
+  } else if (drag.mode === 'move') {
+    const dLon = wrap180(ground.lon - drag.ground.lon);
+    const dLat = ground.lat - drag.ground.lat;
+    shape.a = {
+      lon: wrap180(drag.start.a.lon + dLon),
+      lat: Math.max(-89.9, Math.min(89.9, drag.start.a.lat + dLat)),
+    };
+    shape.b = {
+      lon: wrap180(drag.start.b.lon + dLon),
+      lat: Math.max(-89.9, Math.min(89.9, drag.start.b.lat + dLat)),
+    };
   }
   drawViewLabels('disk');
   measureSchedule(140);
@@ -6167,9 +6847,11 @@ function measureUp() {
   measure.drag = null;
   const shape = measure.shape;
   if (shape) {
+    // A short feature is a real measurement; only a click with no drag is
+    // discarded.  The old 0.5 km floor was deleting every small crater.
     const tiny = shape.kind === 'line'
-      ? measureDistanceKm(shape.a, shape.b) < 0.5
-      : !(shape.radiusKm > 0.5);
+      ? measureDistanceKm(shape.a, shape.b) < 0.001
+      : !(shape.radiusKm > 0.001);
     if (tiny && (drag.mode === 'new-line' || drag.mode === 'new-circle')) {
       // A click is not a measurement: the press cleared the old shape and has
       // nothing to replace it with.
@@ -6392,10 +7074,23 @@ function overlayDown(viewName, event) {
     const key = labelKey(item);
     selectOverlay({ kind: 'label', view: viewName, key });
     noteLabelClass(viewName, key, item.class);
-    overlay.drag = {
-      kind: 'label', view: viewName, key, start: point,
-      edit: { ...(labelEdits[labelStore(viewName)][key] || { dx: 0, dy: 0 }) },
-    };
+    const store = labelStore(viewName);
+    const track = (labelTextTracks[store] || {})[key];
+    const textFollow = state.labelsOn && item.outline_path
+      && item.outline_path.length >= 2
+      && TEXT_FOLLOW_CLASSES.has(item.class)
+      && (labelStyleForFrame(viewName).textFollow || false);
+    overlay.drag = textFollow && track
+      ? {
+        kind: 'text-label', view: viewName, key, start: point, last: point,
+        startAt: track.start, startShift: Number(labelTextShift[store][key]) || 0,
+        base: track.base, range: track.range, loop: track.loop,
+        tangent: track.tangent,
+      }
+      : {
+        kind: 'label', view: viewName, key, start: point,
+        edit: { ...(labelEdits[store][key] || { dx: 0, dy: 0 }) },
+      };
     drawAllLabels();
     paintCoordReadout(viewName);
     return true;
@@ -6521,6 +7216,27 @@ function overlayMove(event) {
     drawAllLabels();
     return true;
   }
+  if (drag.kind === 'text-label') {
+    // Incremental movement along the current trace: using the total delta with
+    // a tangent captured at pointer-down would leave the text when the path
+    // curved away from that first direction.
+    const step = deviceToFrameDelta(drag.view, map,
+      point.x - drag.last.x, point.y - drag.last.y);
+    drag.last = point;
+    const store = labelStore(drag.view);
+    const track = (labelTextTracks[store] || {})[drag.key];
+    const tangent = track && Number.isFinite(track.tangent)
+      ? track.tangent : drag.tangent;
+    const along = step.dx * Math.cos(tangent) + step.dy * Math.sin(tangent);
+    const range = Math.max(1, drag.range);
+    let start = drag.startAt + along;
+    if (drag.loop) start = ((start % range) + range) % range;
+    else start = Math.max(0, Math.min(range, start));
+    drag.startAt = start;
+    labelTextShift[store][drag.key] = (start - drag.base) / range;
+    drawAllLabels();
+    return true;
+  }
   const store = labelStore(drag.view);
   labelEdits[store][drag.key] = {
     dx: drag.edit.dx + delta.dx,
@@ -6545,6 +7261,8 @@ function overlayUp() {
     setStatus(mark
       ? `${mark.text}：${coordText(mark.lon, mark.lat)}（拖动可移动；双击文字可改名）`
       : '手动标记已移动');
+  } else if (drag.kind === 'text-label') {
+    setStatus('地貌名称已沿轮廓移动');
   } else {
     setStatus('地貌标注已微调位置（重新排版后仍按名字保留）');
   }
@@ -6767,19 +7485,31 @@ function diskComponent() {
  * two.  Nothing else on the page is touched -- the preview keeps its own, much
  * smaller, size. */
 async function saveDisk() {
-  const width = diskPixels();
-  $('disk-px').value = String(width);
   const when = whenPayload();
   const light = lightPayload();
   const compute = computePayload();
   const component = diskComponent();
   const hdr = diskHdrRequest();
+  // 原始分辨率 hands over the preview itself.  HDR and the 地照 split need a
+  // fresh render (the preview carries neither gain map nor separated light),
+  // so those two fall back to the ordinary path.
+  const native = nativeSaveWanted('disk-preset')
+    && !!state.diskImage && !hdr && component === 'image';
+  const width = native ? state.diskImage.width : diskPixels();
+  if (!native) $('disk-px').value = String(width);
   // The cache key is every input the render depends on -- the moment, the size,
   // the light and the compute budget.  Keying only on the moment used to mean
   // that switching the Earth off and pressing save handed back the *old*
   // preview's bytes, because "nothing had changed".
   const key = JSON.stringify([width, when, light, compute, component, hdr]);
-  let source = state.diskExport && state.diskExport.key === key ? state.diskExport : null;
+  let source = native
+    ? {
+      key: 'native',
+      url: state.downloads.disk || null,
+      image: state.diskImage,
+      geometry: state.geometry,
+    }
+    : (state.diskExport && state.diskExport.key === key ? state.diskExport : null);
   if (!source) {
     busy('disk-busy', true);
     $('disk-save').disabled = true;
@@ -6864,7 +7594,7 @@ async function saveDisk() {
     return;
   }
   if (!centred && !annotate && !wantMarks && !wantOccultation && !hdr
-      && !smooth && format.type === 'image/png') {
+      && !smooth && format.type === 'image/png' && source.url) {
     // Nothing to draw on it: the render *is* the file, at full resolution and
     // without passing through a canvas that a 10 000 px picture may not fit in.
     downloadUrl(source.url, name);
@@ -7292,6 +8022,178 @@ function drawCorrectedMagnifier(ctx, canvas, view, source, ellipse) {
   return true;
 }
 
+/** Bilinear RGBA sample from a flat image; returns false when out of bounds. */
+function sampleRgba(pixels, width, height, x, y, out, index) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  if (x0 < 0 || y0 < 0 || x0 >= width - 1 || y0 >= height - 1) return false;
+  const fx = x - x0, fy = y - y0;
+  const base = (y0 * width + x0) * 4;
+  const next = base + 4;
+  const below = base + width * 4;
+  const belowNext = below + 4;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const top = pixels[base + channel] * (1 - fx)
+      + pixels[next + channel] * fx;
+    const bottom = pixels[below + channel] * (1 - fx)
+      + pixels[belowNext + channel] * fx;
+    out[index + channel] = top * (1 - fy) + bottom * fy;
+  }
+  out[index + 3] = 255;
+  return true;
+}
+
+/** Bilinear sample of the equirectangular globe texture, wrapping longitude. */
+function sampleGlobeTexture(pixels, width, height, lon, lat, out, index) {
+  let wrapped = lon;
+  while (wrapped < -180) wrapped += 360;
+  while (wrapped >= 180) wrapped -= 360;
+  const x = (wrapped + 180) / 360 * width - 0.5;
+  const y = (90 - lat) / 180 * height - 0.5;
+  const x0 = Math.floor(x);
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(y)));
+  const fx = x - Math.floor(x);
+  const fy = Math.max(0, Math.min(1, y - y0));
+  const xa = ((x0 % width) + width) % width;
+  const xb = (xa + 1) % width;
+  const ya = y0;
+  const yb = Math.min(height - 1, y0 + 1);
+  const a = (ya * width + xa) * 4;
+  const b = (ya * width + xb) * 4;
+  const c = (yb * width + xa) * 4;
+  const d = (yb * width + xb) * 4;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const top = pixels[a + channel] * (1 - fx) + pixels[b + channel] * fx;
+    const bottom = pixels[c + channel] * (1 - fx) + pixels[d + channel] * fx;
+    out[index + channel] = top * (1 - fy) + bottom * fy;
+  }
+  out[index + 3] = 255;
+  return true;
+}
+
+/** Can the whole ground patch be sampled from the flat preview?
+ *
+ * Mixing the flat preview and the globe texture per pixel leaves a hard seam
+ * exactly at the limb.  Pick one source for the whole patch: the flat preview
+ * when every point is on its near side, otherwise the global texture.
+ */
+function patchFitsFlatPreview(camera, x0, x1, y0, y1, ellipse) {
+  if (!state.diskImage) return false;
+  const ratio = state.diskImage.width / Math.max(1, DISK.width);
+  const cx = 0.5 * (x0 + x1);
+  const cy = 0.5 * (y0 + y1);
+  const halfW = 0.5 * (x1 - x0);
+  const halfH = 0.5 * (y1 - y0);
+  const steps = 16;
+  for (let row = 0; row <= steps; row += 1) {
+    const v = -1 + 2 * row / steps;
+    for (let col = 0; col <= steps; col += 1) {
+      const u = -1 + 2 * col / steps;
+      if (ellipse && u * u + v * v > 1.0) continue;
+      const point = groundSurfacePoint(camera, cx + u * halfW, cy + v * halfH);
+      if (!point) return false;
+      const normal = unit3(point);
+      const [lon, lat] = lonLatFromVector(normal);
+      const projected = projectSelenographic(lon, lat);
+      if (projected.far) return false;
+      const sx = projected.x * ratio;
+      const sy = projected.y * ratio;
+      if (sx < 3 || sy < 3
+          || sx >= state.diskImage.width - 4
+          || sy >= state.diskImage.height - 4) return false;
+    }
+  }
+  return true;
+}
+
+/** The live close-up while the full disk is a globe.
+ *
+ * A crop of the globe still carries the sphere's perspective.  The window is
+ * instead resampled through the selection's ground plane: every output pixel
+ * names a point on the sphere, and the flat preview or the global texture is
+ * sampled there.  That is the same projection correction the flat magnifier
+ * applies to an ellipse, extended to the 3D rectangle.
+ */
+function drawGlobeMagnifier(canvas, info, availW, availH, dpr) {
+  if (!state.view3d || !state.selection || !state.geometry) return false;
+  const box = selectionGroundBox();
+  if (!box) return false;
+  const { camera, x0, x1, y0, y1 } = box;
+  const groundW = x1 - x0;
+  const groundH = y1 - y0;
+  if (!(groundW > 1e-6 && groundH > 1e-6)) return false;
+  const ellipse = selectionEllipse();
+  const aspect = groundW / groundH;
+  let width = Math.max(24, Math.round(availW - 2));
+  let height = Math.round(width / Math.max(aspect, 1e-9));
+  if (height > availH - 2) {
+    height = Math.max(24, Math.round(availH - 2));
+    width = Math.round(height * aspect);
+  }
+  const outW = Math.max(8, width);
+  const outH = Math.max(8, height);
+  const flat = state.diskImage ? diskSourcePixels(state.diskImage) : null;
+  const texture = state.globeTexturePixels || null;
+  const texW = state.globeTexture ? state.globeTexture.width : 0;
+  const texH = state.globeTexture ? state.globeTexture.height : 0;
+  if (!flat && !(texture && texW && texH)) return false;
+  const useFlat = !!flat
+    && patchFitsFlatPreview(camera, x0, x1, y0, y1, ellipse);
+  if (!useFlat && !(texture && texW && texH)) return false;
+  const buffer = document.createElement('canvas');
+  buffer.width = outW;
+  buffer.height = outH;
+  const bctx = buffer.getContext('2d');
+  const image = bctx.createImageData(outW, outH);
+  const data = image.data;
+  const centreX = 0.5 * (x0 + x1);
+  const centreY = 0.5 * (y0 + y1);
+  const halfW = groundW / 2;
+  const halfH = groundH / 2;
+  const ratio = state.diskImage && DISK.width
+    ? state.diskImage.width / DISK.width : 1;
+  let written = 0;
+  for (let py = 0; py < outH; py += 1) {
+    const v = (outH / 2 - (py + 0.5)) / (outH / 2);
+    for (let px = 0; px < outW; px += 1) {
+      const u = ((px + 0.5) - outW / 2) / (outW / 2);
+      if (ellipse && u * u + v * v > 1.0) continue;
+      const gx = centreX + u * halfW;
+      const gy = centreY + v * halfH;
+      const point = groundSurfacePoint(camera, gx, gy);
+      if (!point) continue;
+      const normal = unit3(point);
+      const [lon, lat] = lonLatFromVector(normal);
+      const index = (py * outW + px) * 4;
+      let writtenThis = false;
+      if (useFlat) {
+        const projected = projectSelenographic(lon, lat);
+        if (!projected.far) {
+          writtenThis = sampleRgba(flat.data, flat.width, flat.height,
+            projected.x * ratio, projected.y * ratio, data, index);
+        }
+      } else if (texture && texW && texH) {
+        writtenThis = sampleGlobeTexture(texture, texW, texH,
+          lon, lat, data, index);
+      }
+      if (writtenThis) written += 1;
+    }
+  }
+  if (!written) return false;
+  bctx.putImageData(image, 0, 0);
+  canvas.width = Math.max(1, Math.round(outW * dpr));
+  canvas.height = Math.max(1, Math.round(outH * dpr));
+  canvas.style.width = outW + 'px';
+  canvas.style.height = outH + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#07090d';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(buffer, 0, 0, canvas.width, canvas.height);
+  if (info) info.textContent = '球面选框（投影修正）';
+  return true;
+}
+
 function drawMagnifier() {
   clampSelectionInPlace();
   const panel = $('magnifier');
@@ -7305,6 +8207,7 @@ function drawMagnifier() {
   const box = panel.getBoundingClientRect ? panel.getBoundingClientRect() : null;
   const availW = Math.max(60, (box && box.width ? box.width : 240) - 8);
   const availH = Math.max(60, (box && box.height ? box.height : 240) - 26);
+  if (drawGlobeMagnifier(canvas, info, availW, availH, dpr)) return;
   const view = magnifierView(availW, availH);
   canvas.width = Math.round(view.width * dpr);
   canvas.height = Math.round(view.height * dpr);
@@ -7472,7 +8375,7 @@ async function loadFeatureIndex() {
     state.features = payload.features || [];
     for (const feature of state.features) {
       feature.label = feature.zh ? `${feature.zh}（${feature.en}）` : feature.en;
-      feature.haystack = `${feature.zh} ${feature.en}`.toLowerCase();
+      feature.haystack = foldSearch(`${feature.zh} ${feature.en}`);
     }
     state.featureByLabel = new Map(state.features.map((f) => [f.label, f]));
     fillClassCounts(payload.classes);
@@ -7490,9 +8393,26 @@ async function loadFeatureIndex() {
   }
 }
 
+/** Fold accents and case so `u` finds `ü` as well as `stoufler` finds Stöfler. */
+function foldSearch(text) {
+  let folded = String(text || '').normalize
+    ? String(text || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    : String(text || '');
+  folded = folded.toLowerCase();
+  return folded
+    .replace(/ß/g, 'ss')
+    .replace(/ø/g, 'o')
+    .replace(/æ/g, 'ae')
+    .replace(/œ/g, 'oe')
+    .replace(/ł/g, 'l')
+    .replace(/đ/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** The rows that match a query, best (shortest name) first. */
 function matchFeatures(query, limit = 24) {
-  const needle = String(query || '').trim().toLowerCase();
+  const needle = foldSearch(query);
   if (!needle || !state.features) return [];
   const hits = [];
   for (const feature of state.features) {
@@ -11371,10 +12291,12 @@ async function refreshCurve() {
   $('curve-empty').textContent = '正在计算曲线…';
   const options = curveOptions();
   syncCurveControls();
+  const curveZone = Number($('curve-tz') && $('curve-tz').value);
   const body = {
     kind: options.kind,
     when: whenPayload(),
-    tz_offset_hours: Number($('tz').value) || 0,
+    tz_offset_hours: Number.isFinite(curveZone)
+      ? curveZone : (Number($('tz').value) || 0),
     earthshine: earthshinePayload(),
     earthshine_model: ($('curve-earth-model')
       && $('curve-earth-model').value) || 'simulation',
@@ -11467,6 +12389,9 @@ function openCurve() {
   state.curveAnimation.started = false;
   state.curveAnimation.cursor = 0;
   if (!curveFieldsValue()) curveFieldsFromMain();
+  if ($('curve-tz') && !String($('curve-tz').value || '').trim()) {
+    $('curve-tz').value = $('tz').value || '+0';
+  }
   syncCurveControls();
   $('curve-backdrop').hidden = false;
   positionCurveWindow(false);
@@ -13029,6 +13954,13 @@ function satellitesWanted() {
   return !box || box.checked;
 }
 
+/** Does a crater caption carry the 坑?  The switch says "only the name", so on
+ *  means no suffix and off means the suffix comes back. */
+function craterSuffixWanted() {
+  const box = $('label-crater-suffix');
+  return !!box && !box.checked;
+}
+
 /** Whether the named *tracts* get their name written across them.
  *
  *  A mare is a region, not a point: the planner can centre its caption on the
@@ -13051,6 +13983,38 @@ function focusPayload() {
     radius_deg: s.radiusFraction * (state.geometry.angular_diameter_deg / 2),
     aspect: s.aspect || 1,
     rotation_deg: s.rotationDeg || 0,
+  };
+}
+
+/** The visible crop of a zoomed full disk, as a focus region.
+ *
+ * The plan is still laid out for the whole disk: at 3x the 300-name budget is
+ * spread over nine screens, so the reader sees thirty names.  The focus gives
+ * the crop its own budget and lower size floor, which is what makes the names
+ * fill the picture at the magnification the reader is actually using.
+ */
+function viewFocusPayload() {
+  if (!state.geometry || !views.disk) return null;
+  const zoom = Number(views.disk.zoom) || 1;
+  if (!(zoom > 1.01)) return null;
+  const f = stageFrame();
+  const { panX, panY } = diskTransform();
+  const cx = DISK.width / 2 - (panX / zoom) * (DISK.width / f.stageW);
+  const cy = DISK.height / 2 - (panY / zoom) * (DISK.height / f.stageH);
+  const centre = pixelToLonLat(cx, cy);
+  if (!centre) return null;
+  const halfW = DISK.width / (2 * zoom);
+  const halfH = DISK.height / (2 * zoom);
+  const disk = diskGeom();
+  const radius = (halfW / Math.max(1, disk.radius))
+    * disk.angularRadiusDeg;
+  if (!(radius > 0)) return null;
+  return {
+    lon: centre.lon,
+    lat: centre.lat,
+    radius_deg: radius,
+    aspect: Math.max(0.05, Math.min(20, halfH / Math.max(1, halfW))),
+    rotation_deg: 0,
   };
 }
 
@@ -13113,21 +14077,37 @@ function labelObstacles(viewName) {
   return [[left, top, right - left, bottom - top]];
 }
 
+/** The frame's size relative to the 1000 px reference the density is tuned at.
+ *
+ * Without this, the same slider position admits more features as the preview
+ * resolution rises: a 0.55 px floor at 1000 px is a 1.65 px floor at 3000 px
+ * in ground terms.  Scaling the floor keeps the eligible set fixed, so the
+ * density slider -- not the render size -- decides what is named.
+ */
+function labelFrameScale(viewName) {
+  const frame = frameSize(viewName);
+  const short = Math.max(1, Math.min(frame.width, frame.height));
+  return Math.max(0.2, Math.min(8, short / 1000));
+}
+
 function labelRequestBase(viewName) {
   const density = densitySettings();
   const overlap = $('label-overlap');
   const obstacles = labelObstacles(viewName || 'disk');
+  const frameScale = labelFrameScale(viewName || 'disk');
   return {
     labels: density.labels,
-    min_radius_px: density.min_radius_px,
-    outline_min_radius_px: LIMITS.label_outline_px,
+    min_radius_px: density.min_radius_px * frameScale,
+    outline_min_radius_px: LIMITS.label_outline_px * frameScale,
     language: labelLanguage(),
     classes: activeClasses(),
     only_illuminated: !$('label-shadow').checked,
     satellite: satelliteMode(),
     satellites: satellitesWanted(),
+    crater_suffix: craterSuffixWanted(),
     avoid_overlap: !(overlap && overlap.checked),
-    focus: focusPayload(),
+    focus: focusPayload()
+      || (viewName === 'disk' ? viewFocusPayload() : null),
     related: relatedNameFor(viewName || 'disk'),
     lunar100: lunar100Wanted(),
     region: regionWanted(),
@@ -13278,6 +14258,7 @@ function lockedDiskPlan(when, width) {
 async function diskLabelsAt(width, when) {
   const scale = width / Math.max(1, DISK.width);
   const base = labelRequestBase('disk');
+  if (scale !== 1) base.focus = focusPayload();
   return await fetchLabels('disk', {
     // The instant the frame was rendered for, not whatever the observer fields
     // say now: an export rendered at 09:00 must not carry 08:00's names.
@@ -13622,13 +14603,16 @@ $('body-disk').addEventListener('pointerdown', (event) => {
     // A press on the drawn box edits it.  With a box present an empty press
     // turns the globe (Alt always starts a new one); with no box at all an
     // empty press draws the first one, because there is nothing to rotate.
-    const globePoint = canvasPoint(event);
+    // Hit-test the box where it is *drawn*: once the globe is turned to the
+    // far side, the flat frame's projection is behind the disk and returning
+    // null there made a visible box impossible to grab.
+    const globePoint = diskPixelPoint(event);
     // With no box yet there is nothing to rotate around: an empty drag draws
     // the first one.  Once a box exists, an empty drag turns the globe and Alt
     // starts a new box, as before.
     const allowNew = !!event.altKey || !state.selection;
     if (!state.selectionHidden
-        && beginSelectionDrag(globePoint, allowNew)) {
+        && beginGlobeSelectionDrag(globePoint, allowNew)) {
       $('body-disk').setPointerCapture(event.pointerId);
       drawDisk();
       event.preventDefault();
@@ -13694,6 +14678,13 @@ $('body-disk').addEventListener('pointermove', (event) => {
   const drag = state.dragging;
   if (!drag) {
     updateCursor(event);
+    return;
+  }
+  if (state.view3d) {
+    moveGlobeSelection(event, drag);
+    syncSelectionInputs();
+    drawDisk();
+    event.preventDefault();
     return;
   }
   const p = canvasPoint(event);
@@ -14498,6 +15489,78 @@ function updateDataSourceNote() {
     `${source.km_per_px.toFixed(4)} km/px${provenance}${pyramid}`;
 }
 
+/* ── 重新构建金字塔 ───────────────────────────────────────────────────────
+ *
+ * The whole-disk picture is always drawn from a baked pyramid, and the 数据源
+ * switch deliberately leaves it alone.  Rebuilding is the explicit act that
+ * moves the base picture to the selected product; it runs in the background
+ * because even the 64 ppd raster takes a minute.
+ */
+let terrainRebuildTimer = null;
+
+function paintTerrainRebuild(status) {
+  const button = $('terrain-rebuild');
+  const note = $('terrain-rebuild-note');
+  if (!button || !note) return;
+  const running = !!(status && status.running);
+  const failed = !!(status && status.error);
+  button.disabled = running;
+  button.textContent = running ? '正在重建…' : '重新构建金字塔';
+  if (running) {
+    const pct = Math.round((Number(status.fraction) || 0) * 100);
+    note.textContent = `${pct}% ${status.message || ''}`.trim();
+  } else if (failed) {
+    note.textContent = status.error;
+  } else if (status && status.finished) {
+    note.textContent = `完成 ${Number(status.seconds || 0).toFixed(1)} s`;
+  } else {
+    note.textContent = '';
+  }
+}
+
+function scheduleTerrainRebuildPoll() {
+  if (terrainRebuildTimer) return;
+  const tick = async () => {
+    terrainRebuildTimer = null;
+    try {
+      const response = await fetch('/api/terrain/rebuild');
+      const status = await response.json();
+      paintTerrainRebuild(status);
+      if (status.running) {
+        terrainRebuildTimer = setTimeout(tick, 1000);
+        return;
+      }
+      if (status.error) {
+        setStatus('重建金字塔失败：' + status.error, 'error');
+        return;
+      }
+      if (status.finished) {
+        setStatus('金字塔已重建，重新渲染…', 'busy');
+        await loadLimits();
+        refreshDisk();
+      }
+    } catch (error) {
+      terrainRebuildTimer = setTimeout(tick, 2000);
+    }
+  };
+  terrainRebuildTimer = setTimeout(tick, 500);
+}
+
+async function startTerrainRebuild() {
+  const button = $('terrain-rebuild');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  setStatus('开始重建金字塔…', 'busy');
+  try {
+    const status = await post('/api/terrain/rebuild', {});
+    paintTerrainRebuild(status);
+    scheduleTerrainRebuildPoll();
+  } catch (error) {
+    button.disabled = false;
+    setStatus('重建金字塔失败：' + String(error.message || error), 'error');
+  }
+}
+
 /** Build the 数据源 menu from what the server can actually draw.
  *
  *  Two groups, and the difference between them is the point: 本地 entries are
@@ -14548,7 +15611,6 @@ function renderDataSources(payload) {
     for (const entry of online) {
       const option = document.createElement('option');
       option.value = `online:${entry.id}`;
-      option.disabled = true;
       option.textContent = `${entry.label} · ${dataSourceText(entry)}（按选框下载）`;
       option.title = entry.note || '';
       group.appendChild(option);
@@ -14612,8 +15674,14 @@ async function downloadPatch() {
     return;
   }
   const button = $('patch-download');
+  const cancelButton = $('patch-cancel');
   const note = $('patch-note');
   if (button) button.disabled = true;
+  if (cancelButton) {
+    cancelButton.hidden = false;
+    cancelButton.disabled = true;
+    cancelButton.dataset.job = '';
+  }
   if (note) note.textContent = '正在测量选框覆盖的地面…';
   setStatus('区域补片：正在计算范围…', 'busy');
   try {
@@ -14623,6 +15691,10 @@ async function downloadPatch() {
       selection,
       output: { width: 600, height: 600 },
     });
+    if (cancelButton) {
+      cancelButton.dataset.job = job.id;
+      cancelButton.disabled = false;
+    }
     if (note) {
       note.textContent = `已排入队列：约 ${job.megabytes} MB，` +
         `经度 ${job.bounds[0].toFixed(2)}–${job.bounds[1].toFixed(2)}°、` +
@@ -14636,7 +15708,7 @@ async function downloadPatch() {
         const pct = Math.round((state.progress || 0) * 100);
         note.textContent = `${state.message || ''}（${pct}%）`;
       }
-      if (state.state !== 'running') break;
+      if (state.state !== 'running' && state.state !== 'cancelling') break;
     }
     if (state.state === 'done') {
       // The menus have to name the patch too: the renderer switches to it
@@ -14679,6 +15751,9 @@ async function downloadPatch() {
         setStatus('补片已就绪，但近景重渲染失败：' + String(error.message || error),
                   'error');
       }
+    } else if (state.state === 'cancelled') {
+      if (note) note.textContent = '已终止，未完成的中间文件已清理。';
+      setStatus('区域补片下载已终止', 'ok');
     } else {
       if (note) note.textContent = state.error || '下载失败';
       setStatus('区域补片下载失败', 'error');
@@ -14688,6 +15763,11 @@ async function downloadPatch() {
     setStatus('区域补片下载失败：' + String(error.message || error), 'error');
   } finally {
     if (button) button.disabled = false;
+    if (cancelButton) {
+      cancelButton.hidden = true;
+      cancelButton.disabled = true;
+      cancelButton.dataset.job = '';
+    }
   }
 }
 
@@ -14698,12 +15778,24 @@ async function downloadPatch() {
  *  the 0.06 row only lights up once a 59 m source is the one in use. */
 async function chooseDataSource(value) {
   const select = $('data-source');
-  if (!select || !value
-      || value.startsWith('online:') || value.startsWith('region:')) {
-    // An online row is a note about how to get a product, and a region row is
-    // the current frame's patch, not a global choice: put the menu back where
-    // it was so it keeps naming what the frame is made of.
+  if (!select || !value || value.startsWith('region:')) {
+    // A region row is the current frame's patch, not a global choice: put the
+    // menu back where it was so it keeps naming what the frame is made of.
     renderDataSources(LIMITS.data_sources || { sources: [] });
+    return;
+  }
+  if (value.startsWith('online:')) {
+    // An online row is an action, not a broken local file: selecting it asks
+    // for that product's patch over the current selection.  The menu itself
+    // goes back to the global source the frame is actually made of.
+    const product = value.slice('online:'.length);
+    renderDataSources(LIMITS.data_sources || { sources: [] });
+    const patchSelect = $('patch-product');
+    if (patchSelect && [...patchSelect.options].some(
+      (option) => option.value === product)) {
+      patchSelect.value = product;
+    }
+    downloadPatch();
     return;
   }
   select.disabled = true;
@@ -14834,7 +15926,7 @@ const SETTING_FIELDS = [
   'noise-poisson', 'noise-gaussian',
   'annotate', 'label-language', 'label-density', 'label-font',
   'label-shadow', 'label-colour', 'label-lock', 'label-satellites',
-  'label-overlap', 'label-region',
+  'label-crater-suffix', 'label-mountain-outline', 'label-overlap', 'label-region',
   'text-color', 'text-stroke', 'text-stroke-width', 'text-bold',
   'marker-stroke', 'marker-stroke-width',
   'outline-color', 'outline-width', 'outline-style',
@@ -15016,6 +16108,7 @@ function applySettings(values) {
   syncOutputScale('pixels');
   updateNoiseInfo();
   syncClassChips();
+  refreshClassLabels();
   syncMarkChips();
   setMirrorMode(values['image-mirror'] || 'none');
   // The satellite toggle is a latch on a button; putting it back is a text and
@@ -15977,6 +17070,10 @@ async function loadLimits() {
         LIMITS.data_sources = payload.data_sources;
         renderDataSources(payload.data_sources);
       }
+      if (payload.terrain_rebuild) {
+        paintTerrainRebuild(payload.terrain_rebuild);
+        if (payload.terrain_rebuild.running) scheduleTerrainRebuildPoll();
+      }
       $('out-kmpx').min = String(LIMITS.terrain_km_per_px);
       $('out-kmpx').title = `最细 ${LIMITS.terrain_km_per_px.toFixed(3)} km/px`
         + `（${currentDataSourceName()}的分辨率）`;
@@ -16670,26 +17767,49 @@ function buildEventKinds() {
   const host = $('event-kinds');
   if (!host) return;
   host.innerHTML = '';
-  const kinds = [
+  // The first nine are the calendar-level categories and stay visible.  The
+  // rest live behind the same triangle the landform panel uses, ordered by
+  // their English name so a reader looking for "Plato's Hook" finds the row in
+  // the same place every time.
+  const fixed = [
     ['new_moon', '朔月'], ['first_quarter', '上弦月'],
     ['full_moon', '满月'], ['last_quarter', '下弦月'],
     ['supermoon', '超级月亮'],
-    ['annual_extremes', '年度之最'],
+    ['annual_extremes', '最高/最低月'],
     ['lunar_eclipse', '月食'],
     ['planet_conjunction', '行星合月'],
     ['planet_occultation', '月掩行星'],
-    ['xvl', '月面 X/V/L'],
-    ['jewelled_handle', 'the jewelled handle'],
-    ['eyes_of_clavius', 'Eyes of Clavius'],
-    ['cheshire_moon', 'Cheshire Moon（Wet Moon）'],
-    ['libration_target', '极端天平动目标'],
     // Not an EVENT_KINDS entry: a crescent window is a session, not an instants
     // list, and it is ranked by how thin it is rather than by date.  It shares
     // the same range boxes and the same list, because a reader asking "when"
     // does not care which of the two answered.
     ['crescent', '极低照明度'],
+    ['libration_target', '极端天平动目标'],
   ];
-  for (const [key, label] of kinds) {
+  const more = [
+    // 月面 X/V/L is the reader's entry point to the folded group, so it is
+    // pinned first; the rest follow their English names.
+    ['xvl', '月面 X/V/L', 'Lunar X/V/L'],
+    ['jewelled_handle', 'Jewelled handle', 'Jewelled handle'],
+    ['eyes_of_clavius', 'Eyes of Clavius', 'Eyes of Clavius'],
+    ['cheshire_moon', 'Cheshire Moon（Wet Moon）', 'Cheshire Moon'],
+    ["platos_hook", "Plato's Hook", "Plato's Hook"],
+    ['hesiodus_sunrise_ray', 'Hesiodus Sunrise Ray', 'Hesiodus Sunrise Ray'],
+    ['maginus_sunshine_ray', 'Maginus Sunshine Ray', 'Maginus Sunshine Ray'],
+    ['rupes_recta', 'Rupes Recta / Straight Wall', 'Rupes Recta'],
+    ['curtiss_cross', 'Curtiss Cross', 'Curtiss Cross'],
+    ['barrow_ray', 'Barrow Ray', 'Barrow Ray'],
+    ["cassini_moon_maiden", "Cassini's Moon Maiden", "Cassini's Moon Maiden"],
+    ["aries_hoofprint", "Aries' Hoofprint（Black lips）", "Aries Hoofprint"],
+    ["gruithuisens_lunar_city", "Gruithuisen's Lunar City",
+      "Gruithuisen's Lunar City"],
+  ];
+  // Keep 月面 X/V/L pinned; sort only the remainder.
+  const firstMore = more.shift();
+  more.sort((left, right) => left[2].localeCompare(right[2], 'en',
+    { sensitivity: 'base' }));
+  more.unshift(firstMore);
+  const makeChip = (key, label) => {
     const chip = document.createElement('label');
     chip.className = 'mark-chip';
     chip.id = 'event-chip-' + key;
@@ -16707,8 +17827,27 @@ function buildEventKinds() {
       syncEventKinds();
       loadEvents();
     });
-    host.appendChild(chip);
-  }
+    return chip;
+  };
+  for (const [key, label] of fixed) host.appendChild(makeChip(key, label));
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.id = 'event-more';
+  toggle.className = 'ghost caret event-more';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.title = '展开更多事件';
+  const moreHost = document.createElement('span');
+  moreHost.id = 'event-kinds-more';
+  moreHost.className = 'event-kinds-more';
+  moreHost.hidden = true;
+  for (const [key, label] of more) moreHost.appendChild(makeChip(key, label));
+  toggle.addEventListener('click', () => {
+    const open = moreHost.hidden;
+    moreHost.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.title = open ? '收起更多事件' : '展开更多事件';
+  });
+  host.append(toggle, moreHost);
   state.eventKind = state.eventKind || 'full_moon';
   syncEventKinds();
 }
@@ -16921,6 +18060,9 @@ function visibleEventRows(rows) {
 /** The list itself.  One row per instant, local time, grey when it is down. */
 const EVENT_LIST_NO_LABEL = new Set([
   'jewelled_handle', 'eyes_of_clavius', 'cheshire_moon',
+  'xvl', 'platos_hook', 'hesiodus_sunrise_ray', 'maginus_sunshine_ray',
+  'rupes_recta', 'curtiss_cross', 'barrow_ray', 'cassini_moon_maiden',
+  'aries_hoofprint', 'gruithuisens_lunar_city',
 ]);
 
 function renderEvents(events) {
@@ -17093,8 +18235,7 @@ const EVENT_COLUMN_SETS = {
     'phaseAngle', 'illumination', 'altitude', 'azimuth', 'surfaceBrightness'],
   micromoon: ['date', 'time', 'label', 'diameter', 'distance', 'age', 'lunar',
     'phaseAngle', 'illumination', 'altitude', 'azimuth', 'surfaceBrightness'],
-  annual_extremes: ['date', 'time', 'label', 'diameter', 'distance', 'age',
-    'lunar', 'phaseAngle', 'illumination', 'altitude', 'azimuth',
+  annual_extremes: ['date', 'time', 'label', 'altitude', 'azimuth',
     'surfaceBrightness'],
   lunar_eclipse: ['date', 'time', 'label', 'age', 'lunar', 'phaseAngle',
     'illumination', 'diameter', 'distance', 'altitude', 'azimuth',
@@ -17121,6 +18262,19 @@ const EVENT_COLUMN_SETS = {
     'altitude', 'azimuth', 'elongation', 'age', 'lunar', 'phaseAngle',
     'diameter', 'distance', 'surfaceBrightness'],
 };
+
+/* The sunrise/sunset rays and the colongitude-only events share one shape:
+   a best instant inside a window, with the Sun and Moon columns the page has
+   for every other window event. */
+const RAY_COLUMNS = ['date', 'label', 'best', 'start', 'end', 'duration',
+  'altitude', 'azimuth', 'age', 'lunar', 'phaseAngle', 'colongitude',
+  'illumination', 'diameter', 'distance', 'surfaceBrightness'];
+for (const key of ['platos_hook', 'hesiodus_sunrise_ray',
+                   'maginus_sunshine_ray', 'rupes_recta', 'curtiss_cross',
+                   'barrow_ray', 'cassini_moon_maiden', 'aries_hoofprint',
+                   'gruithuisens_lunar_city']) {
+  EVENT_COLUMNS[key] = RAY_COLUMNS;
+}
 
 function eventColumnsFor(kind) {
   const base = EVENT_COLUMN_SETS[kind]
@@ -17514,6 +18668,105 @@ function renderImportedEventList() {
   }
 }
 
+/** The editable box of the event table, clamped to the viewport. */
+function eventWindowBox() {
+  const viewportW = Math.max(480, window.innerWidth || 1280);
+  const viewportH = Math.max(320, window.innerHeight || 800);
+  const box = state.eventWindowBox || {
+    width: Math.min(1280, viewportW * 0.92),
+    height: Math.min(760, viewportH * 0.76),
+    left: (viewportW - Math.min(1280, viewportW * 0.92)) / 2,
+    top: (viewportH - Math.min(760, viewportH * 0.76)) / 2,
+  };
+  box.width = Math.max(420, Math.min(viewportW - 8, box.width));
+  box.height = Math.max(240, Math.min(viewportH - 8, box.height));
+  box.left = Math.max(4, Math.min(viewportW - box.width - 4, box.left));
+  box.top = Math.max(4, Math.min(viewportH - box.height - 4, box.top));
+  state.eventWindowBox = box;
+  return box;
+}
+
+function applyEventWindowBox() {
+  const node = $('event-window');
+  if (!node) return;
+  const box = eventWindowBox();
+  node.style.left = `${Math.round(box.left)}px`;
+  node.style.top = `${Math.round(box.top)}px`;
+  node.style.width = `${Math.round(box.width)}px`;
+  node.style.height = `${Math.round(box.height)}px`;
+}
+
+function wireEventWindow() {
+  const node = $('event-window');
+  const head = $('event-window-headbar');
+  if (!node || !head) return;
+  const begin = (event, mode) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const box = eventWindowBox();
+    state.eventWindowDrag = {
+      mode, startX: event.clientX, startY: event.clientY,
+      box: { ...box },
+    };
+  };
+  head.addEventListener('pointerdown', (event) => {
+    if (event.target && event.target.closest
+        && event.target.closest('button, input, label, a, select')) return;
+    begin(event, 'move');
+  });
+  for (const handle of node.querySelectorAll('[data-event-resize]')) {
+    handle.addEventListener('pointerdown', (event) => {
+      begin(event, String(handle.dataset.eventResize || ''));
+    });
+  }
+  window.addEventListener('pointermove', (event) => {
+    const drag = state.eventWindowDrag;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    const box = { ...drag.box };
+    if (drag.mode === 'move') {
+      box.left += dx;
+      box.top += dy;
+    } else {
+      if (drag.mode.includes('e')) box.width += dx;
+      if (drag.mode.includes('s')) box.height += dy;
+      if (drag.mode.includes('w')) {
+        box.left += dx;
+        box.width -= dx;
+      }
+      if (drag.mode.includes('n')) {
+        box.top += dy;
+        box.height -= dy;
+      }
+      if (box.width < 420) {
+        if (drag.mode.includes('w')) box.left -= 420 - box.width;
+        box.width = 420;
+      }
+      if (box.height < 240) {
+        if (drag.mode.includes('n')) box.top -= 240 - box.height;
+        box.height = 240;
+      }
+    }
+    state.eventWindowBox = box;
+    applyEventWindowBox();
+    event.preventDefault();
+  });
+  const end = () => {
+    if (!state.eventWindowDrag) return;
+    state.eventWindowDrag = null;
+    applyEventWindowBox();
+  };
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+  window.addEventListener('resize', () => {
+    if ($('event-window-backdrop') && !$('event-window-backdrop').hidden) {
+      applyEventWindowBox();
+    }
+  });
+}
+
 async function openEventWindow() {
   const backdrop = $('event-window-backdrop');
   if (!backdrop) return;
@@ -17524,6 +18777,7 @@ async function openEventWindow() {
     await loadEvents();
   }
   renderEventWindowRows();
+  applyEventWindowBox();
   backdrop.hidden = false;
   $('event-window-status').textContent = state.eventImported
     ? '导入的事件列表' : '当前预报';
@@ -17823,11 +19077,13 @@ function smoothImage(source, px) {
  *  which is exactly what the reader draws the box to decide. */
 function animationAspect() {
   if ($('anim-scope').value !== 'region') return 1;
-  // Animation frames still use the ordinary sky box: the irregular preimage
-  // and its mask are a still/3D feature.  Keeping the aspect on the box that
-  // is actually rendered avoids stretching the video to a shape it is not.
-  return Math.max(1e-3,
-    selectionCorrected() ? shapeAspect() : selectionAspect());
+  // Animation frames still use a rectangular sky close-up, so keep the
+  // *effective* sky footprint's proportions: using the nominal box aspect
+  // stretched a corrected/3D selection into a different patch.
+  if (selectionCorrected()) {
+    return Math.max(1e-3, effectiveSelectionAspect());
+  }
+  return Math.max(1e-3, selectionAspect());
 }
 
 /** A frame whose *shorter* side is *shortPx*, in the given proportions. */
@@ -18007,6 +19263,7 @@ function animationAnnotationsPayload() {
     only_illuminated: !$('label-shadow').checked,
     satellite: satelliteMode(),
     satellites: satellitesWanted(),
+    crater_suffix: craterSuffixWanted(),
     avoid_overlap: !$('label-overlap').checked,
     lunar100: lunar100Wanted(),
     region: regionWanted(),
@@ -18061,10 +19318,15 @@ function syncAnimationStepField() {
 function animationRegionPayload() {
   const all = selectionPayload();
   if (!all) return null;
+  // The animation region is still a rectangular sky close-up, but it must cover
+  // the *effective* selection: a corrected or elliptical patch has a different
+  // sky footprint from the nominal radius, and in 3D the patch is forced
+  // corrected.  Use the same effective numbers the still render uses.
+  const effective = selectionCorrected() ? effectiveSelectionArcsec() : null;
   return {
     lon: all.lon,
     lat: all.lat,
-    fov_radius_arcsec: all.fov_radius_arcsec,
+    fov_radius_arcsec: effective || all.fov_radius_arcsec,
     rotation_deg: all.rotation_deg,
   };
 }
@@ -19224,7 +20486,30 @@ function init() {
         return;
       }
       event.preventDefault();
-      setZoom(name, views[name].zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
+      const view = views[name];
+      const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+      if (name === 'disk' && view && view.stage) {
+        // Wheel zoom keeps the point under the cursor, not the stage centre:
+        // the old centre zoom made the feature the reader was aiming at drift
+        // out of view as the magnification rose.
+        const stageRect = view.stage.getBoundingClientRect();
+        const cx = event.clientX - stageRect.left;
+        const cy = event.clientY - stageRect.top;
+        const halfW = stageRect.width / 2;
+        const halfH = stageRect.height / 2;
+        const z1 = view.zoom;
+        const z2 = Math.max(DISK_MIN_ZOOM, Math.min(MAX_ZOOM, z1 * factor));
+        if (z2 !== z1) {
+          const imageX = halfW + (cx - halfW - view.panX) / z1;
+          const imageY = halfH + (cy - halfH - view.panY) / z1;
+          view.zoom = z2;
+          view.panX = cx - halfW - (imageX - halfW) * z2;
+          view.panY = cy - halfH - (imageY - halfH) * z2;
+          applyZoom(view);
+        }
+      } else {
+        setZoom(name, view.zoom * factor);
+      }
     }, { passive: false });
     if (name === 'disk') continue;
     body.classList.add('grabbable');
@@ -19468,6 +20753,7 @@ function init() {
     const element = $(id);
     if (!element) continue;
     element.addEventListener('change', () => {
+      if (id === 'label-language') refreshClassLabels();
       if (state.labelsOn) {
         setStatus(id === 'label-language' ? '正在切换地名语言…' : '正在重排月面地貌…', 'busy');
         refreshLabels().then(() => setStatus('就绪'));
@@ -19504,6 +20790,24 @@ function init() {
   });
   // 区域高清补片: download only the ground the selection covers.
   $('patch-download').addEventListener('click', () => { downloadPatch(); });
+  if ($('patch-cancel')) {
+    $('patch-cancel').addEventListener('click', async () => {
+      const button = $('patch-cancel');
+      const jobId = button.dataset.job;
+      if (!jobId) return;
+      button.disabled = true;
+      if ($('patch-note')) $('patch-note').textContent = '正在终止下载…';
+      setStatus('正在终止区域补片下载…', 'busy');
+      try {
+        await post(`/api/patch/${jobId}/cancel`, {});
+      } catch (error) {
+        button.disabled = false;
+        setStatus('终止区域补片失败：' + String(error.message || error), 'error');
+      }
+    });
+  }
+  // 重新构建金字塔: move the whole-disk base to the selected product.
+  $('terrain-rebuild').addEventListener('click', () => { startTerrainRebuild(); });
   // 时间微调：八个步长按钮加中间的「同步设备时间」，都在观测信息里。最粗的一档
   // 是一周：月相一个月走一圈，"把同一相位往前挪一周"比"挪一个月"更接近读者
   // 真正想做的事（后者几乎总是让月相回到原样）。
@@ -19540,6 +20844,7 @@ function init() {
   }
   syncEventVisibleButtons();
   $('event-window-close').addEventListener('click', closeEventWindow);
+  wireEventWindow();
   $('event-window-export').addEventListener('click', exportEventCsv);
   $('event-window-import').addEventListener('change', (event) => {
     const file = event.target.files && event.target.files[0];
@@ -19841,6 +21146,19 @@ function init() {
     setStatus($('label-satellites').checked
       ? '将标注卫星坑（母坑名 + 字母）'
       : '不标注卫星坑，只保留主地貌');
+  });
+  // 环形坑仅显示名字: the suffix is part of the caption, so the layout has to
+  // measure the longer text again.
+  $('label-mountain-outline').addEventListener('change', () => {
+    if (state.labelsOn) refreshLabelPlans();
+    setStatus($('label-mountain-outline').checked
+      ? '显示山脉轮廓' : '不画山脉轮廓');
+  });
+  $('label-crater-suffix').addEventListener('change', () => {
+    if (state.labelsOn) refreshLabelPlans();
+    setStatus($('label-crater-suffix').checked
+      ? '环形坑只写名字（不加「坑」）'
+      : '环形坑名称带「坑」字');
   });
   // 停用避让 is a layout input: it changes which names can be placed, not just
   // where the existing ones sit, so it earns a fresh plan.
@@ -20424,8 +21742,16 @@ function init() {
     }
     drawCurve();
   });
-  for (const id of ['curve-date', 'curve-time', 'curve-days']) {
-    $(id).addEventListener('change', refreshCurve);
+  for (const id of ['curve-date', 'curve-time', 'curve-days', 'curve-tz']) {
+    $(id).addEventListener('change', () => {
+      if (id === 'curve-tz') {
+        const value = Number($('curve-tz').value);
+        if (Number.isFinite(value)) {
+          $('curve-tz').value = `${value >= 0 ? '+' : ''}${value}`;
+        }
+      }
+      refreshCurve();
+    });
   }
   for (const id of ['curve-nudge-back-month', 'curve-nudge-back-day',
                     'curve-nudge-back-hour', 'curve-nudge-back-minute',

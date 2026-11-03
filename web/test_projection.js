@@ -498,7 +498,8 @@ function recordingContext() {
     moveTo() { calls.moves++; }, lineTo() { calls.lines++; },
     closePath() { calls.closes++; },
     arc(x, y, radius) { calls.arcs.push([x, y, radius]); },
-    fillText(text, x, y) { calls.texts.push([text, x, y, ctx._fill, ctx._alpha]); },
+    fillText(text, x, y) { calls.texts.push([text, x + (ctx._tx || 0),
+      y + (ctx._ty || 0), ctx._fill, ctx._alpha]); },
     strokeText() {},
     setLineDash(dash) { calls.dashes.push((dash || []).slice()); },
     set font(value) { calls.fonts.push(value); },
@@ -506,6 +507,8 @@ function recordingContext() {
     set strokeStyle(value) { ctx._stroke = value; },
     get strokeStyle() { return ctx._stroke; },
     set lineWidth(value) { calls.widths.push(value); },
+    measureText(text) { return { width: Array.from(String(text)).length * 6 }; },
+    translate(x, y) { ctx._tx = x; ctx._ty = y; }, rotate() {},
     set textAlign(_v) {}, set textBaseline(_v) {},
     set globalAlpha(value) { ctx._alpha = value; calls.alphas.push(value); },
     get globalAlpha() { return ctx._alpha; },
@@ -585,6 +588,51 @@ check('text sits inside its own label box',
   Math.abs(labelCtx.calls.texts[0][2] - 201.5) < 1,
   JSON.stringify(labelCtx.calls.texts[0]));
 check('a leader is drawn for a displaced label', labelCtx.calls.lines === 1);
+
+/* 文字跟随轮廓: a rille's caption is set character by character along the
+   outline path instead of in the plan's box. */
+const alongPlan = {
+  frame: labelPlan.frame,
+  font_px: 12,
+  items: [{
+    x: 300, y: 300, label: '里马', label_x: 280, label_y: 294,
+    label_w: 40, label_h: 15, labelled: true, leader: false, radius_px: 2,
+    outline_path: [[100, 300], [400, 300]], outline_closed: false,
+  }],
+};
+const alongCtx = recordingContext();
+T.paintLabels(alongCtx, alongPlan, { textFollow: true, scale: 1 });
+check('文字跟随轮廓 sets one glyph per character',
+  alongCtx.calls.texts.length === 2, String(alongCtx.calls.texts.length));
+check('and the glyphs ride the outline path',
+  alongCtx.calls.texts.every((t) => Math.abs(t[2] - 300) < 1),
+  JSON.stringify(alongCtx.calls.texts));
+
+/* On a tight bend the glyphs must be pushed apart, or the rotated boxes touch. */
+const bendPlan = {
+  frame: labelPlan.frame,
+  font_px: 12,
+  items: [{
+    x: 200, y: 300, label: '里马', label_x: 150, label_y: 294,
+    label_w: 60, label_h: 15, labelled: true, leader: false, radius_px: 2,
+    outline_path: [[100, 300], [200, 300], [200, 400]], outline_closed: false,
+  }],
+};
+const bendCtx = recordingContext();
+T.paintLabels(bendCtx, bendPlan, { textFollow: true, scale: 1 });
+check('kinked paths still set both glyphs', bendCtx.calls.texts.length === 2,
+  String(bendCtx.calls.texts.length));
+if (bendCtx.calls.texts.length === 2) {
+  const [a, b] = bendCtx.calls.texts;
+  const gap = Math.hypot(a[1] - b[1], a[2] - b[2]);
+  check('and the corner pushes them apart instead of overlapping', gap >= 6,
+    `gap ${gap.toFixed(1)} px`);
+}
+
+const flatCtx = recordingContext();
+T.paintLabels(flatCtx, alongPlan, { textFollow: false, scale: 1 });
+check('without the switch the same name stays one horizontal run',
+  flatCtx.calls.texts.length === 1, String(flatCtx.calls.texts.length));
 
 const emptyCtx = recordingContext();
 T.paintLabels(emptyCtx, { frame: labelPlan.frame, font_px: 12, items: [] });
@@ -876,6 +924,29 @@ console.log('');
   check('and is still clamped from below', T.diskPixels() === 240, T.diskPixels());
   document.getElementById('preview-px').value = '1000';
   document.getElementById('disk-px').value = '2400';
+}
+
+console.log('');
+/* ── 原始分辨率: the file is the picture already rendered ─────────────────── */
+
+{
+  const savedDisk = T.state.diskImage;
+  T.state.diskImage = { width: 1111, height: 1111 };
+  document.getElementById('disk-preset').value = 'native';
+  check('the full disk can save at its own preview size',
+    T.diskPixels() === 1111, String(T.diskPixels()));
+  document.getElementById('disk-preset').value = '2400';
+  T.state.diskImage = savedDisk;
+
+  const savedRaw = T.state.rawImage;
+  T.state.rawImage = { width: 800, height: 640 };
+  document.getElementById('out-preset').value = 'native';
+  const native = T.outputPixels();
+  check('the close-up save size can be the render itself',
+    native.width === 800 && native.height === 640,
+    `${native.width}×${native.height}`);
+  document.getElementById('out-preset').value = '1200';
+  T.state.rawImage = savedRaw;
 }
 
 console.log('');

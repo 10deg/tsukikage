@@ -23,8 +23,10 @@ Tsukikage 月面模拟 1.6.6 — Windows x64（本地服务 + 浏览器）
 7 个近期模式 SPICE 内核不再打进 exe，而是放在同目录的 kernels\ 里一起发布。
 启动时会自动检查；缺文件会列出具体文件名，补齐后按 Enter 会重新检查并继续。
 
-用户只需把全球高程 .tif 放进 kernels\：
-  ldem_*.tif、SLDEM2015_512.tif 或 Lunar_LRO_LOLA_*.tif
+推荐的全球高程组合（放进 kernels\）：
+  ldem_64.tif + SLDEM2015_512.tif
+前者给整月面金字塔，后者给高倍缩放与测量剖面；也可以只放其中一份。
+其余可识别的产品：ldem_*.tif、Lunar_LRO_LOLA_*.tif。
 色彩可选：lroc_color*.tif 或 lroc_color.exr；只有高程时渲染为灰度。
 手动添加/替换的 .tif 会被自动识别；地图页“下载高分辨率 DEM”下载的文件也保存
 到这里，下载完成后地图会自动重载。

@@ -220,6 +220,10 @@
                 <input type="checkbox" id="label-satellites" checked>
                 <span>卫星坑</span>
               </label>
+              <label class="check inline" title="打开时环形坑只写名字（哥白尼、哥白尼 A）；关闭后所有环形坑都带「坑」字（哥白尼坑、哥白尼 A坑），天平动目标中的环形坑同样处理">
+                <input type="checkbox" id="label-crater-suffix" checked>
+                <span>环形坑仅显示名字</span>
+              </label>
               <label class="check inline" title="调整标注显示密度；数字是标签上限与最小可见半径，超过 100 后忽略避让">
                 密度
                 <input type="range" id="label-density" min="0" max="1.5" step="0.01" value="0.5">
@@ -271,6 +275,26 @@
               </label>
               <!-- 避让算法让文字互不相压，但极高密度下有些名字就永远排不进去；
                    关掉它就能看到所有符合条件的地貌，代价是允许重叠。 -->
+              <label class="check inline" title="按 IAU 轮廓数据绘制地貌边界：环形坑画圆，月溪与山脊沿线，月海等画区域边界">
+                <input type="checkbox" id="label-outline" checked>
+                <span>轮廓</span>
+              </label>
+              <label class="check inline" title="文字沿地貌走向排字：月溪、山脊、月谷按轮廓线条排，关闭后一律横排">
+                <input type="checkbox" id="label-text-follow" checked>
+                <span>文字跟随轮廓</span>
+              </label>
+              <label class="check inline" title="显示月溪、山脊、月谷等线状地貌的轮廓（与月海这类闭合区域轮廓分开）">
+                <input type="checkbox" id="label-linear-outline" checked>
+                <span>显示线状地貌轮廓</span>
+              </label>
+              <label class="check inline" title="显示山脉的轮廓；取消后即使线状地貌轮廓打开，山脉也不画轮廓">
+                <input type="checkbox" id="label-mountain-outline" checked>
+                <span>显示山脉轮廓</span>
+              </label>
+              <label class="check inline" title="仅月海用官方直径的圆代替 IAU 轮廓，其余地貌保持轮廓路径">
+                <input type="checkbox" id="label-round-outline" checked>
+                <span>月海使用圆形轮廓</span>
+              </label>
               <label class="check inline" title="停用避让算法，允许标注有重叠">
                 <input type="checkbox" id="label-overlap">
                 <span>停用避让</span>
@@ -474,6 +498,7 @@
               <option value="3840">3840</option>
               <option value="4000">4000</option>
               <option value="5000">5000</option>
+              <option value="native">原始分辨率</option>
               <option value="custom">自定义…</option>
             </select>
             <input type="text" id="disk-px" inputmode="numeric" value="2400" size="6">
@@ -635,6 +660,7 @@
               <option value="3840">3840</option>
               <option value="4000">4000</option>
               <option value="5000">5000</option>
+              <option value="native">原始分辨率</option>
               <option value="custom">自定义…</option>
             </select>
             <input type="text" id="out-px" inputmode="numeric" value="1200" size="6">
@@ -768,9 +794,20 @@
               <span class="pick-row">
                 <select id="patch-product"></select>
                 <button class="ghost mini" id="patch-download" title="按当前选框，从在线产品里下载这一块区域的高分辨率高程（DEM）数据用于模拟">下载</button>
+                <button class="ghost mini" id="patch-cancel" hidden
+                        title="终止正在进行的区域补片下载，并清理未完成的中间文件">终止</button>
               </span>
             </label>
             <p class="hint" id="patch-note"></p>
+            <!-- 重新构建金字塔: 整月面一直画的是已经烘焙好的金字塔，换数据源
+                 只影响近景；要让整月面也改用更细的产品，就得重建一次。 -->
+            <label class="wide-field" title="清空已烘焙的金字塔，按当前数据源重新烘焙整月面金字塔；耗时较长">
+              金字塔 <span class="en">Pyramid</span>
+              <span class="pick-row">
+                <button class="ghost mini" id="terrain-rebuild" title="清空已烘焙的金字塔，按当前数据源重新烘焙整月面金字塔；耗时较长">重新构建金字塔</button>
+                <span class="hint" id="terrain-rebuild-note"></span>
+              </span>
+            </label>
             <div class="grid2">
               <label title="实测：整月面与终端线近景（含 0.021 km/px）下 1 与 4 的像素差均 ≤1 灰阶；默认 1 即可">日面采样
                 <input type="number" id="sun-samples" min="1" max="8" step="1" value="1">
@@ -1626,6 +1663,9 @@
           <label title="第一天的本地时刻；月亮每天推迟约 51 分钟，太阳每天同一时刻（标准8字采样）">时刻
             <input type="time" id="curve-time" step="60">
           </label>
+          <label title="曲线图自己的时区，与主界面独立；带符号，如 +8 / -5">时区
+            <input type="text" id="curve-tz" inputmode="numeric" value="+8" size="3">
+          </label>
           <label title="采样多少天；一个月亮8字约 30 天，太阳8字通常取一年">跨度
             <input type="number" id="curve-days" min="1" max="366" step="1" value="30">
             <span class="unit">天</span>
@@ -1960,7 +2000,15 @@
 <div class="event-backdrop" id="event-window-backdrop" hidden>
   <div class="event-window" id="event-window" role="dialog" aria-modal="true"
        aria-labelledby="event-window-heading">
-    <header class="event-window-head">
+    <div class="event-resize" data-event-resize="n"></div>
+    <div class="event-resize" data-event-resize="s"></div>
+    <div class="event-resize" data-event-resize="e"></div>
+    <div class="event-resize" data-event-resize="w"></div>
+    <div class="event-resize" data-event-resize="ne"></div>
+    <div class="event-resize" data-event-resize="nw"></div>
+    <div class="event-resize" data-event-resize="se"></div>
+    <div class="event-resize" data-event-resize="sw"></div>
+    <header class="event-window-head" id="event-window-headbar">
       <div class="event-window-heading" id="event-window-heading">事件预报结果
         <span class="en">Events</span>
         <span class="event-window-count" id="event-window-count">—</span>

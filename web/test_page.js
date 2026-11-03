@@ -44,6 +44,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'fitPlanToFrame', 'lockedDiskPlan', 'relatedNameFor',
   'labelFrameFontPx', 'labelStyleFor', 'labelScreenFontPx',
   'renderPixels', 'compassDirection', 'animationAnnotationsPayload',
+  'selectionPayload', 'meshPayload',
+  'animationAspect',
   'selectionCorrected', 'effectiveSelectionArcsec', 'effectiveSelectionAspect',
   'correctedBoundaryPixels', 'ellipseBoundarySegments', 'selectionEllipse',
   'centreLonLat',
@@ -66,7 +68,11 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'renderEventWindowRows', 'paintCoordReadout', 'addManualMark',
   'manualHitTest', 'clearManualMarks', 'overlay',
   'drawDisk', 'drawSelection', 'drawGlobeSelection',
-  'globeSelectionGeometry', 'globePixelFromDirection',
+  'globeSelectionGeometry', 'globePixelFromDirection', 'paintTextAlongPath', 'drawGlobeMagnifier',
+  'TEXT_FOLLOW_CLASSES',
+  'patchFitsFlatPreview',
+  'clampSelectionInPlace', 'selectionGroundEllipse', 'selectionGroundBox',
+  'labelTextShift', 'labelTextTracks',
   'regionMarksWanted', 'drawRegionMarks', 'handleLabelDoubleClick'];
 
 /* ── every control in the markup, with the value the browser would start with ── */
@@ -2248,7 +2254,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the classes start with the big families off and the rest on',
     boxes().length === T.LAND_CLASSES.length && boxes().length >= 20 &&
     offByDefault.join(',') ===
-      'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic,rima,statio',
+      'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic,rima',
     `${boxes().length} classes, off: ${offByDefault.join(',')}`);
   /* The row is ordered by what is on to begin with: a switch that shows nothing
      until a close-up should not be the first thing in the row.  Read the order
@@ -2291,8 +2297,22 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const off = boxes().filter((box) => !box.checked)
       .map((box) => String(box.id).replace('class-', '')).sort();
     check('标注设置复位 brings back the default class set',
-      off.join(',') === 'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic,statio',
+      off.join(',') === 'basin,dome,imp,impact,libration,lunar100,other,pit,pyroclastic',
       off.join(','));
+  }
+  {
+    const chip = [...document.querySelectorAll('.cls-chip')]
+      .find((item) => item.dataset.class === 'mare');
+    const name = () => {
+      const span = chip && chip.children.find((child) => child.className === 'cls-name');
+      return span ? span.textContent : '';
+    };
+    set('label-language', 'en');
+    fire('label-language', 'change');
+    check('class switches follow the caption language', name() === 'Mare', name());
+    set('label-language', 'zh');
+    fire('label-language', 'change');
+    check('and return to Chinese with it', name() === '月海', name());
   }
   /* Touching a class or an overlay brings the label switch up with it: the
      change would be invisible otherwise. */
@@ -2369,18 +2389,20 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 14 event kinds plus 极低照明度, which shares the range boxes and the list
+  /* 23 event kinds plus 极低照明度, which shares the range boxes and the list
      but is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 15 && T.state.eventKind === 'full_moon',
+    kindChips().length === 24 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
-  check('年度之最 and the two named phenomena have their own pills',
+  check('最高/最低月 and the named phenomena have their own pills',
     kindChips().some((chip) => chip.id === 'event-chip-annual_extremes')
     && kindChips().some((chip) => chip.id === 'event-chip-eyes_of_clavius')
     && kindChips().some((chip) => chip.id === 'event-chip-cheshire_moon')
     && kindChips().some((chip) => chip.id === 'event-chip-libration_target')
     && kindChips().some((chip) => chip.id === 'event-chip-planet_conjunction')
-    && kindChips().some((chip) => chip.id === 'event-chip-planet_occultation'));
+    && kindChips().some((chip) => chip.id === 'event-chip-planet_occultation')
+    && kindChips().some((chip) => chip.id === 'event-chip-platos_hook')
+    && kindChips().some((chip) => chip.id === 'event-chip-curtiss_cross'));
   {
     const ids = kindChips().map((chip) => chip.id);
     const eclipse = ids.indexOf('event-chip-lunar_eclipse');
@@ -2389,9 +2411,35 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       && ids[eclipse + 2] === 'event-chip-planet_occultation',
       ids.slice(0, 9).join(' '));
   }
+  {
+    const more = document.getElementById('event-kinds-more');
+    const toggle = document.getElementById('event-more');
+    check('the later event kinds start folded away',
+      !!more && more.hidden === true
+      && toggle.getAttribute('aria-expanded') === 'false');
+    check('极低照明度 and 极端天平动目标 stay on the always-visible row',
+      !!document.getElementById('event-chip-crescent')
+      && !!document.getElementById('event-chip-libration_target'));
+    toggle.fire('click');
+    const order = [...more.children]
+      .filter((child) => child.tagName === 'LABEL')
+      .map((child) => String(child.id).replace('event-chip-', ''));
+    check('the triangle opens the later kinds, 月面 X/V/L first then English',
+      more.hidden === false && toggle.getAttribute('aria-expanded') === 'true'
+      && order.slice(0, 5).join(',') ===
+        'xvl,aries_hoofprint,barrow_ray,cassini_moon_maiden,cheshire_moon'
+      && !order.includes('libration_target') && !order.includes('crescent'),
+      order.join(','));
+    toggle.fire('click');
+    check('and closing it puts them away again', more.hidden === true);
+  }
+  check('the event window carries a move grip and eight resize edges',
+    !!document.getElementById('event-window-headbar')
+    && (html.match(/data-event-resize=/g) || []).length === 8,
+    String((html.match(/data-event-resize=/g) || []).length));
   check('the old separate min/high/low moons are gone from the pills',
     !kindChips().some((chip) => /event-chip-(micromoon|highest_moon|lowest_moon)/.test(chip.id)));
-  check('年度之最 has its own table columns',
+  check('最高/最低月 has its own table columns',
     T.eventColumnsFor('annual_extremes').includes('label'));
   {
     const columns = T.eventColumnsFor('libration_target');
@@ -3209,6 +3257,48 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         }
       }
       {
+        // A box on the far side of the flat frame is still visible on the
+        // globe, and it must still be grabbable there.  The old hit test
+        // projected the pointer back through the flat disk, which returns null
+        // once the globe has been turned past that frame.
+        const savedGlobe = { ...T.state.globe3d };
+        const savedSelection = T.state.selection;
+        T.state.globe3d.lon = savedGlobe.lon + 95;
+        T.state.globe3d.lat = savedGlobe.lat;
+        T.state.selection = {
+          lon: T.state.globe3d.lon, lat: T.state.globe3d.lat,
+          radiusFraction: 0.1, rotationDeg: 0, aspect: 1,
+        };
+        T.state.dragging = null;
+        T.drawDisk();
+        const beforeSelection = { ...T.state.selection };
+        const shape = T.globeSelectionGeometry();
+        const centre = shape && T.globePixelFromDirection(shape.centre);
+        const origin = centre ? T.imageToScreen('disk', centre.x, centre.y) : null;
+        if (origin) {
+          const at = (x, y) => ({
+            button: 0, pointerId: 27, target: null,
+            clientX: x / origin.dpr, clientY: y / origin.dpr,
+            preventDefault() {},
+          });
+          const body = document.getElementById('body-disk');
+          body.fire('pointerdown', at(origin.x, origin.y));
+          body.fire('pointermove', at(origin.x + 24, origin.y + 12));
+          body.fire('pointerup', at(origin.x + 24, origin.y + 12));
+        }
+        check('a turned-away box can still be dragged from its middle',
+          !!origin
+          && (T.state.selection.lon !== beforeSelection.lon
+            || T.state.selection.lat !== beforeSelection.lat)
+          && T.state.globe3d.lon === savedGlobe.lon + 95
+          && T.state.globe3d.lat === savedGlobe.lat,
+          JSON.stringify({ before: beforeSelection, after: T.state.selection }));
+        T.state.globe3d = savedGlobe;
+        T.state.selection = savedSelection;
+        T.state.dragging = null;
+        T.drawDisk();
+      }
+      {
         // No box yet: an empty drag on the globe has to draw the first one
         // (it used to turn the globe, leaving the reader unable to select).
         const savedSelection = T.state.selection;
@@ -3230,6 +3320,112 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         T.state.selection = savedSelection;
         T.state.dragging = null;
       }
+      {
+        // A 3D globe has no outer circle: a projection-corrected ellipse may
+        // cross the limb without shrinking to nothing.
+        const saved = T.state.selection;
+        const savedView = T.state.view3d;
+        const correctedBefore = document.getElementById('mesh-corrected').checked;
+        const ellipseBefore = document.getElementById('mesh-ellipse').checked;
+        T.state.view3d = true;
+        set('mesh-corrected', true);
+        set('mesh-ellipse', true);
+        T.state.selection = {
+          lon: 0, lat: 0, radiusFraction: 0.12, rotationDeg: 0, aspect: 1,
+        };
+        const middle = T.selectionGroundEllipse();
+        const middleShape = T.globeSelectionGeometry();
+        T.state.selection = {
+          ...T.state.selection, lon: 89,
+        };
+        T.clampSelectionInPlace();
+        const edge = T.selectionGroundEllipse();
+        const edgeShape = T.globeSelectionGeometry();
+        const spread = (shape) => {
+          const points = shape ? shape.corners.filter(Boolean)
+            .map((point) => T.globePixelFromDirection(point)) : [];
+          const xs = points.map((point) => point.x);
+          const ys = points.map((point) => point.y);
+          return points.length
+            ? Math.max(...xs) - Math.min(...xs)
+              + Math.max(...ys) - Math.min(...ys) : 0;
+        };
+        check('the 3D corrected ellipse does not shrink at the limb',
+          !!middle && !!edge
+          && Math.abs(edge.halfW - middle.halfW) < 1e-9
+          && T.state.selection.lon === 89
+          && spread(edgeShape) > spread(middleShape) * 0.5,
+          JSON.stringify({ middle: middle && middle.halfW,
+            edge: edge && edge.halfW, lon: T.state.selection.lon,
+            middleSpread: spread(middleShape),
+            edgeSpread: spread(edgeShape) }));
+        set('mesh-corrected', correctedBefore);
+        set('mesh-ellipse', ellipseBefore);
+        T.state.selection = saved;
+        T.state.view3d = savedView;
+      }
+      {
+        // A 3D rectangle is forced onto the corrected ground patch.  Moving it
+        // toward the limb must not change its shape or shrink it away.
+        const saved = T.state.selection;
+        const correctedBox = document.getElementById('mesh-corrected');
+        set('mesh-ellipse', false);
+        T.state.selection = {
+          lon: 0, lat: 0, radiusFraction: 0.12, rotationDeg: 0, aspect: 0.6,
+        };
+        const middle = T.selectionGroundBox();
+        const middleShape = T.globeSelectionGeometry();
+        T.state.selection = { ...T.state.selection, lon: 89 };
+        T.clampSelectionInPlace();
+        const edge = T.selectionGroundBox();
+        const edgeShape = T.globeSelectionGeometry();
+        check('the 3D corrected rectangle keeps its ground size at the limb',
+          !!middle && !!edge && !!middleShape && !!edgeShape
+          && correctedBox.checked && correctedBox.disabled
+          && T.state.selection.lon === 89
+          && Math.abs((edge.x1 - edge.x0) - (middle.x1 - middle.x0)) < 1e-6
+          && Math.abs((edge.y1 - edge.y0) - (middle.y1 - middle.y0)) < 1e-6
+          && edgeShape.surface === true,
+          JSON.stringify({
+            middle: [middle && middle.x1 - middle.x0,
+              middle && middle.y1 - middle.y0],
+            edge: [edge && edge.x1 - edge.x0, edge && edge.y1 - edge.y0],
+            lon: T.state.selection.lon }));
+        T.state.selection = saved;
+      }
+      {
+        const saved = T.state.selection;
+        T.state.selection = {
+          lon: 0, lat: 0, radiusFraction: 0.1, rotationDeg: 0, aspect: 1,
+        };
+        const canvas = document.getElementById('magnify');
+        const info = document.getElementById('magnify-info');
+        const ok = T.drawGlobeMagnifier(canvas, info, 240, 200, 1);
+        const box = T.selectionGroundBox();
+        const centreFlat = box && T.patchFitsFlatPreview(
+          box.camera, box.x0, box.x1, box.y0, box.y1, false);
+        T.state.selection = { ...T.state.selection, lon: 89 };
+        const edgeBox = T.selectionGroundBox();
+        const edgeFlat = edgeBox && T.patchFitsFlatPreview(
+          edgeBox.camera, edgeBox.x0, edgeBox.x1, edgeBox.y0, edgeBox.y1, false);
+        T.state.selection = { ...T.state.selection, lon: 0 };
+        check('the close-up chooses one source for the whole patch',
+          centreFlat === true && edgeFlat === false,
+          JSON.stringify({ centreFlat, edgeFlat }));
+        const payload = T.selectionPayload();
+        const mesh = T.meshPayload();
+        check('the 3D mesh export carries the drawn ground box',
+          !!payload && Array.isArray(payload.ground_box)
+          && payload.corrected === true
+          && !!mesh && Array.isArray(mesh.selection.ground_box),
+          JSON.stringify({ payload, mesh: mesh && mesh.selection }));
+        check('the live close-up is a projection-corrected globe patch',
+          ok && info.textContent === '球面选框（投影修正）'
+          && canvas.width > 0 && canvas.height > 0,
+          JSON.stringify({ ok, text: info.textContent,
+            size: [canvas.width, canvas.height] }));
+        T.state.selection = saved;
+      }
       // The ellipse switch has to reach the globe as well: the 3D outline is
       // built from the selection's own directions, so it can be an ellipse.
       const ellipseBefore = document.getElementById('mesh-ellipse').checked;
@@ -3243,6 +3439,28 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         `${rectangle ? rectangle.directions.length : 'none'} -> `
         + `${ellipse ? ellipse.directions.length : 'none'}`);
       set('mesh-ellipse', ellipseBefore);
+      {
+        // 投影修正 makes the selection a ground patch.  On the globe it must
+        // stay that patch, not be re-inflated into a great circle by the old
+        // apparent-size scale.
+        const correctedBefore = document.getElementById('mesh-corrected').checked;
+        set('mesh-corrected', true);
+        T.state.selection = {
+          lon: 0, lat: 0, radiusFraction: 0.1, rotationDeg: 0, aspect: 1,
+        };
+        const shape = T.globeSelectionGeometry();
+        const points = shape ? shape.corners.map((point) =>
+          T.globePixelFromDirection(point)) : [];
+        const xs = points.map((point) => point.x);
+        const ys = points.map((point) => point.y);
+        const spread = points.length
+          ? Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)
+          : 0;
+        check('the corrected 3D box stays a patch, not a great circle',
+          !!shape && shape.surface === true && spread > 20 && spread < 400,
+          `${points.length} corners, spread ${spread.toFixed(1)}`);
+        set('mesh-corrected', correctedBefore);
+      }
       // A direction on the far side of the globe is drawn through it rather
       // than dropped, which is what makes a box that reaches the far limb stay
       // visible.
@@ -4010,6 +4228,33 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       fire('anim-kmpx-preset', 'change');
       check('and putting the menu back restores the coarse render',
         T.animationRenderSize().width < 1200, JSON.stringify(T.animationRenderSize()));
+
+      {
+        const savedSelection = T.state.selection;
+        const savedView = T.state.view3d;
+        const savedCorrected = document.getElementById('mesh-corrected').checked;
+        set('anim-scope', 'region');
+        fire('anim-scope', 'change');
+        set('mesh-corrected', true);
+        T.state.view3d = true;
+        T.state.selection = {
+          lon: 0, lat: 0, radiusFraction: 0.12, rotationDeg: 0, aspect: 1.5,
+        };
+        const request = T.animationRequest();
+        check('当前选框 uses the effective corrected/3D footprint',
+          Math.abs(request.region.fov_radius_arcsec
+            - T.effectiveSelectionArcsec()) < 1e-6
+          && Math.abs(T.animationAspect() - T.effectiveSelectionAspect()) < 1e-6,
+          JSON.stringify({ region: request.region,
+            effectiveArcsec: T.effectiveSelectionArcsec(),
+            aspect: T.animationAspect(),
+            effectiveAspect: T.effectiveSelectionAspect() }));
+        T.state.selection = savedSelection;
+        T.state.view3d = savedView;
+        set('mesh-corrected', savedCorrected);
+        set('anim-scope', scope);
+        fire('anim-scope', 'change');
+      }
       check('and the animation no longer dictates the shadow budget',
         T.animationRequest().output.shadow_steps === undefined,
         JSON.stringify(T.animationRequest().output));
@@ -4199,8 +4444,8 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       options.map((o) => o.textContent).join(' | '));
     check('and names the one the frames are made of',
       select.value === '/kernels/LDEM_118m.tif', select.value);
-    check('the online product is listed and cannot be picked',
-      options.some((o) => /SLDEM2015/.test(o.textContent) && o.disabled === true),
+    check('the online product is listed and can be picked',
+      options.some((o) => /SLDEM2015/.test(o.textContent) && o.disabled !== true),
       options.filter((o) => /SLDEM2015/.test(o.textContent))
         .map((o) => `${o.textContent}:${o.disabled}`).join(' | '));
     check('at 118 m the 60 m row is greyed out',
@@ -5175,6 +5420,22 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
         document.getElementById('when').value.slice(0, 10),
       `${document.getElementById('curve-backdrop').hidden} / `
       + document.getElementById('curve-date').value);
+    {
+      const zone = document.getElementById('curve-tz');
+      check('the curve has its own time zone, seeded from the page',
+        !!zone && zone.value === document.getElementById('tz').value,
+        zone ? zone.value : 'missing');
+      set('curve-tz', '+3');
+      fire('curve-tz', 'change');
+      await tick(); await tick();
+      const call = fetchCalls.filter((entry) => entry.url === '/api/curve').pop();
+      check('changing it asks the server for that zone',
+        call && call.body.tz_offset_hours === 3,
+        call ? String(call.body.tz_offset_hours) : 'no call');
+      set('curve-tz', document.getElementById('tz').value);
+      fire('curve-tz', 'change');
+      await tick(); await tick();
+    }
     check('the samples land in the state',
       !!T.state.curve && T.state.curve.samples.length === 30);
     check('both axes are labelled',
@@ -6030,6 +6291,60 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       placed.length === 3 && !overlaps, JSON.stringify(placed));
   }
 
+  check('text follows the outline for all five linear families',
+    ['rima', 'mons', 'dorsum', 'vallis', 'rupes']
+      .every((key) => T.TEXT_FOLLOW_CLASSES.has(key)),
+    [...T.TEXT_FOLLOW_CLASSES].join(','));
+
+  console.log('');
+  console.log('a looped rille keeps its caption upright');
+  {
+    const loop = [];
+    for (let index = 0; index <= 64; index += 1) {
+      const angle = 2 * Math.PI * index / 64;
+      loop.push([100 + 60 * Math.cos(angle), 100 + 40 * Math.sin(angle)]);
+    }
+    const drawn = [];
+    const fake = {
+      font: '', textAlign: '', textBaseline: '', lineJoin: '',
+      fillStyle: '', strokeStyle: '', lineWidth: 1,
+      _x: 0, _y: 0, _a: 0,
+      measureText() { return { width: 9 }; },
+      save() {}, restore() {},
+      translate(x, y) { this._x = x; this._y = y; },
+      rotate(angle) { this._a = angle; },
+      fillText(char) {
+        drawn.push({ char, x: this._x, y: this._y, angle: this._a });
+      },
+      strokeText() {},
+    };
+    const text = 'LOOPED RILLE';
+    const ok = T.paintTextAlongPath(fake, {
+      label: text, outline_path: loop, outline_closed: true,
+    }, 12, '#ffffff', 0, '#000000');
+    const angles = drawn.map((spot) => spot.angle);
+    const maxTilt = angles.length ? Math.max(...angles.map(Math.abs)) : 0;
+    const run = drawn.length ? drawn[drawn.length - 1].x - drawn[0].x : 0;
+    check('the loop caption is placed, upright, and runs left to right',
+      ok && drawn.length === text.length
+      && maxTilt <= Math.PI / 2 + 1e-6 && run > 0,
+      JSON.stringify({ count: drawn.length, maxTilt, run }));
+    const key = 'Rima Test';
+    T.labelTextShift.disk[key] = 0.2;
+    drawn.length = 0;
+    const moved = T.paintTextAlongPath(fake, {
+      label: text, name_en: key, class: 'rima',
+      outline_path: loop, outline_closed: true,
+    }, 12, '#ffffff', 0, '#000000', 'disk');
+    const movedRun = drawn.length
+      ? drawn[drawn.length - 1].x - drawn[0].x : 0;
+    check('a saved trace offset moves the caption and is tracked for dragging',
+      moved && T.labelTextTracks.disk[key]
+      && Math.abs(movedRun - run) > 1,
+      JSON.stringify({ movedRun, run, track: T.labelTextTracks.disk[key] }));
+    delete T.labelTextShift.disk[key];
+  }
+
   console.log('');
   console.log('an elliptical selection is a ground patch on the Moon');
   /* The ellipse is measured on the ground, so moving it towards the limb
@@ -6086,9 +6401,16 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.state.selection = { lon: 95, lat: 0, radiusFraction: 0.2,
                           rotationDeg: 0, aspect: 1 };
     const boundary = T.ellipseBoundarySegments();
+    const g = T.diskGeom();
+    const maxR = boundary && boundary.segments[0]
+      ? Math.max(...boundary.segments[0].map((point) =>
+        Math.hypot(point.x - g.cx, point.y - g.cy) / g.radius)) : 0;
     check('it may run past the limb without its centre being pulled in',
       boundary && T.state.selection.lon === 95,
       `${boundary ? boundary.closed : null} ${T.state.selection.lon}`);
+    check('and the whole ellipse is drawn past the outer circle',
+      boundary && boundary.closed && maxR > 1.01,
+      `maxR ${maxR.toFixed(3)}`);
     T.state.selection = saved;
     set('mesh-corrected', false);
   }

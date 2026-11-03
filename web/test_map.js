@@ -330,7 +330,7 @@ function fakeFetch(url, options) {
   });
   if (url.startsWith('/api/map/health')) {
     return respond({
-      version: '1.0.2',
+      version: '1.1.0',
       dem: { name: 'dem', level0_km_per_pixel: 0.118 },
       albedo: { name: 'albedo', level0_km_per_pixel: 0.5 },
       feature_count: 9000, sources: [{ name: 'dem', km_per_px: 0.118 }],
@@ -403,7 +403,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord, projectOutlineSegments, drawFeatureOutline, textAlongPath, selectedTextHit, beginTextDrag, textDragMove, textTrackKey, selectFeature, textFollowFeature };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -413,6 +413,8 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await wait(60);
   const T = sandbox.__t;
   check('the page boots without throwing', Boolean(T) && Boolean(T.state));
+  check('the sealed Earth view has no menu entry',
+    !/value="earth"/.test(html) && /地球视角已封存/.test(html));
   check('the console stayed quiet', T.state !== null);
 
   console.log('');
@@ -432,9 +434,9 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     dom.document.querySelectorAll('.layer-item').length === 0
     && Boolean(dom.byId['base-on']),
     String(dom.document.querySelectorAll('.layer-item').length));
-  check('the map starts at 20% label density',
-    dom.byId['label-density'].value === '0.2'
-    && dom.byId['density-value'].textContent === '20%',
+  check('the map starts at 50% label density',
+    dom.byId['label-density'].value === '0.5'
+    && dom.byId['density-value'].textContent === '50%',
     `${dom.byId['label-density'].value} / ${dom.byId['density-value'].textContent}`);
   check('the moon readout starts folded to its basic rows',
     dom.byId['moon-info'].dataset.collapsed === 'true'
@@ -482,7 +484,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   dom.byId['shadow-bias'].value = '0';
   dom.byId['shadow-bias'].fire('input');
   check('the map version sits under the title',
-    dom.byId['map-version'].textContent === '1.0.2');
+    dom.byId['map-version'].textContent === '1.1.0');
   check('all of them start on, as the server says',
     T.state.active.has('mare') && T.state.active.has('crater'));
   T.setAllLayers(false);
@@ -538,9 +540,18 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     dom.byId['label-overlap'].checked = true;
     dom.byId['label-overlap'].fire('change');
     check('停用避让 turns collision control off', T.state.avoidOverlap === false);
-    dom.byId['diameter-toggle'].checked = false;
-    dom.byId['diameter-toggle'].fire('change');
-    check('真实直径 belongs to the label settings', T.state.diameters === false);
+    dom.byId['outline-toggle'].checked = false;
+    dom.byId['outline-toggle'].fire('change');
+    check('轮廓 belongs to the label settings', T.state.outlines === false);
+    dom.byId['text-follow-toggle'].checked = true;
+    dom.byId['text-follow-toggle'].fire('change');
+    check('文字跟随轮廓 turns curved typesetting on', T.state.textFollow === true);
+    dom.byId['round-outline-toggle'].checked = true;
+    dom.byId['round-outline-toggle'].fire('change');
+    check('月海使用圆形轮廓 restores the diameter circles', T.state.roundOutlines === true);
+    dom.byId['linear-outline-toggle'].checked = false;
+    dom.byId['linear-outline-toggle'].fire('change');
+    check('显示线状地貌轮廓 hides only the open paths', T.state.linearOutlines === false);
   }
 
   console.log('');
@@ -799,8 +810,9 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('ordinary craters are tier 3 and small satellites tier 4',
       T.labelTier(feature('crater', 60, 'Arago')) === 3
       && T.labelTier(feature('crater', 10, 'Arago A')) === 4);
-    check('large satellites are promoted to tier 3, other classes are tier 5',
-      T.labelTier(feature('crater', 40, 'Arago B')) === 3
+    check('main craters outrank their satellites; other classes are tier 5',
+      T.labelTier(feature('crater', 40, 'Arago B')) === 4
+      && T.labelTier(feature('crater', 60, 'Arago')) === 3
       && T.labelTier(feature('dome', 20)) === 5);
   }
 
@@ -847,6 +859,64 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('vertical panning stops at the top edge, it does not wrap',
       T.state.centerLat < 89 && T.state.centerLat > 0,
       String(T.state.centerLat));
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('the Earth view is a perspective from the Earth-Moon distance');
+  {
+    const saved = { ...T.state };
+    T.state.projection = 'earth';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.lighting = {
+      moon: { distance_km: 384400 },
+      sub_earth: { lon: 6, lat: 0 },
+    };
+    T.state.globe = { lon: 6, lat: 0, zoom: 1 };
+    const centre = T.screenToLonLat(600, 400);
+    check('the centre of the Earth view is the sub-Earth point',
+      centre && Math.abs(centre.lon - 6) < 1e-6
+      && Math.abs(centre.lat) < 1e-6,
+      JSON.stringify(centre));
+    const forward = T.lonlatToScreen(6, 0);
+    check('a point at the sub-Earth point lands at the centre',
+      Math.abs(forward.x - 600) < 1e-6 && Math.abs(forward.y - 400) < 1e-6,
+      JSON.stringify(forward));
+    // The visible cap is arccos(R/d) = 89.74 deg: a little more than a
+    // hemisphere, which is the whole point of the finite-distance projection.
+    const nearLimb = T.lonlatToScreen(95.5, 0);
+    const beyondLimb = T.lonlatToScreen(96.5, 0);
+    check('the Earth view sees just past the 90-degree hemisphere',
+      nearLimb.visible !== false && beyondLimb.visible === false,
+      JSON.stringify({ nearLimb, beyondLimb }));
+    const outside = T.screenToLonLat(600 + T.globeRadius() + 10, 400);
+    check('a pixel outside the limb has no ground point', outside === null);
+    // Earth view keeps a fixed orientation but moves its window, so it must
+    // use the whole-sphere source: a local window would go blank as the window
+    // moved past its edge.
+    T.state.globe.zoom = 8;
+    check('Earth view keeps the whole-sphere texture at every magnification',
+      T.projectionSourceWindow() === null,
+      JSON.stringify(T.projectionSourceWindow()));
+    // The orientation stays fixed to the sub-Earth point; a zoomed reader
+    // moves the window, and the pointer inverse has to follow that window.
+    T.state.globe.lon = 6;
+    T.state.globe.lat = 0;
+    T.state.earthPanX = 0.1;
+    T.state.earthPanY = -0.05;
+    const radius = T.globeRadius();
+    const panned = T.lonlatToScreen(6, 0);
+    check('an Earth-view window shift moves the picture, not the globe',
+      Math.abs(panned.x - (600 + 0.1 * radius)) < 1e-6
+      && Math.abs(panned.y - (400 + 0.05 * radius)) < 1e-6,
+      JSON.stringify(panned));
+    const back = T.screenToLonLat(panned.x, panned.y);
+    check('and the pointer still lands on the same ground',
+      back && Math.abs(back.lon - 6) < 1e-6 && Math.abs(back.lat) < 1e-6,
+      JSON.stringify(back));
+    T.state.earthPanX = 0;
+    T.state.earthPanY = 0;
     Object.assign(T.state, saved);
   }
 
@@ -1177,7 +1247,11 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('a second drag passes 100%',
       density.value === '1.2' && T.state.density.mare === 1.2,
       `${density.value} / ${T.state.density.mare}`);
-    check('and avoidance turns itself off above 100%',
+    check('avoidance is still on at 120%',
+      T.labelAvoidanceEnabled() === true);
+    density.value = '3.6';
+    density.fire('input');
+    check('and avoidance turns itself off above 300%',
       T.labelAvoidanceEnabled() === false);
     density.fire('change');
     density.value = '1';
@@ -1416,10 +1490,35 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       T.measure.shape.b.lon !== end.lon,
       JSON.stringify(T.measure.shape));
 
-    gesture('pointerdown', 500, 300, { ctrlKey: true });
-    gesture('pointermove', 560, 340, { ctrlKey: true });
-    gesture('pointerup', 560, 340, { ctrlKey: true });
-    check('Ctrl-drag draws a circle', T.measure.shape.kind === 'circle'
+    // The whole line is a handle too: press anywhere on the stroke and drag.
+    {
+      const mid = T.measureLinePoint(T.measure.shape.a, T.measure.shape.b, 0.5);
+      const at = T.lonlatToScreen(mid.lon, mid.lat);
+      const before = { a: { ...T.measure.shape.a }, b: { ...T.measure.shape.b } };
+      gesture('pointerdown', at.x, at.y);
+      gesture('pointermove', at.x + 50, at.y + 20);
+      gesture('pointerup', at.x + 50, at.y + 20);
+      check('a drawn line can be dragged from its middle',
+        T.measure.shape.a.lon !== before.a.lon
+        && T.measure.shape.b.lon !== before.b.lon,
+        JSON.stringify(T.measure.shape));
+    }
+    // A short measurement used to be deleted on release; only a click with no
+    // drag may vanish now.
+    {
+      gesture('pointerdown', 400, 400);
+      gesture('pointermove', 400.05, 400);
+      gesture('pointerup', 400.05, 400);
+      check('a very short line survives the release',
+        T.measure.shape && T.measure.shape.kind === 'line'
+        && T.measureDistanceKm(T.measure.shape.a, T.measure.shape.b) > 0,
+        JSON.stringify(T.measure.shape));
+    }
+
+    gesture('pointerdown', 500, 300, { shiftKey: true });
+    gesture('pointermove', 560, 340, { shiftKey: true });
+    gesture('pointerup', 560, 340, { shiftKey: true });
+    check('Shift-drag draws a circle', T.measure.shape.kind === 'circle'
       && T.measure.shape.radiusKm > 0, JSON.stringify(T.measure.shape));
     const rim = [0, 1, 2, 3].map((index) => T.measureCirclePoint(
       T.measure.shape.lon, T.measure.shape.lat, T.measure.shape.radiusKm,
@@ -1458,6 +1557,113 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       button.getAttribute('aria-pressed') === 'false'
       && T.measure.on === false && T.measure.shape === null
       && dom.byId['map-measure-chart'].hidden === true);
+  }
+
+  console.log('');
+  console.log('outlines are projected from the catalogue payload');
+  {
+    // A rille arrives as lon/lat path points; the painter needs screen space.
+    const segments = T.projectOutlineSegments({
+      kind: 'line', path: [[0, 0], [4, 0], [4, 4]],
+    });
+    check('an outline path projects to one screen segment',
+      Array.isArray(segments) && segments.length === 1 && segments[0].length === 3,
+      JSON.stringify(segments && segments.length));
+    const closed = T.projectOutlineSegments({
+      kind: 'point', ring: [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]],
+    });
+    check('a closed ring keeps its closing point',
+      closed && closed[0].length === 5, JSON.stringify(closed && closed[0].length));
+    check('an empty outline has nothing to paint',
+      T.projectOutlineSegments({ kind: 'line', path: [] }) === null);
+    const mountain = {
+      feature: {
+        class: 'mons', lon: 2, lat: 2, diameter_km: 100,
+        outline: { kind: 'centerline', path: [[0, 0], [4, 0], [4, 4]] },
+      },
+      radius: 10, kmPerPixel: 1,
+    };
+    const saved = { ...T.state };
+    T.state.projection = 'equirect';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.scale = 1;
+    T.state.zoom = 2;
+    T.state.centerLon = 0;
+    T.state.centerLat = 0;
+    T.state.linearOutlines = true;
+    T.state.mountainOutlines = false;
+    check('山脉轮廓 can be switched off on its own',
+      T.drawFeatureOutline(mountain) === false);
+    T.state.mountainOutlines = true;
+    check('and comes back with the switch', T.drawFeatureOutline(mountain) === true);
+    T.state.linearOutlines = false;
+    check('显示线状地貌轮廓 still owns every line',
+      T.drawFeatureOutline(mountain) === false);
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('a selected linear label can be dragged along its own outline');
+  {
+    const saved = {
+      selected: T.state.selected,
+      labelHits: T.state.labelHits,
+      textTracks: T.state.textTracks,
+      labelShift: T.state.labelShift,
+      textDrag: T.state.textDrag,
+      textFollow: T.state.textFollow,
+    };
+    const feature = {
+      id: 99001, name_en: 'Rima Test', class: 'rima',
+      outline: { kind: 'centerline', path: [[0, 0], [1, 0]] },
+    };
+    const key = T.textTrackKey(feature);
+    T.state.selected = feature;
+    T.state.textFollow = true;
+    T.state.labelHits = [{ feature, left: 0, top: 0, right: 100, bottom: 24 }];
+    T.state.textTracks = {
+      [key]: { start: 10, base: 10, range: 100, loop: false, tangent: 0,
+               length: 160 },
+    };
+    T.state.labelShift = {};
+    T.state.textDrag = null;
+    const hit = T.selectedTextHit(20, 10);
+    check('the selected label is the one the pointer grabs', hit === feature);
+    const started = T.beginTextDrag({
+      clientX: 20, clientY: 10, pointerId: 41,
+    }, feature);
+    T.textDragMove({ clientX: 40, clientY: 10 });
+    check('dragging moves the caption along the trace',
+      started && Math.abs(T.state.labelShift[key] - 0.2) < 1e-6
+      && Math.abs(T.state.textDrag.start - 30) < 1e-6,
+      JSON.stringify({ shift: T.state.labelShift[key],
+        start: T.state.textDrag && T.state.textDrag.start }));
+    T.state.textDrag = null;
+    T.selectFeature(null);
+    check('the chosen placement survives deselecting the feature',
+      Math.abs(T.state.labelShift[key] - 0.2) < 1e-6,
+      JSON.stringify(T.state.labelShift));
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
+  console.log('text-follow applies to every linear family');
+  {
+    const saved = T.state.textFollow;
+    T.state.textFollow = true;
+    const feature = (kind, className) => ({
+      id: 1, class: className,
+      outline: { kind, path: [[0, 0], [1, 0]] },
+    });
+    check('mountains, ridges, valleys and scarps get the same text path',
+      ['mons', 'dorsum', 'vallis', 'rupes', 'rima']
+        .every((className) => T.textFollowFeature(feature('centerline', className))),
+      JSON.stringify(['mons', 'dorsum', 'vallis', 'rupes', 'rima']
+        .map((className) => T.textFollowFeature(feature('centerline', className)))));
+    check('a mare ring is not treated as a linear trace',
+      T.textFollowFeature(feature('ring', 'mare')) === false);
+    T.state.textFollow = saved;
   }
 
   console.log('');

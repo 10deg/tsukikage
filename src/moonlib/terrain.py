@@ -103,6 +103,7 @@ __all__ = [
     "is_global_dem_raster",
     "terrain_cache_root",
     "bake_terrain_cache",
+    "rebuild_terrain_cache",
     "clear_terrain_cache",
     "ground_profile",
     "PROFILE_SAMPLES",
@@ -221,13 +222,17 @@ def _terrain_search_roots(explicit: Optional[Path]) -> List[Path]:
         if (parent / "kernels").is_dir():
             break
     roots.append(Path.cwd())
+    # Resolve before de-duplicating: an explicit ``kernels`` and the checkout's
+    # own ``<root>/kernels`` are the same directory under two spellings, and
+    # leaving both in made every discovered raster appear twice.
     seen = set()
     unique: List[Path] = []
     for root in roots:
-        key = str(root)
+        resolved = Path(root).expanduser().resolve()
+        key = str(resolved)
         if key not in seen:
             seen.add(key)
-            unique.append(root)
+            unique.append(resolved)
     return unique
 
 
@@ -1072,22 +1077,30 @@ def _downsample_band_stream(
     row_source: Callable[[int], np.ndarray],
     source_height: int,
     factor: int,
+    progress: Optional[Callable[[float], None]] = None,
 ) -> np.ndarray:
     """Box-reduce a full-resolution raster by *factor* in both axes.
 
     Rows are pulled one at a time through *row_source* so that a 1 GB source
     never has to be resident; only ``factor`` scanlines plus the output are
-    held at once.
+    held at once.  *progress* is called with a 0..1 fraction while the source
+    is being read, which is the only way a multi-minute bake can say it is
+    still moving.
     """
     if source_height % factor:
         raise TerrainDataError(
             f"Source height {source_height} is not divisible by {factor}."
         )
+    report = progress or (lambda _fraction: None)
+    step = max(1, source_height // 100)
     if factor == 1:
-        return np.stack(
-            [np.asarray(row_source(index), dtype=np.float32) for index in range(source_height)],
-            axis=0,
-        )
+        rows = []
+        for index in range(source_height):
+            rows.append(np.asarray(row_source(index), dtype=np.float32))
+            if index % step == 0:
+                report(index / float(source_height))
+        report(1.0)
+        return np.stack(rows, axis=0)
     reduced_rows: List[np.ndarray] = []
     pending: List[np.ndarray] = []
     for index in range(source_height):
@@ -1105,6 +1118,9 @@ def _downsample_band_stream(
                 blocks = stacked.reshape(factor, width // factor, factor)
             reduced_rows.append(blocks.mean(axis=(0, 2)).astype(np.float32, copy=False))
             pending = []
+            if index % step == 0:
+                report(index / float(source_height))
+    report(1.0)
     return np.stack(reduced_rows, axis=0)
 
 
@@ -1270,7 +1286,11 @@ def bake_terrain_cache(
             values = _fill_nodata(values, sentinel)
         return values
 
-    coarse = _downsample_band_stream(dem_rows, source_height, factor)
+    coarse = _downsample_band_stream(
+        dem_rows, source_height, factor,
+        progress=lambda fraction: hook(
+            0.55 * float(fraction), "reading topography"),
+    )
     dem_levels = _build_pyramid_levels(
         coarse, _pyramid_depth(coarse.shape[1], coarse.shape[0])
     )
@@ -1378,6 +1398,8 @@ def _downsample_compressed_tiff(
     hook(0.65, "reducing colour mosaic")
     for start_row in range(0, rows_needed, block):
         stop_row = min(start_row + block, rows_needed)
+        hook(0.65 + 0.10 * (stop_row / float(rows_needed)),
+             "reducing colour mosaic")
         chunk = source[start_row * factor: stop_row * factor]
         # (rows, factor, cols//factor, factor, 3) -> mean over the two factor axes
         reshaped = chunk.reshape(
@@ -1401,6 +1423,9 @@ def _bake_albedo_levels(
     coarse: np.ndarray
     integer_peak = 1.0
 
+    def colour_progress(fraction: float) -> None:
+        hook(0.55 + 0.20 * float(fraction), "reading colour mosaic")
+
     if suffix == ".exr":
         reader: Any = _ScanlineExr(path)
         width, height = reader.width, reader.height
@@ -1408,7 +1433,8 @@ def _bake_albedo_levels(
             raise TerrainDataError(
                 f"{path.name}: {width}x{height} is not divisible by {factor}."
             )
-        coarse = _downsample_band_stream(reader.row_rgb, height, factor)
+        coarse = _downsample_band_stream(
+            reader.row_rgb, height, factor, progress=colour_progress)
     elif suffix in (".tif", ".tiff"):
         width, height, bits, samples, uncompressed = _tiff_layout(path)
         if samples < 3:
@@ -1426,7 +1452,8 @@ def _bake_albedo_levels(
             def fetch(index: int, _tiff: _StrippedTiff = tiff) -> np.ndarray:
                 return np.asarray(_tiff.row(index), dtype=np.float32)[:, :3]
 
-            coarse = _downsample_band_stream(fetch, height, factor)
+            coarse = _downsample_band_stream(
+                fetch, height, factor, progress=colour_progress)
         else:
             coarse = _downsample_compressed_tiff(path, factor, hook)
     else:
@@ -1556,6 +1583,47 @@ def clear_terrain_cache(cache: Optional[Path] = None) -> int:
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
     return removed
+
+
+def rebuild_terrain_cache(
+    sources: Optional[TerrainSources] = None,
+    *,
+    cache: Optional[Path] = None,
+    detail: int = 1,
+    albedo_detail: int = 2,
+    include_albedo: bool = True,
+    progress: Optional[ProgressHook] = None,
+) -> Path:
+    """Bake *sources* afresh, then remove the pyramids it supersedes.
+
+    A rebuild is how a machine that has just been given a finer DEM switches
+    the whole-disk picture to it: the old cache must not remain and win the
+    "finest baked product" lookup on the next start.  The superseded pyramids
+    are removed only after the new bake has finished, so a failed or cancelled
+    rebuild leaves the working one in place.
+    """
+    import shutil
+
+    target = bake_terrain_cache(
+        sources,
+        cache=cache,
+        detail=detail,
+        albedo_detail=albedo_detail,
+        include_albedo=include_albedo,
+        rebuild=True,
+        progress=progress,
+    )
+    root = Path(cache) if cache is not None else terrain_cache_root()
+    try:
+        children = list(root.iterdir())
+    except OSError:  # pragma: no cover - racing deletion
+        return target
+    for child in children:
+        if not child.is_dir() or child.resolve() == target.resolve():
+            continue
+        if (child / "manifest.json").is_file():
+            shutil.rmtree(child, ignore_errors=True)
+    return target
 
 
 # ---------------------------------------------------------------------------

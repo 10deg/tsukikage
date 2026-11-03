@@ -48,6 +48,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Iterato
 import numpy as np
 
 from .config import package_data_dir
+from .outlines import outline_for
 from .errors import MoonlibError, TargetDataError
 from .features import load_features
 from .instrument import ARCSEC_PER_RADIAN
@@ -145,12 +146,12 @@ FEATURE_CLASSES: Tuple[str, ...] = (
     "rupes",
     "catena",
     "promontorium",
+    "albedo",
     "statio",
     "pit",
     "pyroclastic",
     "imp",
     "impact",
-    "albedo",
     "lunar100",
     "libration",
     "other",
@@ -180,7 +181,7 @@ CLASS_LABELS: Dict[str, Tuple[str, str]] = {
     "pyroclastic": ("火成碎屑", "Pyroclastic"),
     "imp": ("不规则月海斑块", "Irregular mare patch"),
     "impact": ("撞击闪光", "NELIOTA impact"),
-    "albedo": ("反射率特征点", "Albedo feature"),
+    "albedo": ("反照率特征", "Albedo feature"),
     "lunar100": ("Lunar 100", "The Lunar 100"),
     "libration": ("天平动目标", "Libration target"),
     "other": ("其他", "Other"),
@@ -428,13 +429,16 @@ _REGION_CLASSES = frozenset({"mare", "lacus", "sinus", "palus"})
 #: the catalogue's own centre.
 _RIM_CENTRED_CLASSES = frozenset({"crater", "basin"})
 
-#: Classes whose *height* is allowed to move the projected point.  Only the
-#: crater class: a mare's -- or a basin's -- level is an average over a very
-#: large, irregular patch, and standing the single catalogue centre on that
-#: average made the point drift away from the middle of the patch near the limb.
-#: Everything else keeps the historical reference-sphere projection
-#: (``elevation_km``), which is what it had before the height field was used.
-_TERRAIN_LIFT_CLASSES = frozenset({"crater"})
+#: Classes whose *height* is allowed to move the projected point.  Craters and
+#: the traced linear features: a rille or a ridge is a small ground trace, so
+#: its own height is the one the picture drew.  A mare's -- or a basin's --
+#: level is an average over a very large, irregular patch, and standing the
+#: single catalogue centre on that average made the point drift away from the
+#: middle of the patch near the limb, so the large area classes keep the
+#: historical reference-sphere projection.
+_TERRAIN_LIFT_CLASSES = frozenset({
+    "crater", "rima", "vallis", "mons", "dorsum", "rupes", "catena",
+})
 
 #: The genuinely round impact features, used where a *rim* is meaningful
 #: (recentring a marker on the drawn shape).  This is a separate question from
@@ -479,7 +483,10 @@ def load_chinese_names(path: Optional[Any] = None) -> Dict[str, str]:
         for row in csv.DictReader(handle):
             name = (row.get("English Name") or "").strip()
             chinese = (row.get("名称") or "").strip()
-            if name and chinese:
+            # The atlas tables carry an untranslated copy as its own Chinese
+            # name (YANGEL -> YANGEL).  That is not a translation, and listing
+            # it here only makes the "every key names a feature" guard fail.
+            if name and chinese and chinese != name:
                 names[name] = chinese
     return names
 
@@ -567,6 +574,22 @@ def _name_key(name: str) -> str:
     return "".join(folded.casefold().split())
 
 
+def _catalogue_name_key(name: str) -> str:
+    """Fold a name for de-duplicating rows that differ only in punctuation.
+
+    Unlike :func:`_name_key` this keeps the spaces: ``Mee S`` and ``Mees`` are
+    different features, while ``Yangel'`` and ``YANGEL`` (the untranslated
+    Virtual Moon Atlas copy of the same crater) are the same one.  A trailing
+    apostrophe is the one punctuation the gazetteer uses inconsistently, and it
+    is what made 扬格利 and 扬格利月溪 appear twice on the map.
+    """
+    folded = unicodedata.normalize("NFKD", str(name or ""))
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    for mark in ("'", "’", "`"):
+        folded = folded.replace(mark, "")
+    return " ".join(folded.casefold().split())
+
+
 def load_libration_targets(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
     """The packaged extreme-libration observing targets as map features.
 
@@ -639,12 +662,19 @@ def annotation_catalogue(
     }
     features: List[SurfaceFeature] = []
     showpiece_keys = set()
+    #: Gentle key (spaces kept, apostrophes dropped) -> index in *features*.
+    #: The IAU export and the Virtual Moon Atlas tables sometimes hold the same
+    #: feature twice, once translated and once all-caps with no Chinese name;
+    #: that is what made 扬格利 and 扬格利月溪 appear twice on the map.
+    catalogue_keys: Dict[str, int] = {}
     for feature in primary:
         key = _name_key(feature.name_en)
         if key in showpiece_keys:
             continue
         showpiece_keys.add(key)
         translated = replace(feature, name_zh=official.get(key, feature.name_zh))
+        catalogue_keys.setdefault(
+            _catalogue_name_key(feature.name_en), len(features))
         features.append(_with_gazetteer_kind(translated))
     shown = {feature.name_en for feature in features}
     for feature in gazetteer:
@@ -655,10 +685,21 @@ def annotation_catalogue(
             # to the same key (Vallis Schröteri / Vallis Schroteri); its
             # informal Chinese name has just been replaced by the official one.
             continue
-        # The gazetteer is *not* deduplicated against itself: folding removes
-        # spaces, so a lettered crater collides with any base crater whose name
-        # ends in that letter -- Mee S with Mees, Watt S with Watts -- and they
-        # are different features that both belong in the list.
+        gentle = _catalogue_name_key(feature.name_en)
+        existing_index = catalogue_keys.get(gentle)
+        if existing_index is not None:
+            existing = features[existing_index]
+            translated = bool(feature.name_zh) and feature.name_zh != feature.name_en
+            untranslated = not existing.name_zh or existing.name_zh == existing.name_en
+            if translated and untranslated:
+                features[existing_index] = _with_gazetteer_kind(feature)
+                shown.add(feature.name_en)
+            continue
+        # The gazetteer is otherwise *not* deduplicated against itself: folding
+        # removes spaces, so a lettered crater collides with any base crater
+        # whose name ends in that letter -- Mee S with Mees, Watt S with Watts --
+        # and they are different features that both belong in the list.
+        catalogue_keys[gentle] = len(features)
         shown.add(feature.name_en)
         features.append(_with_gazetteer_kind(feature))
 
@@ -1249,6 +1290,11 @@ class Annotation:
     #: on the mare, as a paper chart does it -- rather than beside it with a
     #: leader.  Such a caption covers its own marker and carries no leader line.
     region: bool = False
+    #: The IAU outline, projected into frame pixels: a traced path for a rille
+    #: or ridge, the outer ring for a mare.  Crater circles keep using
+    #: :attr:`outline`, which the planner already draws as a rim.
+    outline_path: Optional[Tuple[Tuple[float, float], ...]] = None
+    outline_closed: bool = False
 
     @property
     def labelled(self) -> bool:
@@ -1282,6 +1328,11 @@ class Annotation:
                 None if self.outline is None
                 else [[x, y] for x, y in self.outline]
             ),
+            "outline_path": (
+                None if self.outline_path is None
+                else [[x, y] for x, y in self.outline_path]
+            ),
+            "outline_closed": bool(self.outline_closed),
         }
 
 
@@ -1454,7 +1505,8 @@ def related_crater_names(
 
 
 def _display_label(feature: SurfaceFeature, language: str,
-                   satellite: str = "full") -> str:
+                   satellite: str = "full",
+                   crater_suffix: bool = False) -> str:
     """What the page writes for one feature, in the language it asked for.
 
     ``zh`` falls back to English rather than drawing nothing: the official
@@ -1465,6 +1517,10 @@ def _display_label(feature: SurfaceFeature, language: str,
     *satellite* is the page's A/a switch: ``"full"`` keeps the parent name and
     the letter, ``"letter"`` writes only the letter.  It applies to lettered
     satellite craters, which are the only features that have one.
+
+    *crater_suffix* is the 环形坑仅显示名字 switch, inverted: ``True`` puts
+    the 坑 back on every crater, including lettered satellites and the crater
+    targets of the libration list.  ``False`` keeps the bare name.
     """
     chinese, english = feature.name_zh, feature.name_en
     number = int(feature.lunar100 or 0)
@@ -1480,8 +1536,14 @@ def _display_label(feature: SurfaceFeature, language: str,
         letter = _satellite_letter(english)
         if satellite == "letter" and letter:
             return letter
-    if feature_kind == "crater":
+    craterish = feature_kind == "crater"
+    if feature_kind == "libration" and chinese:
+        note = str(feature.note or "")
+        craterish = note.rstrip().lower().endswith("crater")
+    if craterish and chinese:
         chinese = _crater_caption(chinese)
+        if crater_suffix and language != "en":
+            chinese = f"{chinese}坑"
     if language == "en" or not chinese:
         return english
     if language == "zh":
@@ -1585,6 +1647,7 @@ def plan_annotations(
     center_on_rim: bool = False,
     satellite: str = "full",
     satellites: bool = True,
+    crater_suffix: bool = False,
     avoid_overlap: bool = True,
     focus: Optional[Dict[str, float]] = None,
     related: Optional[str] = None,
@@ -1657,12 +1720,15 @@ def plan_annotations(
         page asks for it.
     satellite
         ``"full"`` writes a satellite crater's parent and letter (``阿贝 B``);
-        ``"letter"`` writes only the letter (``B``).  Plain craters lose LPND's
-        trailing 坑 either way.
+        ``"letter"`` writes only the letter (``B``).
     satellites
         When false, lettered satellite craters (``阿贝 B``, ``Abbe B``) are left
         out of the plan entirely.  ``satellite`` then only decides how the
         remaining ones would be written; the two switches are independent.
+    crater_suffix
+        ``True`` writes the 坑 back on every crater -- ``哥白尼坑``,
+        ``哥白尼 A坑`` -- and on the crater targets in the libration list.
+        ``False`` is the bare name the page has always drawn.
     avoid_overlap
         When false, every chosen name gets its nearest slot without testing it
         against the others.  The result may overlap, which is what the highest
@@ -1754,12 +1820,12 @@ def plan_annotations(
         # over the limb is dropped by the same test that drops one that was
         # never in frame.
         #
-        # Only the round impact features are lifted.  A maria's DEM height is an
-        # average over a basin-sized, irregular patch, and standing its single
-        # central point on that average pulled the label away from the middle of
-        # the patch near the limb -- the correction helped the craters and hurt
-        # exactly the large landforms this page shows most of.  Everything else
-        # keeps the reference-sphere pixel it has always had.
+        # Craters and the traced linear features are lifted; the large area
+        # classes are not.  A maria's DEM height is an average over a
+        # basin-sized, irregular patch, and standing its single central point
+        # on that average pulled the label away from the middle of the patch
+        # near the limb -- the correction helped the craters and hurt exactly
+        # the large landforms this page shows most of.
         latitude = np.array([feature.lat_deg for feature in features], dtype=np.float64)
         longitude = np.array([feature.lon_deg for feature in features], dtype=np.float64)
         liftable = np.array([
@@ -2047,7 +2113,8 @@ def plan_annotations(
             # a large, unoutlined feature a line-height away from its marker.
             "radius_px": marker_radius_px(float(radius[index]), font_px),
             "width": estimate_text_width(
-                _display_label(features[index], language, satellite), font_px)
+                _display_label(features[index], language, satellite,
+                               crater_suffix), font_px)
             + 2.0 * padding,
             "height": label_height,
             "priority": order,
@@ -2100,7 +2167,7 @@ def plan_annotations(
     for _score, index, _family_name in forced_candidates:
         if index in placements:
             continue
-        text = _display_label(features[index], language, satellite)
+        text = _display_label(features[index], language, satellite, crater_suffix)
         width = estimate_text_width(text, font_px) + 2.0 * padding
         height = label_height
         box = None
@@ -2125,7 +2192,7 @@ def plan_annotations(
     unplaced = 0
     for score, index, _family_name in chosen:
         feature = features[index]
-        text = _display_label(feature, language, satellite)
+        text = _display_label(feature, language, satellite, crater_suffix)
         width = estimate_text_width(text, font_px) + 2.0 * padding
         marker = min(float(radius[index]), max_marker)
         rect = placements.get(index)
@@ -2246,6 +2313,8 @@ def plan_annotations(
                 )
             )
 
+    items = _attach_catalogue_outlines(
+        frame, items, terrain=terrain, terrain_level=terrain_level)
     return AnnotationPlan(
         frame=frame,
         items=tuple(items),
@@ -2260,6 +2329,92 @@ def plan_annotations(
         related=related,
     )
 
+
+
+def _catalogue_outline(name_en: str):
+    """(points, closed) for a catalogue outline, or (None, False).
+
+    Circles are left to :func:`rim_outline`; only the features that model does
+    not cover come back here.
+    """
+    entry = outline_for(name_en)
+    if not entry or entry.get("bbox_only"):
+        return None, False
+    kind = entry.get("kind")
+    if kind in ("line", "centerline"):
+        path = entry.get("path") or []
+        return (path, False) if len(path) >= 2 else (None, False)
+    if kind == "point":
+        geometry = entry.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") == "Polygon" and coordinates:
+            ring = coordinates[0]
+        elif geometry.get("type") == "MultiPolygon" and coordinates:
+            ring = coordinates[0][0]
+        else:
+            return None, False
+        return (ring, True) if len(ring) >= 3 else (None, False)
+    return None, False
+
+
+def _attach_catalogue_outlines(
+    frame: FrameProjection, items: Sequence[Annotation],
+    *, terrain: Optional[MoonTerrain] = None,
+    terrain_level: Optional[int] = None,
+) -> List[Annotation]:
+    """Project each feature's IAU outline into frame pixels.
+
+    A path that runs over the limb is dropped whole rather than clipped: half a
+    rille drawn to the edge of the disk would read as a feature that stops
+    there.  The trace is projected at the **ground elevation under each point**
+    -- not on the reference sphere -- because that is where the renderer drew
+    it.  Near the limb a mountain a few kilometres high projects outward from
+    the sphere by several pixels, which is exactly the offset the rilles and
+    ridges showed while the crater rims (already lifted by ``rim_outline``)
+    lined up.
+    """
+    lifted: List[Annotation] = []
+    level = _terrain_level(terrain, frame, terrain_level) if terrain is not None else None
+    for item in items:
+        if item.outline_path is not None:
+            lifted.append(item)
+            continue
+        points, closed = _catalogue_outline(item.name_en)
+        if not points:
+            lifted.append(item)
+            continue
+        lat = np.array([point[1] for point in points], dtype=np.float64)
+        lon = np.array([point[0] for point in points], dtype=np.float64)
+        try:
+            if terrain is not None:
+                heights = np.nan_to_num(
+                    np.asarray(terrain.height_km(lon, lat, int(level)),
+                               dtype=np.float64),
+                    nan=0.0,
+                )
+                projected = frame.project(lat, lon, heights)
+            else:
+                projected = frame.project(lat, lon)
+        except Exception:
+            lifted.append(item)
+            continue
+        facing = np.asarray(projected["facing"], dtype=bool)
+        if facing.size and not bool(facing.all()):
+            lifted.append(item)
+            continue
+        path = tuple(
+            (float(x), float(y))
+            for x, y in zip(projected["x"], projected["y"])
+        )
+        if len(path) >= 2:
+            # The path rides alongside ``outline`` rather than replacing it:
+            # the projected rim is still the reference circle for the classes
+            # that have one, and callers pick the shape they want to paint.
+            lifted.append(replace(item, outline_path=path,
+                                  outline_closed=closed))
+        else:
+            lifted.append(item)
+    return lifted
 
 #: Directions a label is tried in, as (across, along) in screen axes where
 #: +x is right and +y is down.  Right first, then left: a name reads outwards
