@@ -196,6 +196,9 @@ const state = {
   hover: null,
   language: 'zh',
   density: {},
+  densityGate: null,
+  densityGateSource: null,
+  densityGateKey: '',
   projection: 'equirect',
   lighting: null,
   lightingOn: true,
@@ -3543,13 +3546,56 @@ function densityIsMax() {
   return Object.values(state.density || {}).some((value) => Number(value) >= 3.5);
 }
 
-/** A deterministic per-class density gate, so a class does not flicker. */
+/** The set of features this density keeps, ranked rather than hashed.
+ *
+ *  A random gate at 80 % could hide a main crater while keeping its lettered
+ *  satellite, which is exactly what the reader saw.  Each class is sorted by
+ *  priority tier and then by diameter, and the first `density` share is kept:
+ *  parents before satellites, large before small.  Tier 0 is an always-on
+ *  overlay and never enters the gate.
+ */
+function densityGateSet() {
+  const key = JSON.stringify(state.density || {});
+  if (state.densityGate
+      && state.densityGateSource === state.features
+      && state.densityGateKey === key) {
+    return state.densityGate;
+  }
+  const keep = new Set();
+  const byClass = new Map();
+  for (const feature of state.features || []) {
+    let group = byClass.get(feature.class);
+    if (!group) {
+      group = [];
+      byClass.set(feature.class, group);
+    }
+    group.push(feature);
+  }
+  for (const [className, rows] of byClass) {
+    const density = Number(state.density[className] ?? 1);
+    if (density >= 1) {
+      for (const feature of rows) keep.add(feature);
+      continue;
+    }
+    if (!(density > 0)) continue;
+    const ranked = rows.slice().sort((left, right) => (
+      labelTier(left) - labelTier(right)
+      || (Number(right.diameter_km) || 0) - (Number(left.diameter_km) || 0)
+      || String(left.name_en || '').localeCompare(String(right.name_en || ''))
+    ));
+    const count = Math.max(0, Math.min(ranked.length,
+      Math.round(density * ranked.length)));
+    for (let index = 0; index < count; index += 1) keep.add(ranked[index]);
+  }
+  state.densityGate = keep;
+  state.densityGateSource = state.features;
+  state.densityGateKey = key;
+  return keep;
+}
+
 function densityPasses(feature) {
-  const density = state.density[feature.class] ?? 1;
-  if (density >= 1) return true;
-  if (density <= 0) return false;
-  const hash = ((Number(feature.id) + 1) * 2654435761) >>> 0;
-  return (hash % 1000) < density * 1000;
+  if (labelTier(feature) === 0) return true;
+  return densityGateSet().has(feature);
 }
 
 /** The lon/lat box the globe currently shows, for the catalogue request.
@@ -3725,15 +3771,34 @@ function insideScreen(point, margin) {
  * the reader zoomed in to look at them.
  */
 function outlineOnScreen(feature, margin) {
+  return !!visibleOutlineAnchor(feature, margin);
+}
+
+/** The visible piece of a feature's outline nearest the middle of the view.
+ *
+ *  A long rille or mountain chain can run through the frame with its catalogue
+ *  centre outside it.  Its caption then belongs on the visible piece, not at a
+ *  centre that is off-picture.
+ */
+function visibleOutlineAnchor(feature, margin) {
   const outline = feature && feature.outline;
   const points = outline && (outline.path || outline.ring);
-  if (!points || points.length < 2) return false;
+  if (!points || points.length < 2) return null;
   const step = Math.max(1, Math.floor(points.length / 96));
+  const middleX = state.width / 2;
+  const middleY = state.height / 2;
+  let best = null;
+  let bestDistance = Infinity;
   for (let index = 0; index < points.length; index += step) {
     const point = lonlatToScreen(points[index][0], points[index][1]);
-    if (point.visible !== false && insideScreen(point, margin)) return true;
+    if (point.visible === false || !insideScreen(point, margin)) continue;
+    const distance = (point.x - middleX) ** 2 + (point.y - middleY) ** 2;
+    if (distance < bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
   }
-  return false;
+  return best;
 }
 
 /** Font size for the map's names, or the reader's typed value. */
@@ -3746,6 +3811,21 @@ function labelFontPx() {
 function labelColourFor(feature) {
   if (!state.labelColour) return state.textColor || '#eef2ff';
   return LAYER_COLORS[feature.class] || '#c9d4e6';
+}
+
+/** The colour of the *name*: a main crater is white, its satellites are not.
+ *
+ *  The marker and the rim keep the class colour -- this is a typographic
+ *  distinction, not a second category colour.
+ */
+function labelTextColourFor(feature) {
+  if (state.labelColour && feature && feature.class === 'crater'
+      && !satelliteLetter(feature)) {
+    // Brighter and cooler than the satellite's class blue, without losing the
+    // blue family altogether.
+    return '#e6f4ff';
+  }
+  return labelColourFor(feature);
 }
 
 /** The line dash for 线条. */
@@ -3774,6 +3854,11 @@ function labelTier(feature) {
 
 /** Caption size by priority tier: a nudge, except 月海 which is much larger. */
 function labelFontFor(feature) {
+  if (feature && feature.class === 'crater') {
+    // The parent is a size above the base and the satellite half a size below,
+    // so the relationship is visible without reading the letter.
+    return Math.max(6, labelFontPx() + (satelliteLetter(feature) ? -0.5 : 1));
+  }
   const tier = labelTier(feature);
   const delta = tier === 0 ? 1.0
     : tier === 1 ? 3.5
@@ -3876,8 +3961,10 @@ function drawFeatures() {
     // Tier 0 is an overlay list: density never hides it.
     if (tier !== 0 && !densityPasses(feature)) continue;
     const pixels = featurePixels(feature);
-    if (!insideScreen(pixels.screen, 30) && !outlineOnScreen(feature, 30)) continue;
-    items.push({ feature, ...pixels, tier });
+    const centreVisible = insideScreen(pixels.screen, 0);
+    const anchor = centreVisible ? null : visibleOutlineAnchor(feature, 30);
+    if (!centreVisible && !anchor) continue;
+    items.push({ feature, ...pixels, tier, anchor, partial: !centreVisible && !!anchor });
   }
   items.sort((left, right) => left.tier - right.tier
     || right.feature.diameter_km - left.feature.diameter_km);
@@ -4041,7 +4128,16 @@ function drawFeatureOutline(item) {
     strokeRim(ring.segments, feature);
     return true;
   }
-  if (!outline) return false;
+  if (!outline) {
+    // 大型撞击盆地: the IAU download has no basin polygons, so the circle
+    // comes from the gazetteer diameter as it always did.  Without this the
+    // class lost its ring when the catalogue outline became the first choice.
+    if (feature.class !== 'basin') return false;
+    const ring = featureRimSegments(feature);
+    if (!ring) return false;
+    strokeRim(ring.segments, feature);
+    return true;
+  }
   // 显示线状地貌轮廓: the open paths (rilles, ridges, valleys) have their own
   // switch; closed rings are area outlines.
   if (!state.linearOutlines
@@ -4316,8 +4412,8 @@ function drawFeatureMarker(item) {
   ctx.save();
   // 轮廓: the catalogue's own shape — circle, traced path or ring.  A feature
   // with no outline keeps its marker so it is still locatable.
-  if (state.outlines && (state.roundOutlines || feature.outline)
-      && state.outlineStyle !== 'none') {
+  if (state.outlines && (state.roundOutlines || feature.outline
+      || feature.class === 'basin') && state.outlineStyle !== 'none') {
     rimDrawn = drawFeatureOutline(item);
   }
   if (feature.class === 'statio') {
@@ -4360,13 +4456,14 @@ function drawFeatureMarker(item) {
 }
 
 function placeFeatureLabel(item, occupied, force = false) {
-  const { feature, screen, radius } = item;
-  const colour = labelColourFor(feature);
+  const { feature, radius } = item;
+  const screen = item.anchor || item.screen;
+  const colour = labelTextColourFor(feature);
   const text = featureName(feature);
   if (!text) return null;
   const zoom = viewZoom();
   const pointVisible = POINT_CLASSES.has(feature.class) && zoom >= 2;
-  const visible = force || densityIsMax() || zoom >= 3
+  const visible = force || item.partial || densityIsMax() || zoom >= 3
     || feature.diameter_km >= 45 || pointVisible;
   if (!visible) return null;
   const fontPx = labelFontFor(feature);
@@ -4391,7 +4488,8 @@ function placeFeatureLabel(item, occupied, force = false) {
   // when that ring is actually drawn.  Using the *apparent* radius when the
   // ring is off pushed names of large maria a whole feature away from their
   // point.
-  const ringDrawn = state.outlines && !!feature.outline
+  const ringDrawn = state.outlines
+    && (!!feature.outline || feature.class === 'basin')
     && state.outlineStyle !== 'none';
   // Point features put their name immediately to the right of the locator, so
   // the first character is the one nearest the point.  The ring, when drawn, is
@@ -5111,8 +5209,8 @@ function drawMapMeasureChart() {
   ctx.fillText(`最高 ${Number(profile.max_km).toFixed(2)}　最低 ${Number(profile.min_km).toFixed(2)}`,
     width - 6, 2);
   ctx.textBaseline = 'bottom';
-  ctx.textAlign = 'right';
-  ctx.fillText('距离 km', width - 6, height - 1);
+  ctx.textAlign = 'center';
+  ctx.fillText('距离 km', (x0 + x1) / 2, height - 1);
 }
 
 /** Distance from a point to one screen-space segment. */
@@ -5648,7 +5746,8 @@ async function runSearch(event) {
 
 /* ── manual anchors ────────────────────────────────────────────────────────
  *
- * Ctrl/⌘-click drops a numbered anchor, exactly like the full-disk page.  The
+ * Shift-click drops a numbered anchor.  In measurement mode the tool owns
+ * Shift-drag, so the manual anchor steps aside.  The
  * caption is the reader's: double-click renames it, dragging moves it.  The
  * anchors are stored by lon/lat, so they stay on the ground through pans and
  * projection changes.
@@ -5854,7 +5953,7 @@ stage.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
-  if (event.ctrlKey || event.metaKey) {
+  if (event.shiftKey) {
     addManualMarkAt(screenToLonLat(point.x, point.y));
     event.preventDefault();
     return;

@@ -144,9 +144,12 @@
         </dl>
       </div>
     </div>
-    <!-- 实验功能：属于「月相模拟图」这一栏，放在整条月相读数（图 + 文字）的
-         下方，而不是压在 72 px 的月相图下面。 -->
-    <button class="ghost mini experiment-open experiment-entry" id="experiment-open" title="新功能调试">实验功能</button>
+    <!-- 实验功能：属于「月相模拟图」这一栏，放在整条月相读数
+         （图 + 文字）的下方，而不是压在 72 px 的月相图下面。 -->
+    <div class="experiment-entry-row">
+      <button class="ghost mini experiment-open" id="experiment-open"
+              title="实验功能：月面点太阳高度 / 计算器 / 裸眼3D">实验功能</button>
+    </div>
 
   </aside>
 
@@ -1869,129 +1872,350 @@
   </div>
 </div>
 
-<!-- ── 实验功能：月面点太阳高度与方位角 ───────────────────────────────
-     一个独立浮窗：上方是月面经纬度与时间范围，左下是曲线，右下是表格。
-     它回答的是核心库 lunar_surface_solar 的同一个问题，只是把一串时刻
-     画了出来。 -->
+<!-- ── 实验功能：月面点太阳高度 / 计算器 ───────────────────────────────
+     两个标签页共用同一个浮窗；原来的月面点太阳高度只是第一个标签页。 -->
 <div class="sky-backdrop" id="experiment-backdrop" hidden>
   <div class="sky-window experiment-window" id="experiment-window" role="dialog"
        aria-modal="true" aria-labelledby="experiment-heading">
+    <!-- 八个边框手柄：四条边、四个角，都可以拖动改窗口大小。 -->
+    <div class="sky-resize" data-sky-resize="n"></div>
+    <div class="sky-resize" data-sky-resize="s"></div>
+    <div class="sky-resize" data-sky-resize="e"></div>
+    <div class="sky-resize" data-sky-resize="w"></div>
+    <div class="sky-resize" data-sky-resize="ne"></div>
+    <div class="sky-resize" data-sky-resize="nw"></div>
+    <div class="sky-resize" data-sky-resize="se"></div>
+    <div class="sky-resize" data-sky-resize="sw"></div>
     <header class="sky-head" id="experiment-head">
       <div class="sky-heading" id="experiment-heading"
-           title="拖动标题栏移动窗口；拖动右下角改变大小">实验功能 · 月面点太阳高度
-        <span class="en">Surface sun</span></div>
+           title="拖动标题栏移动窗口；拖动四边或四角改变大小">实验功能
+        <span class="en">Lab</span></div>
       <div class="sky-head-tools">
         <span class="sky-badge" id="experiment-badge">月面点</span>
         <button class="ghost" id="experiment-reset-view"
                 title="把两轴范围恢复到自动适配（也可双击左图）">坐标复位</button>
-        <button class="ghost" id="experiment-refresh" title="按当前经纬度与时间范围重新计算">重新计算</button>
         <button class="ghost icon" id="experiment-close" title="关闭实验功能" aria-label="关闭">×</button>
       </div>
     </header>
-    <div class="sky-controls experiment-controls">
-      <label>月面经度 °E
-        <input type="number" id="experiment-lon" value="0" step="0.01">
-      </label>
-      <label>月面纬度 °N
-        <input type="number" id="experiment-lat" value="0" step="0.01">
-      </label>
-      <label class="experiment-mark-pick">手动标注点
-        <select id="experiment-mark" title="把主界面上 Ctrl / ⌘ + 点击留下的手动标注点读到这里">
-          <option value="">—</option>
+    <div class="experiment-tabs" role="tablist" aria-label="实验功能">
+      <button class="tab" id="experiment-tab-sun" data-experiment-tab="sun"
+              role="tab" aria-selected="true" aria-pressed="true">月面点太阳高度</button>
+      <button class="tab" id="experiment-tab-calc" data-experiment-tab="calc"
+              role="tab" aria-selected="false" aria-pressed="false">计算器</button>
+      <button class="tab" id="experiment-tab-naked" data-experiment-tab="naked"
+              role="tab" aria-selected="false" aria-pressed="false">裸眼3D</button>
+    </div>
+
+    <section class="experiment-pane" id="experiment-pane-sun" role="tabpanel"
+             aria-labelledby="experiment-tab-sun">
+      <div class="sky-controls experiment-controls experiment-row-primary">
+        <label>月面经度 °E
+          <input type="number" id="experiment-lon" value="0" step="0.01">
+        </label>
+        <label>月面纬度 °N
+          <input type="number" id="experiment-lat" value="0" step="0.01">
+        </label>
+        <label class="experiment-mark-pick">手动标注点
+          <select id="experiment-mark" title="把主界面上 Ctrl / ⌘ + 点击留下的手动标注点读到这里">
+            <option value="">—</option>
+          </select>
+        </label>
+        <!-- 太阳高度筛选: the calculation itself is behind the button, so a
+             reader can set the range without launching a request on every
+             keystroke. -->
+        <span class="experiment-divider" aria-hidden="true"></span>
+        <span class="experiment-alt-filter">
+          <span class="experiment-filter-label">太阳高度范围：</span>
+          <input type="number" id="experiment-filter-min" value="-90"
+                 min="-90" max="90" step="0.1">
+          <span class="experiment-filter-dash">–</span>
+          <input type="number" id="experiment-filter-max" value="90"
+                 min="-90" max="90" step="0.1">
+          <span class="unit">°</span>
+          <button class="ghost experiment-filter" id="experiment-filter"
+                  title="按时间范围与太阳高度范围计算筛选结果">筛选</button>
+        </span>
+      </div>
+      <div class="sky-controls experiment-controls experiment-row-time">
+        <label>开始
+          <input type="datetime-local" id="experiment-start" step="60">
+        </label>
+        <label>结束
+          <input type="datetime-local" id="experiment-end" step="60">
+        </label>
+        <button class="ghost mini" id="experiment-from-main" title="同步主界面的日期与时刻">取主界面时刻</button>
+        <button class="ghost mini" id="experiment-to-main"
+                title="把右侧表格里选中那一行的时间设为主界面时间">同步选中时间到主界面</button>
+        <button class="ghost mini" id="experiment-step-toggle"
+                aria-expanded="false" title="展开或收起时间步长">时间步长</button>
+        <button class="ghost mini" id="experiment-range-toggle"
+                aria-expanded="false" title="展开或收起坐标轴范围">坐标</button>
+      </div>
+      <div class="experiment-range-bar">
+        <!-- 时间步长 is the same ladder of nudge buttons the curve window uses:
+             month/day/hour/minute, both directions.  It moves the whole range,
+             so the sampling interval stays a detail of the calculation. -->
+        <span class="experiment-step-wrap" id="experiment-step-wrap" hidden>
+          <button class="ghost mini" data-nudge="-1M" data-range="experiment"
+                  title="整个范围往前一个月">-1M</button>
+          <button class="ghost mini" data-nudge="-1d" data-range="experiment"
+                  title="整个范围往前一天">-1d</button>
+          <button class="ghost mini" data-nudge="-1h" data-range="experiment"
+                  title="整个范围往前一小时">-1h</button>
+          <button class="ghost mini" data-nudge="-1m" data-range="experiment"
+                  title="整个范围往前一分钟">-1m</button>
+          <button class="ghost mini" data-nudge="+1m" data-range="experiment"
+                  title="整个范围往后一分钟">+1m</button>
+          <button class="ghost mini" data-nudge="+1h" data-range="experiment"
+                  title="整个范围往后一小时">+1h</button>
+          <button class="ghost mini" data-nudge="+1d" data-range="experiment"
+                  title="整个范围往后一天">+1d</button>
+          <button class="ghost mini" data-nudge="+1M" data-range="experiment"
+                  title="整个范围往后一个月">+1M</button>
+        </span>
+        <!-- 坐标 is the same idea as the curve window's limits panel: X and Y
+             limits, reverse axes and apply.  The reset itself sits in the
+             window's top-right, where it is reachable without opening this
+             panel. -->
+        <span class="experiment-range" id="experiment-range" hidden>
+          <label class="check inline" title="把横轴从右向左显示">
+            <input type="checkbox" id="experiment-reverse-x">
+            <span>X 轴反向</span>
+          </label>
+          <label class="check inline" title="把高度与方位两根纵轴都从上向下显示">
+            <input type="checkbox" id="experiment-reverse-y">
+            <span>Y 轴反向</span>
+          </label>
+          <label>X
+            <input type="number" id="experiment-xmin" step="0.1"> –
+            <input type="number" id="experiment-xmax" step="0.1">
+            <span class="unit">h</span>
+          </label>
+          <label>高度
+            <input type="number" id="experiment-altmin" step="1"> –
+            <input type="number" id="experiment-altmax" step="1">
+            <span class="unit">°</span>
+          </label>
+          <label>方位
+            <input type="number" id="experiment-azmin" step="1"> –
+            <input type="number" id="experiment-azmax" step="1">
+            <span class="unit">°</span>
+          </label>
+          <button class="ghost mini" id="experiment-apply-range"
+                  title="应用输入的坐标范围">应用范围</button>
+        </span>
+      </div>
+      <div class="experiment-body">
+        <div class="experiment-plot">
+          <canvas id="experiment-canvas"></canvas>
+          <div class="sky-empty" id="experiment-empty" hidden>—</div>
+        </div>
+        <div class="experiment-table-wrap">
+          <table class="event-table experiment-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-experiment-sort="time">本地时间</th>
+                <th class="sortable" data-experiment-sort="altitude">太阳高度</th>
+                <th class="sortable" data-experiment-sort="azimuth">方位角</th>
+                <th class="sortable" data-experiment-sort="illuminated"
+                    title="太阳高度大于 0° 时该点被阳光直接照到；否则在阴影里">日照</th>
+              </tr>
+            </thead>
+            <tbody id="experiment-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <footer class="sky-foot">
+        <span id="experiment-summary">—</span>
+        <span class="sky-hint">点击表格一行在左图标记 · 拖动平移 · 滚轮缩放 · 拖动边框调范围 · 双击复位 · 绿线为地平线 · 高度为月面当地地平线以上的角度 · 方位角自当地北向东</span>
+      </footer>
+    </section>
+
+    <section class="experiment-pane experiment-calc" id="experiment-pane-calc"
+             role="tabpanel" aria-labelledby="experiment-tab-calc" hidden>
+      <div class="calc-top">
+        <label>观测时间
+          <input type="datetime-local" id="calc-when" step="60">
+        </label>
+        <button class="ghost mini" id="calc-from-main"
+                title="把观测时间设为主界面当前时间">同步主界面时间</button>
+        <button class="ghost mini" id="calc-to-main" disabled
+                title="把结果表选中行的时间设为主界面时间">同步选中时间到主界面</button>
+        <label>纬度 °N
+          <input type="number" id="calc-lat" value="30" step="0.0001">
+        </label>
+        <label>经度 °E
+          <input type="number" id="calc-lon" value="120" step="0.0001">
+        </label>
+        <label class="calc-mark-pick">手动标注点
+          <select id="calc-mark" title="从主界面的手动标注点填入经纬度"></select>
+        </label>
+        <button class="ghost calc-run" id="calc-info-run">计算</button>
+      </div>
+      <div class="calc-body" id="calc-body">
+        <div class="calc-left">
+          <div class="calc-phase">
+            <canvas id="calc-phase-canvas" width="72" height="72"></canvas>
+            <div class="calc-phase-text">
+              <b id="calc-phase-name">月相</b>
+              <span id="calc-phase-age">—</span>
+              <span id="calc-phase-lunar">—</span>
+            </div>
+          </div>
+          <dl class="readout calc-readout" id="calc-moon-info">
+            <dt><span class="zh">月相</span><span class="en">Phase</span></dt><dd id="calc-mi-phase-name">—</dd>
+            <dt id="calc-mi-eclipse-dt" hidden><span class="zh">月食</span><span class="en">Eclipse</span></dt>
+            <dd id="calc-mi-eclipse-dd" hidden>—</dd>
+            <dt><span class="zh">照亮比例</span><span class="en">Illumination</span></dt><dd><i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="calc-mi-illum">—</span></dd>
+            <dt><span class="zh">相位角</span><span class="en">Phase angle</span></dt><dd><i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="calc-mi-phase">—</span></dd>
+            <dt><span class="zh">月龄</span><span class="en">Age</span></dt><dd id="calc-mi-age">—</dd>
+            <dt><span class="zh">天平动</span><span class="en">Libration</span></dt><dd id="calc-mi-lib">—</dd>
+            <dt><span class="zh">日下点</span><span class="en">Sub-solar</span></dt><dd id="calc-mi-subsolar">—</dd>
+            <dt><span class="zh">余经度</span><span class="en">Colongitude</span></dt><dd id="calc-mi-colong">—</dd>
+            <dt><span class="zh">地心距</span><span class="en">Distance</span></dt><dd id="calc-mi-dist"><i class="ref ref-geo" title="地心：从地心看"><span class="zh">地</span><span class="en">G</span></i><span id="calc-mi-dist-geo">—</span> / <i class="ref" title="站心：从观测地看"><span class="zh">站</span><span class="en">T</span></i><span id="calc-mi-dist-topo">—</span> km</dd>
+            <dt><span class="zh">视直径</span><span class="en">Angular size</span></dt><dd id="calc-mi-diam">—</dd>
+            <dt><span class="zh">视半径</span><span class="en">Angular radius</span></dt><dd id="calc-mi-rad">—</dd>
+            <dt><span class="zh">高度</span><span class="en">Altitude</span></dt><dd id="calc-mi-alt">—</dd>
+            <dt><span class="zh">方位角</span><span class="en">Azimuth</span></dt><dd id="calc-mi-az">—</dd>
+            <dt><span class="zh">赤经</span><span class="en">Right ascension</span></dt><dd id="calc-mi-ra">—</dd>
+            <dt><span class="zh">赤纬</span><span class="en">Declination</span></dt><dd id="calc-mi-dec">—</dd>
+            <dt><span class="zh">与太阳距角</span><span class="en">Elongation</span></dt><dd id="calc-mi-elong">—</dd>
+            <dt><span class="zh">太阳高度</span><span class="en">Sun altitude</span></dt><dd id="calc-mi-sunalt">—</dd>
+            <dt><span class="zh">地照</span><span class="en">Earthshine</span></dt><dd id="calc-mi-earth">—</dd>
+            <dt><span class="zh">轨道速度</span><span class="en">Velocity</span></dt><dd id="calc-mi-vel">—</dd>
+            <dt><span class="zh">光行时</span><span class="en">Light time</span></dt><dd id="calc-mi-light">—</dd>
+            <dt class="sep"><span class="zh">月出</span><span class="en">Moonrise</span></dt><dd id="calc-mi-rise">—</dd>
+            <dt><span class="zh">中天</span><span class="en">Transit</span></dt><dd id="calc-mi-transit">—</dd>
+            <dt><span class="zh">中天高度</span><span class="en">Transit alt</span></dt><dd id="calc-mi-transit-alt">—</dd>
+            <dt><span class="zh">月落</span><span class="en">Moonset</span></dt><dd id="calc-mi-set">—</dd>
+            <dt><span class="zh">下次月出</span><span class="en">Next rise</span></dt><dd id="calc-mi-nextrise">—</dd>
+          </dl>
+        </div>
+        <div class="calc-splitter" id="calc-splitter"
+             title="拖动调整左右栏宽度"></div>
+        <div class="calc-right">
+          <div class="calc-query">
+            <select id="calc-scope" title="上一次 / 下一次 不配合时间段；过去 / 未来 需要时间段">
+              <option value="previous">上一次</option>
+              <option value="next" selected>下一次</option>
+              <option value="past">过去</option>
+              <option value="future">未来</option>
+            </select>
+            <input type="number" id="calc-span-value" value="1" min="1" max="52" step="1"
+                   title="时间段的长度">
+            <select id="calc-span-unit" title="时间段的单位">
+              <option value="week">周</option>
+              <option value="month">月</option>
+              <option value="year" selected>年</option>
+            </select>
+            <span class="calc-word">内</span>
+            <select id="calc-target" title="要比较的月球量；高度角的最高/最低在余经度与观测时刻相同的月亮中挑选">
+              <option value="age" selected>月龄</option>
+              <option value="illumination">照明度</option>
+              <option value="libration">天平动</option>
+              <option value="shadow">阴影带</option>
+              <option value="altitude">高度角</option>
+            </select>
+            <select id="calc-mode" title="匹配方式">
+              <option value="same" selected>相同</option>
+              <option value="similar">相似</option>
+              <option value="highest">最高</option>
+              <option value="lowest">最低</option>
+            </select>
+            <span class="calc-word">的时间</span>
+            <label class="calc-error" id="calc-error-label" title="相似检索的允许误差">误差
+              <input type="number" id="calc-error" value="1" min="0" step="0.1">
+              <span id="calc-error-unit">天</span>
+            </label>
+          </div>
+          <div class="calc-table-wrap">
+            <table class="event-table calc-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>月龄</th>
+                  <th>照明度</th>
+                  <th>方位角</th>
+                  <th>高度</th>
+                  <th>天平动</th>
+                  <th>角直径（角分）</th>
+                  <th class="calc-colong" id="calc-colong-head" hidden>余经度</th>
+                </tr>
+              </thead>
+              <tbody id="calc-rows"></tbody>
+            </table>
+          </div>
+          <div class="calc-summary" id="calc-summary">—</div>
+        </div>
+      </div>
+    </section>
+    <section class="experiment-pane experiment-naked" id="experiment-pane-naked"
+             role="tabpanel" aria-labelledby="experiment-tab-naked" hidden>
+    <div class="naked-eye-top">
+      <div class="naked-eye-controls">
+        <label>时间
+          <input type="datetime-local" id="naked-eye-time" step="60">
+        </label>
+        <label title="第二张图相对第一张图的时间差，默认 1 小时">时间差
+          <input type="number" id="naked-eye-time-delta" value="1"
+                 step="0.1" min="-720" max="720">
+          <span class="naked-eye-unit">h</span>
+        </label>
+        <button class="ghost mini" id="naked-eye-from-main"
+                title="把时间设为主界面当前时间">同步主界面时间</button>
+        <label title="两个视点的总间距，单位是地球半径；2 等于地球直径">基线
+          <input type="number" id="naked-eye-baseline" value="4"
+                 min="2" max="20" step="0.5">
+          <span class="naked-eye-unit">× 地球半径</span>
+        </label>
+        <label title="南北极的基线几乎垂直于月球视线，视差最明显；赤道方向随时间可能接近视线">方向
+          <select id="naked-eye-direction">
+            <option value="poles" selected>南北极</option>
+            <option value="equator">赤道 0°/180°</option>
+          </select>
+        </label>
+        <label title="选择两张图采用的高程（DEM）数据源">数据源
+          <select id="naked-eye-source"></select>
+        </label>
+        <label title="每像素对应的月面物理尺度；下拉档位与模拟设置相同">物理分辨率
+          <span class="pick-row">
+            <select id="naked-eye-kmpx-preset"></select>
+            <input type="number" id="naked-eye-kmpx" step="0.01" min="0" hidden>
+          </span>
+        </label>
+        <button class="gold naked-eye-generate" id="naked-eye-generate">生成图片</button>
+      </div>
+      <div class="naked-eye-info" id="naked-eye-info">
+        <div class="naked-eye-info-row">
+          <span class="naked-eye-info-key">点1</span>
+          <span id="naked-eye-info-1">—</span>
+        </div>
+        <div class="naked-eye-info-row">
+          <span class="naked-eye-info-key">点2</span>
+          <span id="naked-eye-info-2">—</span>
+        </div>
+        <div class="naked-eye-delta" id="naked-eye-delta">—</div>
+      </div>
+    </div>
+    <div class="naked-eye-stage" id="naked-eye-stage">
+      <canvas id="naked-eye-canvas" hidden></canvas>
+      <div class="sky-empty" id="naked-eye-empty">—</div>
+    </div>
+    <footer class="naked-eye-save">
+      <span class="naked-eye-status" id="naked-eye-status">—</span>
+      <label class="check inline" title="按长边或短边指定保存图片的分辨率">
+        保存分辨率
+        <select id="naked-eye-save-ref">
+          <option value="long" selected>长边</option>
+          <option value="short">短边</option>
         </select>
+        <input type="number" id="naked-eye-save-px" value="2400"
+               min="320" max="10000" step="10">
+        <span class="unit">px</span>
       </label>
-      <label>开始
-        <input type="datetime-local" id="experiment-start" step="60">
-      </label>
-      <label>结束
-        <input type="datetime-local" id="experiment-end" step="60">
-      </label>
-      <button class="ghost mini" id="experiment-from-main" title="同步主界面的日期与时刻">取主界面时刻</button>
-      <button class="ghost mini" id="experiment-to-main"
-              title="把右侧表格里选中那一行的时间设为主界面时间">同步选中时间到主界面</button>
-      <button class="ghost mini" id="experiment-step-toggle"
-              aria-expanded="false" title="展开或收起时间步长">时间步长</button>
-      <button class="ghost mini" id="experiment-range-toggle"
-              aria-expanded="false" title="展开或收起坐标轴范围">坐标</button>
-    </div>
-    <div class="experiment-range-bar">
-      <!-- 时间步长 is the same ladder of nudge buttons the curve window uses:
-           month/day/hour/minute, both directions.  It moves the whole range,
-           so the sampling interval stays a detail of the calculation. -->
-      <span class="experiment-step-wrap" id="experiment-step-wrap" hidden>
-        <button class="ghost mini" data-nudge="-1M" data-range="experiment"
-                title="整个范围往前一个月">-1M</button>
-        <button class="ghost mini" data-nudge="-1d" data-range="experiment"
-                title="整个范围往前一天">-1d</button>
-        <button class="ghost mini" data-nudge="-1h" data-range="experiment"
-                title="整个范围往前一小时">-1h</button>
-        <button class="ghost mini" data-nudge="-1m" data-range="experiment"
-                title="整个范围往前一分钟">-1m</button>
-        <button class="ghost mini" data-nudge="+1m" data-range="experiment"
-                title="整个范围往后一分钟">+1m</button>
-        <button class="ghost mini" data-nudge="+1h" data-range="experiment"
-                title="整个范围往后一小时">+1h</button>
-        <button class="ghost mini" data-nudge="+1d" data-range="experiment"
-                title="整个范围往后一天">+1d</button>
-        <button class="ghost mini" data-nudge="+1M" data-range="experiment"
-                title="整个范围往后一个月">+1M</button>
-      </span>
-      <!-- 坐标 is the same idea as the curve window's limits panel: X and Y
-           limits, reverse axes and apply.  The reset itself sits in the
-           window's top-right, where it is reachable without opening this
-           panel. -->
-      <span class="experiment-range" id="experiment-range" hidden>
-        <label class="check inline" title="把横轴从右向左显示">
-          <input type="checkbox" id="experiment-reverse-x">
-          <span>X 轴反向</span>
-        </label>
-        <label class="check inline" title="把高度与方位两根纵轴都从上向下显示">
-          <input type="checkbox" id="experiment-reverse-y">
-          <span>Y 轴反向</span>
-        </label>
-        <label>X
-          <input type="number" id="experiment-xmin" step="0.1"> –
-          <input type="number" id="experiment-xmax" step="0.1">
-          <span class="unit">h</span>
-        </label>
-        <label>高度
-          <input type="number" id="experiment-altmin" step="1"> –
-          <input type="number" id="experiment-altmax" step="1">
-          <span class="unit">°</span>
-        </label>
-        <label>方位
-          <input type="number" id="experiment-azmin" step="1"> –
-          <input type="number" id="experiment-azmax" step="1">
-          <span class="unit">°</span>
-        </label>
-        <button class="ghost mini" id="experiment-apply-range"
-                title="应用输入的坐标范围">应用范围</button>
-      </span>
-    </div>
-    <div class="experiment-body">
-      <div class="experiment-plot">
-        <canvas id="experiment-canvas"></canvas>
-        <div class="sky-empty" id="experiment-empty" hidden>正在计算…</div>
-      </div>
-      <div class="experiment-table-wrap">
-        <table class="event-table experiment-table">
-          <thead>
-            <tr>
-              <th class="sortable" data-experiment-sort="time">本地时间</th>
-              <th class="sortable" data-experiment-sort="altitude">太阳高度</th>
-              <th class="sortable" data-experiment-sort="azimuth">方位角</th>
-              <th class="sortable" data-experiment-sort="illuminated"
-                  title="太阳高度大于 0° 时该点被阳光直接照到；否则在阴影里">日照</th>
-            </tr>
-          </thead>
-          <tbody id="experiment-rows"></tbody>
-        </table>
-      </div>
-    </div>
-    <footer class="sky-foot">
-      <span id="experiment-summary">—</span>
-      <span class="sky-hint">点击表格一行在左图标记 · 拖动平移 · 滚轮缩放 · 拖动边框调范围 · 双击复位 · 绿线为地平线 · 高度为月面当地地平线以上的角度 · 方位角自当地北向东</span>
+      <button class="gold" id="naked-eye-save" disabled>保存图像</button>
     </footer>
+    </section>
   </div>
 </div>
 

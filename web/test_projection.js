@@ -597,6 +597,7 @@ const alongPlan = {
   items: [{
     x: 300, y: 300, label: '里马', label_x: 280, label_y: 294,
     label_w: 40, label_h: 15, labelled: true, leader: false, radius_px: 2,
+    class: 'rima',
     outline_path: [[100, 300], [400, 300]], outline_closed: false,
   }],
 };
@@ -615,6 +616,7 @@ const bendPlan = {
   items: [{
     x: 200, y: 300, label: '里马', label_x: 150, label_y: 294,
     label_w: 60, label_h: 15, labelled: true, leader: false, radius_px: 2,
+    class: 'rima',
     outline_path: [[100, 300], [200, 300], [200, 400]], outline_closed: false,
   }],
 };

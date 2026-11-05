@@ -41,7 +41,7 @@ is why the umbra radius carries the conventional 2% allowance.
     as the best moment and keeps the colongitude gate at 358°.  L has its own
     band: -0.75°–0.20°, best -0.30°, fitted to the reported one-hour/three-hour/
     five-hour offsets.  L is paired with the X/V of the same sunrise train: one
-    row per X/V is named 月面X/V/L when the two windows overlap, and 月面X/V
+    row per X/V is named Lunar X/V/L when the two windows overlap, and Lunar X/V
     with the note "L不同时出现" when they do not.
 ``jewelled_handle``
     The "Jewelled Handle" (also called the Golden Handle): the bright arc where
@@ -222,9 +222,25 @@ ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
     _AnchoredRay("curtiss_cross", "Curtiss Cross",
                  -15.24, -3.94, -0.7, 0.5, 0.0,
                  colong_deg=195.0, colong_tolerance_deg=6.0, setting=True),
-    _AnchoredRay("barrow_ray", "Barrow Ray",
+    _AnchoredRay("barrow_ray", "Barrow's shaft of light",
                  8.45, 71.75, 0.1, 1.4, 0.8,
                  colong_deg=359.0, colong_tolerance_deg=5.0),
+    # The six events added in 1.7.1.  The anchors and bands are the observer's
+    # own; the rising/setting flag is part of the definition rather than a
+    # guess, because a band listed as 8°→3° is crossed on the way down.
+    _AnchoredRay("alexanders_beaded_rim", "Alexander's beaded rim",
+                 11.91, 39.42, -3.4, 2.4, -3.0),
+    _AnchoredRay("zeno_steps", "Zeno steps",
+                 74.63, 41.58, -0.8, 0.0, -0.25, setting=True),
+    _AnchoredRay("oneills_bridge", "O'Neill's Bridge",
+                 49.30, 15.17, 3.0, 8.0, 5.8, setting=True),
+    _AnchoredRay("posidonius_illuminated_rim", "Posidonius' illuminated rim",
+                 31.86, 31.93, -2.9, -1.7, -2.5,
+                 colong_deg=150.0, colong_tolerance_deg=8.0, setting=True),
+    _AnchoredRay("l_shaped_mountain", '"L"-shaped mountain',
+                 10.92, 42.95, -18.0, -15.0, -17.0),
+    _AnchoredRay("cauchys_interrupted_shadow", "Cauchy's interrupted shadow",
+                 38.32, 9.55, -4.5, 1.0, -2.8),
 )
 
 #: Events whose whole definition is a colongitude range.
@@ -255,7 +271,7 @@ KIND_LABELS = {
     "highest_moon": "最高月亮",
     "lowest_moon": "最低月亮",
     "lunar_eclipse": "月食",
-    "xvl": "月面 X/V/L",
+    "xvl": "Lunar X/V/L",
     "jewelled_handle": "Jewelled handle",
     "eyes_of_clavius": "Eyes of Clavius",
     "cheshire_moon": "Cheshire Moon（Wet Moon）",
@@ -264,7 +280,13 @@ KIND_LABELS = {
     "maginus_sunshine_ray": "Maginus Sunshine Ray",
     "rupes_recta": "Rupes Recta / Straight Wall",
     "curtiss_cross": "Curtiss Cross",
-    "barrow_ray": "Barrow Ray",
+    "barrow_ray": "Barrow's shaft of light",
+    "alexanders_beaded_rim": "Alexander's beaded rim",
+    "zeno_steps": "Zeno steps",
+    "oneills_bridge": "O'Neill's Bridge",
+    "posidonius_illuminated_rim": "Posidonius' illuminated rim",
+    "l_shaped_mountain": '"L"-shaped mountain',
+    "cauchys_interrupted_shadow": "Cauchy's interrupted shadow",
     "cassini_moon_maiden": "Cassini's Moon Maiden",
     "aries_hoofprint": "Aries' Hoofprint（Black lips）",
     "gruithuisens_lunar_city": "Gruithuisen's Lunar City",
@@ -289,8 +311,11 @@ EVENT_KINDS: Tuple[str, ...] = (
     "lunar_eclipse", "planet_conjunction", "planet_occultation",
     "xvl", "jewelled_handle", "eyes_of_clavius", "cheshire_moon",
     "platos_hook", "hesiodus_sunrise_ray", "maginus_sunshine_ray",
-    "rupes_recta", "curtiss_cross", "barrow_ray", "cassini_moon_maiden",
-    "aries_hoofprint", "gruithuisens_lunar_city",
+    "rupes_recta", "curtiss_cross", "barrow_ray",
+    "alexanders_beaded_rim", "zeno_steps", "oneills_bridge",
+    "posidonius_illuminated_rim", "l_shaped_mountain",
+    "cauchys_interrupted_shadow",
+    "cassini_moon_maiden", "aries_hoofprint", "gruithuisens_lunar_city",
     "annual_extremes", "libration_target",
 )
 
@@ -727,7 +752,7 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
     altitude, and a colongitude gate for X/V.  L uses its own altitude band
     (see :data:`LXV_SUN_ALTITUDE_MIN_DEG`) and is paired with the X/V of the
     same sunrise train.  There is **one row per X/V**: when the L window
-    overlaps it the row is named 月面X/V/L and the detail carries L's best
+    overlaps it the row is named Lunar X/V/L and the detail carries L's best
     moment; when it does not, the detail says ``L不同时出现``.  Keeping L as a
     second row made the reader compare two rows to learn that they belong to
     one sunrise.
@@ -775,7 +800,7 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
         metrics = event_metrics(observer, xv_best)
         metrics["colongitude_deg"] = _xvl_colongitude_deg(xv_best)
         if overlap > 0.0:
-            title = "月面X/V/L"
+            title = "Lunar X/V/L"
             l_time = to_utc(l_best).strftime("%H:%M")
             note = f"L 出现时刻 {l_time} UTC"
             metrics["l_best_utc"] = to_utc(l_best).isoformat()
@@ -783,7 +808,7 @@ def _xvl_events(observer: Observer, window) -> List[MoonEvent]:
             metrics["l_end_utc"] = to_utc(l_finish).isoformat()
             metrics["l_overlap"] = True
         else:
-            title = "月面X/V"
+            title = "Lunar X/V"
             note = "L不同时出现"
             metrics["l_best_utc"] = None
             metrics["l_start_utc"] = None

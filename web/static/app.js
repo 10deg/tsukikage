@@ -127,6 +127,10 @@ const state = {
     last: 0,
   },
   experimentOpen: false,
+  experimentTab: 'sun',
+  experimentWindow: null, // {left, top, width, height}; kept between opens
+  experimentWindowDrag: null,
+  experimentFilter: null, // {min, max}: the 太阳高度范围 the table is filtered by
   experiment: null,    // last /api/surface-sun payload
   experimentSeq: 0,
   experimentView: null, // {xMin,xMax,altMin,altMax,azMin,azMax} or null for auto
@@ -135,6 +139,23 @@ const state = {
   experimentSort: { key: 'time', dir: 1 }, // table sort: column and direction
   experimentSelected: null, // row clicked in the table, marked on the chart
   experimentStepOpen: false,
+  nakedEyeOpen: false,
+  nakedEyeInfo: null,       // {time, sites, items} for the two stations
+  nakedEyeInfoSeq: 0,
+  nakedEyeInfoTimer: null,
+  nakedEyeImages: null,     // {first, second, width, height, time, sites}
+  nakedEyeBusy: false,
+  nakedEyeSeq: 0,
+  calculatorInitialized: false,
+  calculatorInfo: null,
+  calculatorResult: null,
+  calculatorInfoSeq: 0,
+  calculatorQuerySeq: 0,
+  calculatorBusy: false,
+  calculatorTarget: 'age',
+  calculatorSplit: 33,
+  calculatorSplitDrag: null,
+  calculatorSelected: null,
   experimentRangeOpen: false,
   procImageTab: 'imaging', // 成像模拟 / 后期处理 / 3D模型 in the processing group
   rawComponent: null,  // component the geometry pane currently shows
@@ -179,13 +200,13 @@ const LAND_CLASSES = [
   { key: 'rima',         zh: '月溪',                 en: 'Rima',                 color: '#e09a9a' },
   { key: 'vallis',       zh: '月谷',                 en: 'Vallis',               color: '#c8a0d4' },
   { key: 'mons',         zh: '山脉',                 en: 'Mons',                 color: '#dcc98a' },
-  { key: 'dome',         zh: '穹丘',         en: 'Dome',                 color: '#c9b98a' },
   { key: 'dorsum',       zh: '山脊',                 en: 'Dorsum',               color: '#bfa886' },
   { key: 'rupes',        zh: '峭壁',                 en: 'Rupes',                color: '#d4a179' },
   { key: 'catena',       zh: '坑链',                 en: 'Catena',               color: '#9aa8cc' },
   { key: 'promontorium', zh: '海角',                 en: 'Promontorium',         color: '#9ed4b4' },
   { key: 'albedo',       zh: '反照率特征',           en: 'Albedo feature',       color: '#c9c9dc' },
   { key: 'statio',       zh: '着陆点',               en: 'Statio',               color: '#e9a86b' },
+  { key: 'dome',         zh: '穹丘',         en: 'Dome',                 color: '#c9b98a' },
   { key: 'pit',          zh: 'Lunar pits',           en: 'Lunar pit',            color: '#9fd0c0' },
   { key: 'pyroclastic',  zh: '火成碎屑', en: 'Pyroclastic',        color: '#d9a0b4' },
   { key: 'imp',          zh: '不规则月海斑块',  en: 'Irregular mare patch', color: '#bcd0a0' },
@@ -854,7 +875,6 @@ function wireRangeNudges() {
       // that now", so it follows every way the range can be moved.  The
       // experiment's nudge row moves both ends together, so it re-asks too.
       if (range.ids.some((id) => id.startsWith('anim-'))) refreshAnimationPlan();
-      if (range.ids.includes('experiment-start')) refreshExperiment();
     });
   }
 }
@@ -1208,6 +1228,26 @@ function groundSurfacePoint(camera, x, y) {
     height * camera.up0[1] + x * camera.u[1] + y * camera.v[1],
     height * camera.up0[2] + x * camera.u[2] + y * camera.v[2],
   ];
+}
+
+/** The same point, with a footprint that runs past the visible hemisphere
+ *  clamped to the limb instead of returning null.
+ *
+ *  A box can be wider than the hemisphere the reader is looking at -- most
+ *  obviously near a pole, where one edge of a large rectangle runs past the
+ *  ground the camera can see.  Returning null for every sample of that edge
+ *  made the whole side disappear; a control that stops at the limb is still a
+ *  control, and it says the truth about where the box leaves the visible cap.
+ */
+function groundSurfacePointOnDisk(camera, x, y) {
+  const limit = camera.radiusKm * 0.9995;
+  const radius = Math.hypot(x, y);
+  if (radius > limit) {
+    const scale = limit / Math.max(radius, 1e-9);
+    x *= scale;
+    y *= scale;
+  }
+  return groundSurfacePoint(camera, x, y);
 }
 
 /** Smallest sky box containing the irregular preimage of the ground box. */
@@ -3169,7 +3209,7 @@ function surfacePatchGeometry(s, ellipse) {
     corners = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
     top = at(0, -1);
   }
-  return { directions, corners, top, centre: n, surface: true };
+  return { directions, corners, top, centre: n, surface: true, rect: !ellipse };
 }
 
 function globeSelectionGeometry() {
@@ -3191,7 +3231,7 @@ function globeSelectionGeometry() {
       if (ground) {
         const { camera, halfW, halfH } = ground;
         const at = (angle) => {
-          const point = groundSurfacePoint(
+          const point = groundSurfacePointOnDisk(
             camera, Math.cos(angle) * halfW, Math.sin(angle) * halfH,
           );
           return point ? unit3(point) : null;
@@ -3208,7 +3248,7 @@ function globeSelectionGeometry() {
       if (ground) {
         const { camera, x0, x1, y0, y1 } = ground;
         const at = (x, y) => {
-          const point = groundSurfacePoint(camera, x, y);
+          const point = groundSurfacePointOnDisk(camera, x, y);
           return point ? unit3(point) : null;
         };
         const edge = (ax, ay, bx, by) => {
@@ -3227,7 +3267,9 @@ function globeSelectionGeometry() {
       }
     }
     if (centre && directions.filter(Boolean).length >= 4) {
-      return { directions, corners, top, centre, surface: true };
+      return {
+        directions, corners, top, centre, surface: true, rect: !ellipse,
+      };
     }
     return surfacePatchGeometry(s, ellipse);
   }
@@ -3272,6 +3314,7 @@ function globeSelectionGeometry() {
     if (directions.filter(Boolean).length >= 4) {
       return {
         directions, corners, top, centre: unit3(camera.up0), surface: true,
+        rect: !ellipse,
       };
     }
   }
@@ -3321,6 +3364,23 @@ function globePixelFromDirection(direction, centre = null, scale = 1) {
  * but ungrabbable.  This is the same geometry the painter uses, kept in the
  * preview's pixels for the pointer.
  */
+/** The four sides of a rectangular selection, each as its own sequence.
+ *
+ *  Drawing them as one path was what made a side disappear: a null sample
+ *  dropped out of the flat list and the path simply joined the two neighbours
+ *  across the missing side.  Keeping the sides apart lets the painter stop at
+ *  the limb without inventing a line through the middle of the box.
+ */
+function globeSelectionEdgeDirections(shape) {
+  if (!shape) return [];
+  if (!shape.rect) return [shape.directions];
+  const edges = [];
+  for (let index = 0; index < 4; index += 1) {
+    edges.push(shape.directions.slice(index * 17, (index + 1) * 17));
+  }
+  return edges;
+}
+
 function globeSelectionScreen() {
   const shape = globeSelectionGeometry();
   if (!shape) return null;
@@ -3332,8 +3392,10 @@ function globeSelectionScreen() {
     ? globePixelFromDirection(direction, shape.centre, scale) : null;
   const points = shape.directions.map(at).filter(Boolean);
   const corners = shape.corners.map(at).filter(Boolean);
+  const edges = globeSelectionEdgeDirections(shape)
+    .map((edge) => edge.map(at).filter(Boolean));
   return {
-    points, corners,
+    points, corners, edges, rect: !!shape.rect,
     top: at(shape.top),
     centre: at(shape.centre),
   };
@@ -3392,10 +3454,28 @@ function globeSelectionHit(p, shape) {
       && Math.hypot(p.x - shape.centre.x, p.y - shape.centre.y) <= grab) {
     return 'move';
   }
-  for (let index = 1; index < shape.points.length; index += 1) {
-    if (distanceToSegment(p, shape.points[index - 1], shape.points[index])
-        <= grab - 3) {
-      return 'edge';
+  // Four sides, four names: the drag needs to know which dimension it is
+  // changing.  A non-rectangular outline keeps the generic edge, because its
+  // "side" is not one of the box's two axes.
+  if (shape.rect && shape.edges && shape.edges.length === 4) {
+    const names = ['edge-t', 'edge-r', 'edge-b', 'edge-l'];
+    let best = null;
+    for (let side = 0; side < shape.edges.length; side += 1) {
+      const points = shape.edges[side];
+      for (let index = 1; index < points.length; index += 1) {
+        const distance = distanceToSegment(p, points[index - 1], points[index]);
+        if (distance <= grab - 3 && (!best || distance < best.distance)) {
+          best = { name: names[side], distance };
+        }
+      }
+    }
+    if (best) return best.name;
+  } else {
+    for (let index = 1; index < shape.points.length; index += 1) {
+      if (distanceToSegment(p, shape.points[index - 1], shape.points[index])
+          <= grab - 3) {
+        return 'edge';
+      }
     }
   }
   if (shape.points.length > 2 && pointInPolygon(p, shape.points)) return 'move';
@@ -3427,6 +3507,49 @@ function beginGlobeSelectionDrag(p, allowNew) {
     };
     return true;
   }
+  // A rectangle resized by one side changes one dimension only.  The other
+  // side is the anchor, so the box grows away from the pointer's opposite edge
+  // exactly as the flat 2D box does; the old 3D branch scaled the radius, which
+  // is why every edge kept the aspect.
+  if (shape && shape.rect && hit && String(hit).startsWith('edge')
+      && state.selection) {
+    const side = { 'edge-t': 0, 'edge-r': 1, 'edge-b': 2, 'edge-l': 3 }[hit];
+    const edge = side === undefined ? null : shape.edges[side];
+    const opposite = side === undefined ? null : shape.edges[(side + 2) % 4];
+    const mid = edge && edge.length
+      ? edge.reduce((sum, point) => ({
+        x: sum.x + point.x / edge.length,
+        y: sum.y + point.y / edge.length,
+      }), { x: 0, y: 0 }) : null;
+    const anchor = opposite && opposite.length
+      ? opposite.reduce((sum, point) => ({
+        x: sum.x + point.x / opposite.length,
+        y: sum.y + point.y / opposite.length,
+      }), { x: 0, y: 0 }) : null;
+    if (mid && anchor && shape.centre) {
+      const dx = mid.x - shape.centre.x;
+      const dy = mid.y - shape.centre.y;
+      const length = Math.max(1e-6, Math.hypot(dx, dy));
+      const ground = selectionGroundBox();
+      const radiusKm = ground
+        ? ground.camera.radiusKm : LUNAR_REFERENCE_RADIUS_KM;
+      const halfW = ground
+        ? Math.abs(ground.x1 - ground.x0) / 2
+        : Math.max(1, state.selection.radiusFraction * radiusKm);
+      const halfH = ground
+        ? Math.abs(ground.y1 - ground.y0) / 2
+        : Math.max(1, state.selection.radiusFraction * radiusKm);
+      state.dragging = {
+        mode: 'resize3d-edge',
+        start: { ...state.selection },
+        side, anchor,
+        axis: { x: dx / length, y: dy / length },
+        half: Math.max(6, length),
+        halfW, halfH, radiusKm,
+      };
+      return true;
+    }
+  }
   if ((hit === 'corner' || hit === 'edge') && geo) {
     const startAngle = groundAngleDeg(
       { lon: state.selection.lon, lat: state.selection.lat }, geo);
@@ -3453,11 +3576,40 @@ function beginGlobeSelectionDrag(p, allowNew) {
   return true;
 }
 
+/** One side of a 3D rectangle follows the pointer; the opposite side stays. */
+function resizeGlobeSelectionByEdge(drag, p) {
+  const start = drag.start;
+  const along = (p.x - drag.anchor.x) * drag.axis.x
+    + (p.y - drag.anchor.y) * drag.axis.y;
+  const half = Math.max(6, along / 2);
+  const ratio = half / Math.max(drag.half, 1e-6);
+  const minimum = Math.max(1, drag.radiusKm * 0.004);
+  const maximum = drag.radiusKm * 1.4;
+  let halfW = drag.halfW;
+  let halfH = drag.halfH;
+  if (drag.side === 1 || drag.side === 3) halfW *= ratio;
+  else halfH *= ratio;
+  halfW = clamp(halfW, minimum, maximum);
+  halfH = clamp(halfH, minimum, maximum);
+  const centre = {
+    x: drag.anchor.x + drag.axis.x * half,
+    y: drag.anchor.y + drag.axis.y * half,
+  };
+  const mid = globeScreenToLonLat(centre.x, centre.y);
+  return {
+    ...start,
+    lon: mid ? mid.lon : start.lon,
+    lat: mid ? mid.lat : start.lat,
+    radiusFraction: clamp(Math.min(halfW, halfH) / drag.radiusKm, 0.004, 1.4),
+    aspect: clamp(halfH / Math.max(halfW, 1e-9), 0.05, 20),
+  };
+}
+
 /** Pointer move for a 3D selection edit. */
 function moveGlobeSelection(event, drag) {
   const p = diskPixelPoint(event);
   const geo = globeScreenToLonLat(p.x, p.y);
-  if (!geo) return;
+  if (!geo && drag.mode !== 'resize3d-edge') return;
   const start = drag.start;
   if (drag.mode === 'move3d') {
     const dLon = ((geo.lon - drag.ground.lon + 540) % 360) - 180;
@@ -3476,6 +3628,9 @@ function moveGlobeSelection(event, drag) {
       radiusFraction: Math.max(0.004,
         Math.min(1.4, start.radiusFraction * ratio)),
     };
+  } else if (drag.mode === 'resize3d-edge') {
+    const next = resizeGlobeSelectionByEdge(drag, p);
+    if (next) state.selection = next;
   } else if (drag.mode === 'new3d') {
     const dx = p.x - drag.anchor.x;
     const dy = p.y - drag.anchor.y;
@@ -3511,23 +3666,25 @@ function drawGlobeSelection(ctx, width, height, dpr) {
     const globe = globePixelFromDirection(direction, shape.centre, scale);
     return imageToOverlay(globe.x, globe.y);
   };
-  const points = shape.directions.map(overlayOf).filter(Boolean);
-  if (points.length > 1) {
-    for (const pass of [
-      { color: SELECTION_SHADOW, width: 3.2 * px },
-      { color: SELECTION_COLOR, width: 1.5 * px },
-    ]) {
-      ctx.lineWidth = pass.width;
-      ctx.strokeStyle = pass.color;
-      ctx.setLineDash([7 * px, 5 * px]);
+  const edges = globeSelectionEdgeDirections(shape)
+    .map((edge) => edge.map(overlayOf).filter(Boolean));
+  for (const pass of [
+    { color: SELECTION_SHADOW, width: 3.2 * px },
+    { color: SELECTION_COLOR, width: 1.5 * px },
+  ]) {
+    ctx.lineWidth = pass.width;
+    ctx.strokeStyle = pass.color;
+    ctx.setLineDash([7 * px, 5 * px]);
+    for (const points of edges) {
+      if (points.length < 2) continue;
       ctx.beginPath();
       ctx.moveTo(points[0].x, points[0].y);
       for (let index = 1; index < points.length; index += 1) {
         ctx.lineTo(points[index].x, points[index].y);
       }
       ctx.stroke();
-      ctx.setLineDash([]);
     }
+    ctx.setLineDash([]);
   }
   ctx.fillStyle = SELECTION_COLOR;
   const tick = 4 * px;
@@ -3950,7 +4107,12 @@ function labelScreenFontPx(viewName) {
   const view = views[viewName];
   const rect = view && view.body ? view.body.getBoundingClientRect() : null;
   const short = rect ? Math.max(160, Math.min(rect.width, rect.height)) : 560;
-  return Math.max(10, Math.min(28, Math.round(short * 0.021)));
+  // 全月面预览 carries a lot of names over a small disc; the reader asked for
+  // the whole layer to come down about 15 %, which is 12 -> 10 px at the
+  // default short side.  The close-up panes keep the old scale.
+  const factor = viewName === 'disk' ? 0.01785 : 0.021;
+  const floor = viewName === 'disk' ? 9 : 10;
+  return Math.max(floor, Math.min(28, Math.round(short * factor)));
 }
 
 /** The same size in the frame's pixels, which is what the server lays out in. */
@@ -4010,6 +4172,12 @@ function labelStyleFor(viewName, frameFactor = 1) {
 function itemColor(item, style) {
   if (style.uniform) return style.textColor;
   return (style.classColors && style.classColors[item.class]) || style.textColor;
+}
+
+/** IAU satellite craters are the parent name, a space and one capital. */
+const SATELLITE_CRATER_NAME = /\s[A-Z]$/;
+function isSatelliteCraterName(name) {
+  return SATELLITE_CRATER_NAME.test(String(name || '').trim());
 }
 
 /** The style a view's labels are painted with, font size included.
@@ -4539,9 +4707,21 @@ function paintLabels(ctx, plan, style) {
     const colour = item.highlight ? highlightColor
       : item.manual ? MANUAL_COLOUR : itemColor(item, ink);
     // 月海 names are intentionally two type sizes larger than the rest of the
-    // gazetteer.  The plan box stays where it was laid out; only the glyphs
-    // grow, which is exactly what "make the seas read first" means.
-    const itemFont = fontPx + (item.feature_class === 'mare' ? 2 : 0);
+    // gazetteer.  A main crater is one size above the base and white; its
+    // lettered satellites sit half a size below and keep the class colour, so
+    // the parent reads first without a second legend.  The plan box stays
+    // where it was laid out; only the glyphs move within it.
+    const satellite = item.class === 'crater' && isSatelliteCraterName(item.name_en);
+    const itemFont = fontPx + (item.class === 'mare' ? 2 : 0)
+      + (item.class === 'crater' ? (satellite ? -0.5 : 1) : 0);
+    let textColour = colour;
+    if (!item.highlight && !item.manual && !ink.uniform
+        && item.class === 'crater' && !satellite) {
+      // A main crater is a brighter blue-white than its satellites, not pure
+      // white: white erased the class colour completely and looked like a
+      // different layer from the rest of the gazetteer.
+      textColour = '#e6f4ff';
+    }
     // The selected crater and its family are set bold, which is the one weight
     // change the layout can absorb without moving a box.
     ctx.font = `${(ink.bold || item.highlight) ? 'bold ' : ''}${itemFont}px ` +
@@ -4556,7 +4736,7 @@ function paintLabels(ctx, plan, style) {
     // laid out is still what reserves space in the avoidance pass.
     if (ink.textFollow && TEXT_FOLLOW_CLASSES.has(item.class)
         && item.outline_path && item.outline_path.length >= 2
-        && paintTextAlongPath(ctx, item, itemFont, colour, strokeWidth, strokeColor, ink.textView)) {
+        && paintTextAlongPath(ctx, item, itemFont, textColour, strokeWidth, strokeColor, ink.textView)) {
       continue;
     }
     if (item.leader) {
@@ -4587,7 +4767,7 @@ function paintLabels(ctx, plan, style) {
       ctx.strokeStyle = strokeColor;
       ctx.strokeText(item.label, left + 3, midY);
     }
-    ctx.fillStyle = colour;
+    ctx.fillStyle = textColour;
     ctx.fillText(item.label, left + 3, midY);
   }
   ctx.restore();
@@ -6724,8 +6904,8 @@ function drawMeasureChart() {
   ctx.textAlign = 'right';
   ctx.fillText(`最高 ${span}　最低 ${floor}`, width - 6, 2);
   ctx.textBaseline = 'bottom';
-  ctx.textAlign = 'right';
-  ctx.fillText('距离 km', width - 6, height - 1);
+  ctx.textAlign = 'center';
+  ctx.fillText('距离 km', (x0 + x1) / 2, height - 1);
 }
 
 /** Arm or disarm the tool.  Off also forgets the measurement and its chart:
@@ -13045,7 +13225,7 @@ function syncExperimentMarkOptions() {
   const select = $('experiment-mark');
   if (!select) return;
   const previous = select.value;
-  select.textContent = '';
+  select.innerHTML = '';
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = state.manualMarks.length
@@ -13067,6 +13247,35 @@ function syncExperimentMarkOptions() {
     if (mark) {
       $('experiment-lon').value = mark.lon.toFixed(4);
       $('experiment-lat').value = mark.lat.toFixed(4);
+    }
+  }
+  syncCalculatorMarkOptions();
+}
+
+/** The same anchors in the calculator's 手动标注点 menu. */
+function syncCalculatorMarkOptions() {
+  const select = $('calc-mark');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '';
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = state.manualMarks.length
+    ? '（选择手动标注点）' : '（还没有手动标注点）';
+  select.appendChild(blank);
+  for (const mark of state.manualMarks) {
+    const option = document.createElement('option');
+    option.value = String(mark.id);
+    option.textContent = `${mark.text} · ${coordText(mark.lon, mark.lat)}`;
+    select.appendChild(option);
+  }
+  const keep = state.manualMarks.some((mark) => String(mark.id) === previous);
+  select.value = keep ? previous : '';
+  if (keep) {
+    const mark = state.manualMarks.find((item) => String(item.id) === previous);
+    if (mark) {
+      $('calc-lon').value = mark.lon.toFixed(4);
+      $('calc-lat').value = mark.lat.toFixed(4);
     }
   }
 }
@@ -13485,8 +13694,16 @@ function experimentSortValue(row, key) {
 function renderExperimentTable(data) {
   const body = $('experiment-rows');
   if (!body) return;
-  body.textContent = '';
-  const rows = ((data && data.samples) || []).slice();
+  // innerHTML clears the stub DOM's children as well as a browser's; the
+  // table is rebuilt on every filter.
+  body.innerHTML = '';
+  const allRows = ((data && data.samples) || []).slice();
+  const filter = state.experimentFilter;
+  const rows = (filter ? allRows.filter((row) => {
+    const height = Number(row.altitude_deg);
+    return Number.isFinite(height)
+      && height >= filter.min && height <= filter.max;
+  }) : []).slice();
   const { key, dir } = state.experimentSort;
   rows.sort((left, right) => {
     const a = experimentSortValue(left, key);
@@ -13532,12 +13749,11 @@ function renderExperimentTable(data) {
   }
   const summary = $('experiment-summary');
   if (summary) {
-    const samples = (data && data.samples) || [];
-    if (!samples.length) {
+    if (!allRows.length) {
       summary.textContent = '—';
     } else {
-      const heights = samples.map((row) => Number(row.altitude_deg));
-      summary.textContent = `${samples.length} 点 · 高度 `
+      const heights = allRows.map((row) => Number(row.altitude_deg));
+      summary.textContent = `${rows.length} / ${allRows.length} 点 · 高度 `
         + `${Math.min(...heights).toFixed(1)}°…${Math.max(...heights).toFixed(1)}°`
         + ` · ${data.moon_lon.toFixed(2)}°E, ${data.moon_lat.toFixed(2)}°N`;
     }
@@ -13552,9 +13768,64 @@ function setExperimentSort(key) {
   renderExperimentTable(state.experiment);
 }
 
+/** The 太阳高度范围 currently typed into the filter row. */
+function experimentFilterRange() {
+  const min = num('experiment-filter-min');
+  const max = num('experiment-filter-max');
+  if (min === null || max === null) {
+    return { error: '太阳高度范围需要两个数字。' };
+  }
+  if (min > max) {
+    return { error: '太阳高度范围的最小值不能大于最大值。' };
+  }
+  return { min, max };
+}
+
+/** The only path that starts a 月面点太阳高度 calculation. */
+function filterExperiment() {
+  const range = experimentFilterRange();
+  if (range.error) {
+    $('experiment-empty').hidden = false;
+    $('experiment-empty').textContent = range.error;
+    return;
+  }
+  state.experimentFilter = range;
+  refreshExperiment();
+}
+
+/** Switch the window between its two tabs without recalculating anything. */
+function setExperimentTab(tab) {
+  const next = ['sun', 'calc', 'naked'].includes(tab) ? tab : 'sun';
+  state.experimentTab = next;
+  state.nakedEyeOpen = next === 'naked';
+  for (const name of ['sun', 'calc', 'naked']) {
+    const button = $('experiment-tab-' + name);
+    if (!button) continue;
+    const on = name === next;
+    button.setAttribute('aria-selected', String(on));
+    button.setAttribute('aria-pressed', String(on));
+    button.classList.toggle('active', on);
+  }
+  for (const name of ['sun', 'calc', 'naked']) {
+    const pane = $('experiment-pane-' + name);
+    if (pane) pane.hidden = name !== next;
+  }
+  if ($('experiment-reset-view')) $('experiment-reset-view').hidden = next !== 'sun';
+  if ($('experiment-badge')) {
+    $('experiment-badge').textContent = next === 'sun' ? '月面点'
+      : next === 'calc' ? '计算器' : '裸眼3D';
+  }
+  if (next === 'calc') initCalculatorFields();
+  if (next === 'naked') initNakedEyePane();
+}
+
 async function refreshExperiment() {
   const range = experimentFields();
-  if (!range) return;
+  if (!range) {
+    $('experiment-empty').hidden = false;
+    $('experiment-empty').textContent = '—';
+    return;
+  }
   if (range.error) {
     $('experiment-empty').hidden = false;
     $('experiment-empty').textContent = range.error;
@@ -13607,33 +13878,1055 @@ async function refreshExperiment() {
   }
 }
 
-function positionExperimentWindow() {
-  const viewportWidth = window.innerWidth || 1280;
-  const viewportHeight = window.innerHeight || 800;
-  const width = Math.round(Math.min(1180, Math.max(560, viewportWidth - 48)));
-  const height = Math.round(Math.min(760, Math.max(420, viewportHeight - 72)));
+const EXPERIMENT_MIN_WIDTH = 640;
+const EXPERIMENT_MIN_HEIGHT = 460;
+
+function experimentWindowBox() {
+  return {
+    viewportWidth: window.innerWidth || 1280,
+    viewportHeight: window.innerHeight || 800,
+  };
+}
+
+function applyExperimentWindow(rect) {
+  const box = experimentWindowBox();
+  const minWidth = Math.min(EXPERIMENT_MIN_WIDTH,
+    Math.max(320, box.viewportWidth - 16));
+  const minHeight = Math.min(EXPERIMENT_MIN_HEIGHT,
+    Math.max(280, box.viewportHeight - 16));
+  const width = Math.min(Math.max(rect.width, minWidth),
+    Math.max(minWidth, box.viewportWidth - 16));
+  const height = Math.min(Math.max(rect.height, minHeight),
+    Math.max(minHeight, box.viewportHeight - 16));
+  const left = Math.min(Math.max(rect.left, 8),
+    Math.max(8, box.viewportWidth - width - 8));
+  const top = Math.min(Math.max(rect.top, 8),
+    Math.max(8, box.viewportHeight - height - 8));
   const node = $('experiment-window');
-  node.style.left = Math.round((viewportWidth - width) / 2) + 'px';
-  node.style.top = Math.round((viewportHeight - height) / 2) + 'px';
+  if (!node) return;
+  node.style.left = left + 'px';
+  node.style.top = top + 'px';
   node.style.width = width + 'px';
   node.style.height = height + 'px';
+  state.experimentWindow = { left, top, width, height };
+}
+
+function positionExperimentWindow(reset) {
+  const box = experimentWindowBox();
+  if (reset || !state.experimentWindow) {
+    const maxWidth = Math.min(1180, Math.max(320, box.viewportWidth - 16));
+    const maxHeight = Math.min(760, Math.max(280, box.viewportHeight - 16));
+    const width = Math.round(Math.min(maxWidth,
+      Math.max(EXPERIMENT_MIN_WIDTH, box.viewportWidth - 48)));
+    const height = Math.round(Math.min(maxHeight,
+      Math.max(EXPERIMENT_MIN_HEIGHT, box.viewportHeight - 72)));
+    state.experimentWindow = {
+      left: Math.round((box.viewportWidth - width) / 2),
+      top: Math.round((box.viewportHeight - height) / 2),
+      width, height,
+    };
+  }
+  applyExperimentWindow(state.experimentWindow);
+}
+
+function experimentResizeStart(event, direction) {
+  event.preventDefault();
+  const box = state.experimentWindow
+    || { left: 0, top: 0, width: 800, height: 600 };
+  state.experimentWindowDrag = {
+    kind: 'resize',
+    direction,
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...box },
+  };
+}
+
+function experimentHeadDown(event) {
+  const target = event.target || {};
+  if (String(target.tagName || '').toUpperCase() === 'BUTTON') return;
+  if (!state.experimentWindow) return;
+  event.preventDefault();
+  state.experimentWindowDrag = {
+    kind: 'move',
+    startX: event.clientX || 0,
+    startY: event.clientY || 0,
+    box: { ...state.experimentWindow },
+  };
+}
+
+function experimentWindowPointerMove(event) {
+  const drag = state.experimentWindowDrag;
+  if (!drag) return;
+  const dx = (event.clientX || 0) - drag.startX;
+  const dy = (event.clientY || 0) - drag.startY;
+  if (drag.kind === 'move') {
+    applyExperimentWindow({
+      left: drag.box.left + dx,
+      top: drag.box.top + dy,
+      width: drag.box.width,
+      height: drag.box.height,
+    });
+    return;
+  }
+  const box = { ...drag.box };
+  if (drag.direction.includes('e')) box.width += dx;
+  if (drag.direction.includes('w')) { box.width -= dx; box.left += dx; }
+  if (drag.direction.includes('s')) box.height += dy;
+  if (drag.direction.includes('n')) { box.height -= dy; box.top += dy; }
+  applyExperimentWindow(box);
+  if (state.experiment && state.experiment.samples) drawExperiment();
+}
+
+function experimentWindowPointerUp() {
+  state.experimentWindowDrag = null;
 }
 
 function openExperiment() {
   state.experimentOpen = true;
-  if (!$('experiment-start').value) experimentSetFromMain();
+  if (!$('experiment-start').value || !$('experiment-end').value) {
+    experimentSetFromMain();
+  }
   syncExperimentMarkOptions();
   $('experiment-backdrop').hidden = false;
-  positionExperimentWindow();
+  positionExperimentWindow(false);
+  setExperimentTab(state.experimentTab || 'sun');
+  if ($('experiment-empty')) {
+    $('experiment-empty').hidden = false;
+    if (!$('experiment-empty').textContent.trim()) {
+      $('experiment-empty').textContent = '—';
+    }
+  }
+  drawExperiment();
   $('experiment-close').focus();
-  refreshExperiment();
 }
 
 function closeExperiment() {
   state.experimentOpen = false;
   state.experimentSeq += 1;
+  state.nakedEyeOpen = false;
+  state.nakedEyeInfoSeq += 1;
+  if (state.nakedEyeInfoTimer) {
+    clearTimeout(state.nakedEyeInfoTimer);
+    state.nakedEyeInfoTimer = null;
+  }
+  state.experimentWindowDrag = null;
   $('experiment-backdrop').hidden = true;
   $('experiment-open').focus();
+}
+
+
+/* ── 计算器：完整的月球信息与条件检索 ─────────────────────────────────── */
+
+const CALC_ERROR_UNITS = {
+  age: '天',
+  illumination: '%',
+  libration: '°',
+  shadow: '°',
+  altitude: '°',
+};
+const CALC_ERROR_DEFAULTS = {
+  age: 0.5,
+  illumination: 5,
+  libration: 1,
+  shadow: 1,
+  altitude: 1,
+};
+
+function applyCalculatorSplit(percent) {
+  const value = clamp(Number(percent) || 33, 18, 72);
+  state.calculatorSplit = value;
+  const body = $('calc-body');
+  if (body && body.style && body.style.setProperty) {
+    body.style.setProperty('--calc-left', `${value}%`);
+  }
+}
+
+function calculatorSplitStart(event) {
+  const body = $('calc-body');
+  if (!body) return;
+  if (event.preventDefault) event.preventDefault();
+  state.calculatorSplitDrag = {
+    startX: event.clientX || 0,
+    startPercent: state.calculatorSplit,
+    width: Math.max(200, body.clientWidth || 800),
+  };
+  if (body.classList) body.classList.add('splitting');
+}
+
+function calculatorSplitMove(event) {
+  const drag = state.calculatorSplitDrag;
+  if (!drag) return;
+  const dx = (event.clientX || 0) - drag.startX;
+  applyCalculatorSplit(drag.startPercent + dx / drag.width * 100);
+  if (event.preventDefault) event.preventDefault();
+}
+
+function calculatorSplitEnd() {
+  state.calculatorSplitDrag = null;
+  const body = $('calc-body');
+  if (body && body.classList) body.classList.remove('splitting');
+}
+
+/** The first visit seeds the calculator from the main page; later visits keep
+ *  whatever the reader typed into the calculator's own fields. */
+function initCalculatorFields() {
+  if (!state.calculatorInitialized) {
+    const main = $('when').value || wallClockNow();
+    $('calc-when').value = main.slice(0, 16);
+    $('calc-lat').value = $('lat').value || '30';
+    $('calc-lon').value = $('lon').value || '120';
+    state.calculatorInitialized = true;
+  }
+  syncCalculatorMarkOptions();
+  syncCalculatorControls();
+  applyCalculatorSplit(state.calculatorSplit);
+}
+
+function calculatorWhenPayload() {
+  const local = $('calc-when').value;
+  const offset = Number($('tz').value) || 0;
+  let at = null;
+  if (local) {
+    const typed = local.length === 16 ? local + ':00' : local;
+    const parsed = Date.parse(typed + 'Z');
+    if (Number.isFinite(parsed)) {
+      at = new Date(parsed - offset * 3600 * 1000).toISOString().slice(0, 19);
+    }
+  }
+  return {
+    at,
+    tz_offset_hours: offset,
+    observer: {
+      lat: Number($('calc-lat').value),
+      lon: Number($('calc-lon').value),
+    },
+  };
+}
+
+function setCalculatorSummary(text) {
+  const node = $('calc-summary');
+  if (node) node.textContent = text || '—';
+}
+
+/** The query controls are one sentence; this keeps the legal combinations. */
+function syncCalculatorControls() {
+  const scope = $('calc-scope');
+  const target = $('calc-target');
+  const mode = $('calc-mode');
+  if (!scope || !target || !mode) return;
+  const directional = scope.value === 'previous' || scope.value === 'next';
+  const spanValue = $('calc-span-value');
+  const spanUnit = $('calc-span-unit');
+  if (spanValue) spanValue.disabled = directional;
+  if (spanUnit) spanUnit.disabled = directional;
+
+  const allowed = target.value === 'altitude'
+    ? (directional ? ['highest'] : ['highest', 'lowest'])
+    : target.value === 'libration'
+      ? ['similar']
+      : ['same'];
+  for (const option of mode.options) {
+    option.disabled = !allowed.includes(option.value);
+  }
+  if (!allowed.includes(mode.value)) mode.value = allowed[0];
+
+  if (state.calculatorTarget !== target.value) {
+    state.calculatorTarget = target.value;
+    $('calc-error').value = String(CALC_ERROR_DEFAULTS[target.value] ?? 1);
+  }
+  const errorEnabled = mode.value === 'similar';
+  if ($('calc-error')) $('calc-error').disabled = !errorEnabled;
+  const errorLabel = $('calc-error-label');
+  if (errorLabel) errorLabel.classList.toggle('disabled', !errorEnabled);
+  if ($('calc-error-unit')) {
+    $('calc-error-unit').textContent = CALC_ERROR_UNITS[target.value] || '°';
+  }
+
+  if (spanUnit) {
+    const maximum = spanUnit.value === 'week' ? 52
+      : spanUnit.value === 'month' ? 60 : 10;
+    if (spanValue) {
+      spanValue.max = String(maximum);
+      if (Number(spanValue.value) > maximum) {
+        spanValue.value = String(maximum);
+      }
+    }
+  }
+}
+
+/** Paint the calculator's own phase thumbnail. */
+function drawCalculatorPhase(geometry) {
+  const canvas = $('calc-phase-canvas');
+  if (!canvas) return;
+  const size = 72;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(size * dpr);
+  canvas.height = Math.round(size * dpr);
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  const ctx = canvas.getContext('2d');
+  paintPhase(ctx, canvas, geometry);
+  if (!geometry) return;
+  const report = geometry.report || {};
+  const phase = (report.state || {}).phase || {};
+  if ($('calc-phase-name')) $('calc-phase-name').textContent = phase.label || '月相';
+  if ($('calc-phase-age')) {
+    $('calc-phase-age').textContent = `月龄 ${fmt(phase.age_days, 2)} d`;
+  }
+  const lunar = geometry.lunar;
+  const lunarName = lunar
+    ? (lunar.label_zh || lunarDayName(lunar.day) || '—')
+    : (lunarDayNumber(phase.age_days) === null
+      ? '—' : lunarDayName(lunarDayNumber(phase.age_days)));
+  if ($('calc-phase-lunar')) $('calc-phase-lunar').textContent = `农历 ${lunarName}`;
+}
+
+function syncCalculatorFromMain() {
+  const value = $('when').value;
+  if (!value) {
+    setCalculatorSummary('主界面时间还是空的');
+    return;
+  }
+  $('calc-when').value = value.slice(0, 16);
+}
+
+function syncCalculatorTimeToMain() {
+  const row = state.calculatorSelected;
+  if (!row) {
+    setCalculatorSummary('先在结果表里选中一行');
+    return;
+  }
+  const stamp = Date.parse(row.when_utc);
+  if (!Number.isFinite(stamp)) {
+    setCalculatorSummary('这一行没有可用的时间');
+    return;
+  }
+  const offset = Number($('tz').value) || 0;
+  $('when').value = new Date(stamp + offset * 3600 * 1000)
+    .toISOString().slice(0, 16);
+  autoRefresh();
+  setStatus(`主界面时间已同步为 ${calculatorLocalText(row.when_utc, offset)}（选中行）`);
+}
+
+async function calculateCalculatorInfo() {
+  const when = calculatorWhenPayload();
+  if (!when.at) {
+    setCalculatorSummary('观测时间无效');
+    return;
+  }
+  const lat = Number($('calc-lat').value);
+  const lon = Number($('calc-lon').value);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)
+      || lat < -90 || lat > 90) {
+    setCalculatorSummary('经纬度无效');
+    return;
+  }
+  const button = $('calc-info-run');
+  const seq = ++state.calculatorInfoSeq;
+  if (button) { button.disabled = true; button.textContent = '计算中…'; }
+  setCalculatorSummary('—');
+  try {
+    const payload = await post('/api/moon-report', { when });
+    if (seq !== state.calculatorInfoSeq) return;
+    state.calculatorInfo = payload.geometry;
+    fillMoonInfo(payload.geometry, 'calc-');
+    drawCalculatorPhase(payload.geometry);
+  } catch (error) {
+    if (seq === state.calculatorInfoSeq) {
+      setCalculatorSummary('计算失败：' + String(error.message || error));
+    }
+  } finally {
+    if (seq === state.calculatorInfoSeq && button) {
+      button.disabled = false;
+      button.textContent = '计算';
+    }
+  }
+}
+
+function calculatorLocalText(iso, offset) {
+  const stamp = Date.parse(iso);
+  if (!Number.isFinite(stamp)) return '—';
+  return new Date(stamp + offset * 3600 * 1000).toISOString()
+    .slice(0, 16).replace('T', ' ');
+}
+
+function renderCalculatorRows(result) {
+  const body = $('calc-rows');
+  if (!body) return;
+  body.innerHTML = '';
+  const items = (result && result.items) || [];
+  state.calculatorSelected = null;
+  if ($('calc-to-main')) $('calc-to-main').disabled = true;
+  const target = result && result.query ? result.query.target : '';
+  const showColong = target === 'shadow' || target === 'altitude';
+  const colongHead = $('calc-colong-head');
+  if (colongHead) colongHead.hidden = !showColong;
+  const offset = result && Number.isFinite(Number(result.tz_offset_hours))
+    ? Number(result.tz_offset_hours) : (Number($('tz').value) || 0);
+  for (const item of items) {
+    const tr = document.createElement('tr');
+    tr.dataset.visible = item.visible ? 'true' : 'false';
+    if (item.outside_span) tr.classList.add('outside-span');
+    const values = [
+      calculatorLocalText(item.when_utc, offset),
+      `${Number(item.age_days).toFixed(2)} d`,
+      `${Number(item.illumination_percent).toFixed(1)}%`,
+      `${Number(item.azimuth_deg).toFixed(1)}°`,
+      `${Number(item.altitude_deg).toFixed(1)}°`,
+      `${Number(item.libration_lon_deg).toFixed(2)}° / `
+        + `${Number(item.libration_lat_deg).toFixed(2)}°`,
+      `${Number(item.angular_diameter_arcmin).toFixed(1)}′`,
+    ];
+    if (showColong) values.push(`${Number(item.colongitude_deg).toFixed(1)}°`);
+    for (const value of values) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+    tr.addEventListener('click', () => {
+      state.calculatorSelected = item;
+      for (const child of body.children) {
+        child.classList.toggle('selected', child === tr);
+      }
+      if ($('calc-to-main')) $('calc-to-main').disabled = false;
+    });
+    body.appendChild(tr);
+  }
+  if (!items.length) {
+    setCalculatorSummary(result && result.fallback
+      ? '时间段外没有可见事件' : '—');
+    return;
+  }
+  const bits = [`${items.length} 条`];
+  if (result && result.fallback) bits.push('时间段外下一次可见');
+  if (result && result.truncated) bits.push('已截断');
+  setCalculatorSummary(bits.join(' · '));
+}
+
+async function calculateCalculatorQuery() {
+  syncCalculatorControls();
+  const when = calculatorWhenPayload();
+  if (!when.at) {
+    setCalculatorSummary('观测时间无效');
+    return;
+  }
+  const lat = Number($('calc-lat').value);
+  const lon = Number($('calc-lon').value);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)
+      || lat < -90 || lat > 90) {
+    setCalculatorSummary('经纬度无效');
+    return;
+  }
+  // The left readout is the reference the query is built from.  Refresh it
+  // from the same observation fields so the age shown there and the age used
+  // by the search can never be an old instant.
+  await calculateCalculatorInfo();
+  const mode = $('calc-mode').value;
+  const error = mode === 'similar' ? Number($('calc-error').value) : null;
+  if (mode === 'similar' && !(error > 0)) {
+    setCalculatorSummary('误差必须是正数');
+    return;
+  }
+  const spanValue = Number($('calc-span-value').value);
+  if (!(spanValue > 0)) {
+    setCalculatorSummary('时间段必须是正数');
+    return;
+  }
+  const query = {
+    direction: $('calc-scope').value,
+    target: $('calc-target').value,
+    mode,
+    span_value: spanValue,
+    span_unit: $('calc-span-unit').value,
+    error,
+  };
+  const button = $('calc-info-run');
+  const seq = ++state.calculatorQuerySeq;
+  if (button) { button.disabled = true; button.textContent = '计算中…'; }
+  setCalculatorSummary('计算中…');
+  try {
+    const result = await post('/api/calculator', { when, query });
+    if (seq !== state.calculatorQuerySeq) return;
+    state.calculatorResult = result;
+    renderCalculatorRows(result);
+  } catch (errorObject) {
+    if (seq === state.calculatorQuerySeq) {
+      setCalculatorSummary('计算失败：'
+        + String(errorObject.message || errorObject));
+      const body = $('calc-rows');
+      if (body) body.innerHTML = '';
+    }
+  } finally {
+    if (seq === state.calculatorQuerySeq && button) {
+      button.disabled = false;
+      button.textContent = '计算';
+    }
+  }
+}
+
+/* ── 裸眼3D：同一时刻、两个地球站点的并排月面近景 ───────────────────── */
+
+const NAKED_EYE_GAP_PX = 5;
+
+const NAKED_EYE_EARTH_RADIUS_KM = 6371.0;
+
+/** The two virtual stations for the chosen baseline.
+ *
+ *  The total separation is N Earth radii.  Each station sits (N/2 − 1) Earth
+ *  radii above the surface on the chosen axis, so N = 2 is the surface and
+ *  N = 4 puts each station one Earth radius up.  The north/south axis is the
+ *  default because it stays nearly perpendicular to the Moon's direction and
+ *  therefore shows the parallax; the equator is the historical 0°/180° pair.
+ */
+function nakedEyeSites() {
+  const baseline = Number($('naked-eye-baseline').value);
+  if (!Number.isFinite(baseline) || baseline < 2 || baseline > 20) {
+    return null;
+  }
+  const total = baseline;
+  const height = (total / 2 - 1) * NAKED_EYE_EARTH_RADIUS_KM;
+  const direction = $('naked-eye-direction').value;
+  if (direction === 'equator') {
+    return [
+      { name: '0°', lon: 0, lat: 0, height_km: height },
+      { name: '180°', lon: 180, lat: 0, height_km: height },
+    ];
+  }
+  // 89.9° rather than exactly 90°: SPICE's local azimuth frame is
+  // degenerate at the geographic pole, and 0.1° changes the baseline by
+  // less than a pixel.
+  return [
+    { name: '北极', lon: 0, lat: 89.9, height_km: height },
+    { name: '南极', lon: 0, lat: -89.9, height_km: height },
+  ];
+}
+
+/** The base instant and the second instant (base + Δ hours). */
+function nakedEyeTimePair() {
+  const first = localToUtc($('naked-eye-time').value);
+  const rawDelta = String($('naked-eye-time-delta').value).trim();
+  const delta = Number(rawDelta);
+  if (!first || !rawDelta || !Number.isFinite(delta)
+      || delta < -720 || delta > 720) {
+    return null;
+  }
+  // localToUtc returns a naked UTC stamp; without the Z, Date.parse would
+  // read it in the machine's local zone and the one-hour gap would drift.
+  const stamp = Date.parse(first + 'Z');
+  if (!Number.isFinite(stamp)) return null;
+  const second = new Date(stamp + delta * 3600 * 1000)
+    .toISOString().slice(0, 19);
+  return { first, second, delta };
+}
+
+/** 同步主界面时间: one instant for both stations. */
+function nakedEyeSetFromMain() {
+  const value = $('when').value;
+  if (!value) {
+    setNakedEyeStatus('主界面时间还是空的');
+    return;
+  }
+  $('naked-eye-time').value = value.slice(0, 16);
+  refreshNakedEyeInfo();
+}
+
+function setNakedEyeStatus(text) {
+  const node = $('naked-eye-status');
+  if (node) node.textContent = text || '—';
+}
+
+function nakedEyeInfoText(item, site) {
+  if (!item) return '—';
+  const stamp = Date.parse(item.when_utc);
+  if (!Number.isFinite(stamp)) return '—';
+  const offset = Number($('tz').value) || 0;
+  const local = new Date(stamp + offset * 3600 * 1000).toISOString()
+    .slice(0, 16).replace('T', ' ');
+  const place = `${site.name || ''} ${Number(site.lon).toFixed(2)}°, `
+    + `${Number(site.lat).toFixed(2)}°`;
+  const height = Number(site.height_km);
+  const lift = Number.isFinite(height) && height > 0
+    ? ` · 高 ${(height / NAKED_EYE_EARTH_RADIUS_KM).toFixed(2)} R_E`
+    : ' · 地表';
+  const age = Number(item.age_days);
+  const angle = Number(item.phase_angle_deg);
+  const lon = Number(item.libration_lon_deg);
+  const lat = Number(item.libration_lat_deg);
+  return `${place}${lift} · ${local}`
+    + ` · 月龄 ${Number.isFinite(age) ? age.toFixed(2) : '—'} d`
+    + ` · 相位角 ${Number.isFinite(angle) ? angle.toFixed(2) : '—'}°`
+    + ` · 天平动 ${Number.isFinite(lon) ? lon.toFixed(2) : '—'}° / `
+    + `${Number.isFinite(lat) ? lat.toFixed(2) : '—'}°`;
+}
+
+function scheduleNakedEyeInfo() {
+  if (state.nakedEyeInfoTimer) clearTimeout(state.nakedEyeInfoTimer);
+  state.nakedEyeInfoTimer = setTimeout(() => {
+    state.nakedEyeInfoTimer = null;
+    refreshNakedEyeInfo();
+  }, 300);
+}
+
+async function refreshNakedEyeInfo() {
+  const pair = nakedEyeTimePair();
+  const sites = nakedEyeSites();
+  const seq = ++state.nakedEyeInfoSeq;
+  if (!pair || !sites) {
+    state.nakedEyeInfo = null;
+    for (const id of ['naked-eye-info-1', 'naked-eye-info-2']) {
+      const node = $(id);
+      if (node) node.textContent = '—';
+    }
+    const delta = $('naked-eye-delta');
+    if (delta) delta.textContent = '—';
+    const badge = $('experiment-badge');
+    if (badge && state.experimentTab === 'naked') badge.textContent = '裸眼3D';
+    return null;
+  }
+  const base = whenPayload();
+  const times = [pair.first, pair.second];
+  try {
+    const payloads = await Promise.all(sites.map((site, index) => post(
+      '/api/moon-info',
+      {
+        when: {
+          ...base,
+          at: times[index],
+          // The two frames are two Earth stations, not the main page's
+          // optional far-side viewpoint.
+          viewpoint: 'earth',
+          observer: {
+            lat: site.lat,
+            lon: site.lon,
+            height_km: site.height_km,
+            name: site.name,
+          },
+        },
+        times: [times[index]],
+      },
+    )));
+    if (seq !== state.nakedEyeInfoSeq) return null;
+    const items = payloads.map((payload) => (payload.items || [])[0] || null);
+    state.nakedEyeInfo = { pair, sites, items };
+    for (const [index, id] of [[0, 'naked-eye-info-1'],
+                               [1, 'naked-eye-info-2']]) {
+      const node = $(id);
+      if (node) node.textContent = nakedEyeInfoText(items[index], sites[index]);
+    }
+    updateNakedEyeDelta(state.nakedEyeInfo);
+    return state.nakedEyeInfo;
+  } catch (error) {
+    if (seq !== state.nakedEyeInfoSeq) return null;
+    state.nakedEyeInfo = null;
+    for (const id of ['naked-eye-info-1', 'naked-eye-info-2']) {
+      const node = $(id);
+      if (node) node.textContent = '—';
+    }
+    const delta = $('naked-eye-delta');
+    if (delta) delta.textContent = '—';
+    const badge = $('experiment-badge');
+    if (badge && state.experimentTab === 'naked') badge.textContent = '裸眼3D';
+    setNakedEyeStatus('信息读取失败：' + String(error.message || error));
+    return null;
+  }
+}
+
+function updateNakedEyeDelta(info) {
+  const node = $('naked-eye-delta');
+  if (!node) return;
+  const items = (info && info.items) || [];
+  if (items.length < 2 || !items[0] || !items[1]) {
+    node.textContent = '—';
+    return;
+  }
+  const dlon = Number(items[1].libration_lon_deg)
+    - Number(items[0].libration_lon_deg);
+  const dlat = Number(items[1].libration_lat_deg)
+    - Number(items[0].libration_lat_deg);
+  const first = Date.parse(items[0].when_utc);
+  const second = Date.parse(items[1].when_utc);
+  const hours = (second - first) / 3600000;
+  const signed = (value, digits) => `${value >= 0 ? '+' : ''}`
+    + `${value.toFixed(digits)}`;
+  node.textContent = `天平动差 Δ经 ${signed(dlon, 2)}°`
+    + ` · Δ纬 ${signed(dlat, 2)}°`
+    + ` · 时间差 ${signed(hours, 2)} h`;
+  const badge = $('experiment-badge');
+  if (badge && state.experimentTab === 'naked') {
+    badge.textContent = `Δ ${signed(hours, 2)} h · 裸眼3D`;
+  }
+}
+
+/** The physical scale the two frames are asked for. */
+function nakedEyeKmPerPx() {
+  const select = $('naked-eye-kmpx-preset');
+  if (!select) return null;
+  let value = null;
+  if (select.value === 'disk') value = diskKmPerPixel(previewPixels());
+  else if (select.value === 'custom') value = num('naked-eye-kmpx');
+  else value = Number(select.value);
+  if (!Number.isFinite(value) || !(value > 0)) return null;
+  const floor = Number(LIMITS.terrain_km_per_px) || 0;
+  return Math.max(value, floor);
+}
+
+function syncNakedEyeKmPx() {
+  const select = $('naked-eye-kmpx-preset');
+  const input = $('naked-eye-kmpx');
+  if (!select || !input) return;
+  if (select.value === 'custom') {
+    input.hidden = false;
+    if (!(Number(input.value) > 0)) {
+      input.value = (diskKmPerPixel(previewPixels()) || 0.25).toFixed(3);
+    }
+    return;
+  }
+  input.hidden = true;
+  if (select.value === 'disk') {
+    const km = diskKmPerPixel(previewPixels());
+    if (km) input.value = km.toFixed(4);
+  } else {
+    input.value = select.value;
+  }
+}
+
+function buildNakedEyeResolutionOptions() {
+  const source = $('out-kmpx-preset');
+  const target = $('naked-eye-kmpx-preset');
+  if (!source || !target) return;
+  if (!target.options.length) {
+    for (const option of source.options) {
+      const clone = document.createElement('option');
+      clone.value = option.value;
+      clone.textContent = option.textContent;
+      clone.disabled = !!option.disabled;
+      target.appendChild(clone);
+    }
+    target.value = 'disk';
+  }
+  const floor = Number(LIMITS.terrain_km_per_px) || 0;
+  for (const option of target.options) {
+    const value = Number(option.value);
+    if (floor > 0 && Number.isFinite(value) && value > 0) {
+      option.disabled = value < floor;
+    }
+  }
+  syncNakedEyeKmPx();
+}
+
+function syncNakedEyeSources() {
+  const select = $('naked-eye-source');
+  if (!select) return;
+  const payload = LIMITS.data_sources || {};
+  const sources = payload.sources || [];
+  const previous = select.value;
+  select.innerHTML = '';
+  if (!sources.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '—';
+    option.disabled = true;
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  for (const source of sources) {
+    const option = document.createElement('option');
+    option.value = source.id;
+    option.textContent = `${source.name} · ${dataSourceText(source)}`;
+    option.title = source.note
+      ? `${source.id}\n${source.note}` : String(source.id);
+    select.appendChild(option);
+  }
+  const wanted = payload.selected
+    || (sources[0] && sources[0].id) || '';
+  const keep = [...select.options].some((option) => option.value === previous);
+  select.value = keep ? previous : wanted;
+}
+
+async function nakedEyeSourceChanged() {
+  const select = $('naked-eye-source');
+  if (!select) return;
+  const value = select.value;
+  if (!value) return;
+  if (value.startsWith('online:') || value.startsWith('region:')) {
+    syncNakedEyeSources();
+    return;
+  }
+  await chooseDataSource(value);
+  syncNakedEyeSources();
+}
+
+/** The frame size one panel needs at the chosen physical scale. */
+function nakedEyePixels() {
+  const span = selectionSpanArcsec();
+  const kmpx = nakedEyeKmPerPx();
+  const distance = Number(state.geometry && state.geometry.distance_km);
+  const aspect = selectionAspect();
+  if (!span || !kmpx || !(distance > 0)) return null;
+  const shortKm = span * distance / 206264.806;
+  // Two panels are composed side by side, so a 10 000 px panel would make a
+  // 20 005 px canvas.  4096 per panel keeps the pair inside one canvas the
+  // browser can actually allocate; the save row can still write a larger file
+  // by scaling the composed picture.
+  const cap = Math.min(Number(LIMITS.output_px) || 10000, 4096);
+  const longFactor = Math.max(aspect, 1 / aspect);
+  let short = Math.max(64, Math.round(shortKm / kmpx));
+  let long = Math.max(64, Math.round(short * longFactor));
+  let clamped = false;
+  if (long > cap) {
+    long = cap;
+    short = Math.max(64, Math.round(cap / longFactor));
+    clamped = true;
+  }
+  if (short > cap) {
+    short = cap;
+    long = Math.max(64, Math.round(cap * longFactor));
+    clamped = true;
+  }
+  return {
+    width: aspect >= 1 ? short : long,
+    height: aspect >= 1 ? long : short,
+    short, long, kmpx, clamped,
+  };
+}
+
+function nakedEyePayload(timeUtc, site, width, height,
+                        distanceRef, distanceTime) {
+  const selection = selectionPayload();
+  if (!selection) return null;
+  const radius = selectionArcsec();
+  const ratio = Number.isFinite(distanceTime) && distanceTime > 0
+    ? distanceRef / distanceTime : 1;
+  const fov = radius ? radius * ratio : selection.fov_radius_arcsec;
+  const light = lightPayload();
+  const output = {
+    width, height, samples: 1, arcsec_per_pixel: null,
+    photometric_model: $('photometric-model').value,
+    sun_samples: Number($('sun-samples').value) || 1,
+  };
+  const steps = shadowStepsPayload();
+  if (steps !== null) output.shadow_steps = steps;
+  return {
+    when: {
+      ...whenPayload(),
+      at: timeUtc,
+      viewpoint: 'earth',
+      observer: {
+        lat: site.lat,
+        lon: site.lon,
+        height_km: site.height_km,
+        name: site.name,
+      },
+    },
+    component: 'image',
+    telescope: trainPayload().telescope,
+    camera: trainPayload().camera,
+    atmosphere: atmospherePayload(),
+    processing: processingPayload(),
+    ...light,
+    earthshine: { ...light.earthshine, on: false },
+    ...computePayload(),
+    output,
+    // Keep the Moon's apparent size and the ground patch the same in both
+    // frames even though the two stations are at different distances.
+    selection: { ...selection, fov_radius_arcsec: fov },
+    raw_only: true,
+  };
+}
+
+/** The two panel rectangles and the fixed 5 px seam between them.
+ *
+ *  Kept as a pure layout so the seam can be checked without a canvas: an odd
+ *  total width divides evenly, an even one leaves the second panel a pixel
+ *  narrower, and in both cases the black gap is exactly five pixels.
+ */
+function nakedEyePanelLayout(width) {
+  const w = Math.max(6, Math.round(width));
+  const panel = Math.max(1, Math.floor((w - NAKED_EYE_GAP_PX) / 2));
+  const secondX = panel + NAKED_EYE_GAP_PX;
+  return {
+    width: w,
+    panel,
+    secondX,
+    secondWidth: Math.max(1, w - secondX),
+    gap: NAKED_EYE_GAP_PX,
+  };
+}
+
+/** Compose the two panels at a requested pixel size, 5 px black between them. */
+function nakedEyeCompose(width, height) {
+  const data = state.nakedEyeImages;
+  if (!data) return null;
+  const layout = nakedEyePanelLayout(width);
+  const w = layout.width;
+  const h = Math.max(1, Math.round(height));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, w, h);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(data.first, 0, 0, layout.panel, h);
+  ctx.drawImage(data.second, layout.secondX, 0, layout.secondWidth, h);
+  return canvas;
+}
+
+function paintNakedEye() {
+  const data = state.nakedEyeImages;
+  const canvas = $('naked-eye-canvas');
+  if (!data || !canvas) return;
+  const composed = nakedEyeCompose(data.width * 2 + NAKED_EYE_GAP_PX,
+    data.height);
+  if (!composed) return;
+  canvas.width = composed.width;
+  canvas.height = composed.height;
+  canvas.getContext('2d').drawImage(composed, 0, 0);
+  canvas.hidden = false;
+  if ($('naked-eye-empty')) $('naked-eye-empty').hidden = true;
+  if ($('naked-eye-save')) $('naked-eye-save').disabled = false;
+}
+
+async function generateNakedEye() {
+  if (state.nakedEyeBusy) return;
+  if (!state.selection) {
+    setNakedEyeStatus('先在主界面选择一块区域');
+    return;
+  }
+  const pixels = nakedEyePixels();
+  if (!pixels) {
+    setNakedEyeStatus('物理分辨率无效');
+    return;
+  }
+  const pair = nakedEyeTimePair();
+  const sites = nakedEyeSites();
+  if (!pair || !sites) {
+    setNakedEyeStatus('时间、时间差或基线无效');
+    return;
+  }
+  const info = await refreshNakedEyeInfo();
+  if (!info || info.items.length < 2 || info.items.some((item) => !item)) {
+    setNakedEyeStatus('先填好时间与基线');
+    return;
+  }
+  const seq = ++state.nakedEyeSeq;
+  state.nakedEyeBusy = true;
+  const button = $('naked-eye-generate');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '生成中…';
+  }
+  try {
+    const dataUrls = [];
+    for (let index = 0; index < 2; index += 1) {
+      if (seq !== state.nakedEyeSeq) return;
+      setNakedEyeStatus(`正在生成 ${index + 1}/2…`);
+      const time = index === 0 ? pair.first : pair.second;
+      const payload = nakedEyePayload(
+        time, sites[index], pixels.width, pixels.height,
+        Number(state.geometry.distance_km),
+        Number(info.items[index].distance_km),
+      );
+      if (!payload) throw new Error('选框不完整');
+      const response = await post('/api/region', payload);
+      dataUrls.push(response.image_raw || response.image);
+    }
+    setNakedEyeStatus('正在拼接…');
+    const loaded = await Promise.all(dataUrls.map(loadImage));
+    if (seq !== state.nakedEyeSeq) return;
+    state.nakedEyeImages = {
+      first: loaded[0],
+      second: loaded[1],
+      width: pixels.width,
+      height: pixels.height,
+      time1: $('naked-eye-time').value,
+      time2: new Date(Date.parse(pair.second + 'Z')
+        + (Number($('tz').value) || 0) * 3600 * 1000)
+        .toISOString().slice(0, 16).replace('T', ' '),
+      delta: pair.delta,
+      sites,
+    };
+    paintNakedEye();
+    setNakedEyeStatus(`已生成 ${pixels.width}×${pixels.height} px × 2`
+      + (pixels.clamped ? '（单幅上限 4096 px）' : ''));
+  } catch (error) {
+    if (seq === state.nakedEyeSeq) {
+      setNakedEyeStatus('生成失败：' + String(error.message || error));
+    }
+  } finally {
+    if (seq === state.nakedEyeSeq) {
+      state.nakedEyeBusy = false;
+      if (button) {
+        button.disabled = false;
+        button.textContent = '生成图片';
+      }
+    }
+  }
+}
+
+function saveNakedEye() {
+  const data = state.nakedEyeImages;
+  if (!data) {
+    setNakedEyeStatus('还没有图片');
+    return;
+  }
+  const reference = $('naked-eye-save-ref').value === 'short' ? 'short' : 'long';
+  const wanted = clampPx(Number($('naked-eye-save-px').value) || 2400,
+    320, 10000);
+  $('naked-eye-save-px').value = String(wanted);
+  const aspect = (data.width * 2 + NAKED_EYE_GAP_PX) / Math.max(1, data.height);
+  let width;
+  let height;
+  if (reference === 'long') {
+    if (aspect >= 1) { width = wanted; height = Math.round(wanted / aspect); }
+    else { height = wanted; width = Math.round(wanted * aspect); }
+  } else if (aspect >= 1) {
+    height = wanted; width = Math.round(wanted * aspect);
+  } else {
+    width = wanted; height = Math.round(wanted / aspect);
+  }
+  height = Math.max(1, height);
+  width = Math.max(6, width);
+  const canvas = nakedEyeCompose(width, height);
+  if (!canvas) return;
+  const stamp = (text) => String(text || '').replace(/[:. ]/g, '-');
+  const places = (data.sites || []).map((site) => {
+    const lat = Number(site.lat);
+    return `${Number(site.lon).toFixed(0)}E-`
+      + `${Math.abs(lat).toFixed(0)}${lat >= 0 ? 'N' : 'S'}`;
+  }).join('-');
+  const name = `moon-naked-eye-${stamp(data.time1)}-${stamp(data.time2)}-${places}.png`;
+  const blob = canvasBlob(canvas, { type: 'image/png' });
+  if (!blob) return;
+  downloadUrl(URL.createObjectURL(blob), name);
+  setNakedEyeStatus(`已保存 ${width}×${height} px · ${name}`);
+}
+
+function initNakedEyePane() {
+  buildNakedEyeResolutionOptions();
+  syncNakedEyeSources();
+  if (state.nakedEyeImages) paintNakedEye();
+  else {
+    if ($('naked-eye-empty')) $('naked-eye-empty').hidden = false;
+    if ($('naked-eye-canvas')) $('naked-eye-canvas').hidden = true;
+    if ($('naked-eye-save')) $('naked-eye-save').disabled = true;
+  }
+  if (!$('naked-eye-time').value) nakedEyeSetFromMain();
+  else refreshNakedEyeInfo();
+}
+
+function openNakedEye() {
+  state.nakedEyeOpen = true;
+  state.experimentTab = 'naked';
+  openExperiment();
+}
+
+function closeNakedEye() {
+  closeExperiment();
 }
 
 /** The pointer position in the experiment canvas' CSS pixels. */
@@ -15633,6 +16926,8 @@ function renderDataSources(payload) {
   select.value = patch ? `region:${patch.name}` : selected;
   updateDataSourceNote();
   renderPatchProducts(online);
+  syncNakedEyeSources();
+  buildNakedEyeResolutionOptions();
 }
 
 /** The 区域高清补片 menu: the online products, and what a patch would cost. */
@@ -16493,7 +17788,7 @@ function eclipseReadout(eclipse) {
     : `${name} · 食分 ${value.toFixed(2)}`;
 }
 
-function fillMoonInfo(g) {
+function fillMoonInfo(g, prefix = '') {
   const rep = g.report || {};
   const snapshot = rep.state || {};
   const phase = snapshot.phase || {};
@@ -16502,7 +17797,10 @@ function fillMoonInfo(g) {
   const rs = rep.rise_set || {};
   const tr = rep.transit || {};
   const tz = g.utc_offset_hours === undefined ? 8 : g.utc_offset_hours;
-  const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  const set = (id, text) => {
+    const el = $(prefix + id);
+    if (el) el.textContent = text;
+  };
 
   set('mi-phase-name', phase.label || '—');
   // 月食 appeared in the simulation, so the readout grows a row for it and
@@ -16510,7 +17808,7 @@ function fillMoonInfo(g) {
   // switch anywhere: the row's presence *is* the report.
   const eclipseText = eclipseReadout(g.eclipse);
   for (const id of ['mi-eclipse-dt', 'mi-eclipse-dd']) {
-    const node = $(id);
+    const node = $(prefix + id);
     if (node) node.hidden = !eclipseText;
   }
   if (eclipseText) set('mi-eclipse-dd', eclipseText);
@@ -17787,9 +19085,9 @@ function buildEventKinds() {
     ['libration_target', '极端天平动目标'],
   ];
   const more = [
-    // 月面 X/V/L is the reader's entry point to the folded group, so it is
+    // Lunar X/V/L is the reader's entry point to the folded group, so it is
     // pinned first; the rest follow their English names.
-    ['xvl', '月面 X/V/L', 'Lunar X/V/L'],
+    ['xvl', 'Lunar X/V/L', 'Lunar X/V/L'],
     ['jewelled_handle', 'Jewelled handle', 'Jewelled handle'],
     ['eyes_of_clavius', 'Eyes of Clavius', 'Eyes of Clavius'],
     ['cheshire_moon', 'Cheshire Moon（Wet Moon）', 'Cheshire Moon'],
@@ -17798,15 +19096,25 @@ function buildEventKinds() {
     ['maginus_sunshine_ray', 'Maginus Sunshine Ray', 'Maginus Sunshine Ray'],
     ['rupes_recta', 'Rupes Recta / Straight Wall', 'Rupes Recta'],
     ['curtiss_cross', 'Curtiss Cross', 'Curtiss Cross'],
-    ['barrow_ray', 'Barrow Ray', 'Barrow Ray'],
+    ['barrow_ray', "Barrow's shaft of light", "Barrow's shaft of light"],
+    ['alexanders_beaded_rim', "Alexander's beaded rim", "Alexander's beaded rim"],
+    ['zeno_steps', 'Zeno steps', 'Zeno steps'],
+    ['oneills_bridge', "O'Neill's Bridge", "O'Neill's Bridge"],
+    ['posidonius_illuminated_rim', "Posidonius' illuminated rim",
+      "Posidonius' illuminated rim"],
+    ['l_shaped_mountain', '"L"-shaped mountain', '"L"-shaped mountain'],
+    ['cauchys_interrupted_shadow', "Cauchy's interrupted shadow",
+      "Cauchy's interrupted shadow"],
     ["cassini_moon_maiden", "Cassini's Moon Maiden", "Cassini's Moon Maiden"],
     ["aries_hoofprint", "Aries' Hoofprint（Black lips）", "Aries Hoofprint"],
     ["gruithuisens_lunar_city", "Gruithuisen's Lunar City",
       "Gruithuisen's Lunar City"],
   ];
-  // Keep 月面 X/V/L pinned; sort only the remainder.
+  // Keep Lunar X/V/L pinned; sort only the remainder.  A quoted display name
+  // ("L"-shaped mountain) sorts under L rather than before A.
   const firstMore = more.shift();
-  more.sort((left, right) => left[2].localeCompare(right[2], 'en',
+  const sortKey = (entry) => String(entry[2]).replace(/^"|"$/g, '');
+  more.sort((left, right) => sortKey(left).localeCompare(sortKey(right), 'en',
     { sensitivity: 'base' }));
   more.unshift(firstMore);
   const makeChip = (key, label) => {
@@ -18216,7 +19524,7 @@ const EVENT_COLUMNS = {
   duration: '持续时长', elongation: '距角', colongitude: '余经度',
   ecliptic: '黄道-地平夹角', equator: '月球赤道-地平夹角',
   rise: '月升月落', grade: '可见程度', margin: '离外缘（°）',
-  solarIncidence: '太阳入射角', daylight: '白昼', detail: '备注',
+  solarIncidence: '太阳入射角', daylight: '天光状态', detail: '备注',
   separation: '距月心（°）', planetDiameter: '行星视直径（″）',
 };
 
@@ -18271,7 +19579,10 @@ const RAY_COLUMNS = ['date', 'label', 'best', 'start', 'end', 'duration',
   'illumination', 'diameter', 'distance', 'surfaceBrightness'];
 for (const key of ['platos_hook', 'hesiodus_sunrise_ray',
                    'maginus_sunshine_ray', 'rupes_recta', 'curtiss_cross',
-                   'barrow_ray', 'cassini_moon_maiden', 'aries_hoofprint',
+                   'barrow_ray', 'alexanders_beaded_rim', 'zeno_steps',
+                   'oneills_bridge', 'posidonius_illuminated_rim',
+                   'l_shaped_mountain', 'cauchys_interrupted_shadow',
+                   'cassini_moon_maiden', 'aries_hoofprint',
                    'gruithuisens_lunar_city']) {
   EVENT_COLUMNS[key] = RAY_COLUMNS;
 }
@@ -18279,7 +19590,7 @@ for (const key of ['platos_hook', 'hesiodus_sunrise_ray',
 function eventColumnsFor(kind) {
   const base = EVENT_COLUMN_SETS[kind]
     || ['date', 'time', 'label', 'altitude', 'detail'];
-  // 白昼 is its own column on every forecast: a prose note in 备注 meant the
+  // 天光状态 is its own column on every forecast: a prose note in 备注 meant the
   // reader had to scan the last cell to find the one property that decides
   // whether the event can be seen at all.  It sits immediately before 备注
   // when that column exists, so the two kinds of "note" stay separable.
@@ -19004,7 +20315,8 @@ function copyPresetOptions(sourceId, targetId, keep) {
 function localToUtc(value) {
   if (!value) return '';
   const offset = Number($('tz').value) || 0;
-  const asUtc = Date.parse(value + ':00Z');
+  const typed = String(value).length === 16 ? value + ':00' : String(value);
+  const asUtc = Date.parse(typed + 'Z');
   if (!Number.isFinite(asUtc)) return '';
   return new Date(asUtc - offset * 3600 * 1000).toISOString().slice(0, 19);
 }
@@ -21587,6 +22899,7 @@ function init() {
     if (event.key !== 'Escape') return;
     if (state.curveOpen) closeCurve();
     else if (state.skyOpen) closeSky();
+    else if (state.nakedEyeOpen) closeNakedEye();
     else if (state.experimentOpen) closeExperiment();
   });
   // 曲线图: the door, the window and its chart modes.
@@ -21594,23 +22907,72 @@ function init() {
   $('curve-close').addEventListener('click', closeCurve);
   $('experiment-open').addEventListener('click', openExperiment);
   $('experiment-close').addEventListener('click', closeExperiment);
-  $('experiment-refresh').addEventListener('click', refreshExperiment);
-  $('experiment-from-main').addEventListener('click', () => {
-    experimentSetFromMain();
-    refreshExperiment();
-  });
-  for (const id of ['experiment-lon', 'experiment-lat',
-                    'experiment-start', 'experiment-end']) {
-    $(id).addEventListener('change', refreshExperiment);
+  $('experiment-head').addEventListener('pointerdown', experimentHeadDown);
+  for (const handle of document.querySelectorAll('#experiment-window .sky-resize')) {
+    handle.addEventListener('pointerdown', (event) => {
+      experimentResizeStart(event, handle.dataset.skyResize || 'se');
+    });
   }
+  document.addEventListener('pointermove', experimentWindowPointerMove);
+  document.addEventListener('pointerup', experimentWindowPointerUp);
+  // 裸眼3D lives as the third tab of 实验功能; only its controls are wired here.
+  $('naked-eye-from-main').addEventListener('click', nakedEyeSetFromMain);
+  $('naked-eye-time').addEventListener('change', refreshNakedEyeInfo);
+  $('naked-eye-time').addEventListener('input', scheduleNakedEyeInfo);
+  $('naked-eye-time-delta').addEventListener('change', refreshNakedEyeInfo);
+  $('naked-eye-time-delta').addEventListener('input', scheduleNakedEyeInfo);
+  $('naked-eye-baseline').addEventListener('change', refreshNakedEyeInfo);
+  $('naked-eye-baseline').addEventListener('input', scheduleNakedEyeInfo);
+  $('naked-eye-direction').addEventListener('change', refreshNakedEyeInfo);
+  $('naked-eye-source').addEventListener('change', () => {
+    nakedEyeSourceChanged();
+  });
+  $('naked-eye-kmpx-preset').addEventListener('change', () => {
+    syncNakedEyeKmPx();
+    if ($('naked-eye-kmpx-preset').value === 'custom'
+        && $('naked-eye-kmpx').focus) {
+      $('naked-eye-kmpx').focus();
+    }
+  });
+  $('naked-eye-kmpx').addEventListener('change', syncNakedEyeKmPx);
+  $('naked-eye-generate').addEventListener('click', generateNakedEye);
+  $('naked-eye-save').addEventListener('click', saveNakedEye);
+  $('experiment-from-main').addEventListener('click', experimentSetFromMain);
   $('experiment-mark').addEventListener('change', () => {
     const id = Number($('experiment-mark').value);
     const mark = state.manualMarks.find((item) => item.id === id);
     if (!mark) return;
     $('experiment-lon').value = mark.lon.toFixed(4);
     $('experiment-lat').value = mark.lat.toFixed(4);
-    refreshExperiment();
   });
+  $('experiment-filter').addEventListener('click', filterExperiment);
+  for (const id of ['experiment-filter-min', 'experiment-filter-max']) {
+    $(id).addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') filterExperiment();
+    });
+  }
+  for (const name of ['sun', 'calc', 'naked']) {
+    $('experiment-tab-' + name).addEventListener('click',
+      () => setExperimentTab(name));
+  }
+  $('calc-info-run').addEventListener('click', calculateCalculatorQuery);
+  $('calc-from-main').addEventListener('click', syncCalculatorFromMain);
+  $('calc-to-main').addEventListener('click', syncCalculatorTimeToMain);
+  $('calc-mark').addEventListener('change', () => {
+    const id = Number($('calc-mark').value);
+    const mark = state.manualMarks.find((item) => item.id === id);
+    if (!mark) return;
+    $('calc-lon').value = mark.lon.toFixed(4);
+    $('calc-lat').value = mark.lat.toFixed(4);
+  });
+  for (const id of ['calc-scope', 'calc-target', 'calc-mode',
+                    'calc-span-unit']) {
+    $(id).addEventListener('change', syncCalculatorControls);
+  }
+  $('calc-span-value').addEventListener('change', syncCalculatorControls);
+  $('calc-splitter').addEventListener('pointerdown', calculatorSplitStart);
+  document.addEventListener('pointermove', calculatorSplitMove);
+  document.addEventListener('pointerup', calculatorSplitEnd);
   $('experiment-step-toggle').addEventListener('click', () => {
     state.experimentStepOpen = !state.experimentStepOpen;
     $('experiment-step-wrap').hidden = !state.experimentStepOpen;

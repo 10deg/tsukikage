@@ -403,7 +403,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord, projectOutlineSegments, drawFeatureOutline, textAlongPath, selectedTextHit, beginTextDrag, textDragMove, textTrackKey, selectFeature, textFollowFeature };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord, projectOutlineSegments, drawFeatureOutline, textAlongPath, selectedTextHit, beginTextDrag, textDragMove, textTrackKey, selectFeature, textFollowFeature, densityGateSet, labelColourFor, labelTextColourFor, labelFontFor, visibleOutlineAnchor };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -1325,20 +1325,65 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   console.log('');
+  console.log('a reduced density keeps the parent crater before its satellite');
+  {
+    const savedFeatures = T.state.features;
+    const savedDensity = T.state.density;
+    const savedColour = T.state.labelColour;
+    T.state.labelColour = true;
+    const parent = { id: 1, name_en: 'Arago', class: 'crater',
+                     diameter_km: 60, lon: 0, lat: 0 };
+    const satellite = { id: 2, name_en: 'Arago A', class: 'crater',
+                        diameter_km: 100, lon: 1, lat: 0 };
+    T.state.features = [parent, satellite];
+    T.state.density = { crater: 0.5 };
+    const kept = T.densityGateSet();
+    check('50% keeps the tier-3 parent and drops the tier-4 satellite',
+      kept.has(parent) && !kept.has(satellite),
+      JSON.stringify([...kept].map((row) => row.name_en)));
+    check('the parent name is a brighter blue-white and its satellite is not',
+      T.labelTextColourFor(parent) === '#e6f4ff'
+      && T.labelTextColourFor(satellite) !== '#e6f4ff');
+    check('and the parent is set a size larger',
+      T.labelFontFor(parent) > T.labelFontFor(satellite));
+    T.state.features = savedFeatures;
+    T.state.density = savedDensity;
+    T.state.labelColour = savedColour;
+  }
+
+  console.log('');
   console.log('manual anchors live on the map');
   {
     T.state.labels = true;
-    const saved = T.state.manualMarks.length;
-    const mark = T.addManualMarkAt({ lon: 12.3, lat: -4.5 });
-    check('Ctrl-click drops a numbered anchor', Boolean(mark)
-      && T.state.manualMarks.length === saved + 1
-      && mark.text === '标记点1', mark && mark.text);
-    const item = T.state.manualLayout[0];
+    const stage = dom.byId['map-stage'];
+    const before = T.state.manualMarks.length;
+    // Ctrl/⌘ is no longer the anchor gesture: it must leave the map alone.
+    stage.fire('pointerdown', {
+      button: 0, pointerId: 5, clientX: 500, clientY: 300,
+      target: stage, ctrlKey: true,
+    });
+    check('Ctrl-click no longer drops an anchor',
+      T.state.manualMarks.length === before);
+    stage.fire('pointerup', {
+      button: 0, pointerId: 5, clientX: 500, clientY: 300, target: stage,
+    });
+    stage.fire('pointerdown', {
+      button: 0, pointerId: 6, clientX: 500, clientY: 300,
+      target: stage, shiftKey: true,
+    });
+    check('Shift-click drops one',
+      T.state.manualMarks.length === before + 1,
+      String(T.state.manualMarks.length));
+    stage.fire('pointerup', {
+      button: 0, pointerId: 6, clientX: 500, clientY: 300, target: stage,
+    });
+    const mark = T.state.manualMarks[T.state.manualMarks.length - 1];
+    const item = T.state.manualLayout[T.state.manualLayout.length - 1];
     check('the anchor can be hit-tested',
       Boolean(item) && T.manualAt(item.x, item.y) === item,
       JSON.stringify(T.state.manualLayout));
     T.clearManualMarks();
-    check('清空标记 removes them', T.state.manualMarks.length === 0);
+    check('清空手动标记 removes them', T.state.manualMarks.length === 0);
   }
 
   console.log('');
@@ -1600,6 +1645,25 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     T.state.linearOutlines = false;
     check('显示线状地貌轮廓 still owns every line',
       T.drawFeatureOutline(mountain) === false);
+    T.state.linearOutlines = true;
+    // The IAU download has no basin polygons; the gazetteer diameter is the
+    // fallback that keeps 大型撞击盆地's ring on the map.
+    const basin = {
+      feature: { class: 'basin', lon: 2, lat: 2, diameter_km: 300 },
+      radius: 12, kmPerPixel: 1,
+    };
+    T.state.roundOutlines = false;
+    T.state.outlineStyle = 'solid';
+    check('a basin without a catalogue outline falls back to its diameter circle',
+      T.drawFeatureOutline(basin) === true);
+    const longRille = {
+      class: 'rima', lon: 170, lat: 0, diameter_km: 100,
+      outline: { kind: 'line', path: [[0, 0], [1, 0]] },
+    };
+    const anchor = T.visibleOutlineAnchor(longRille, 30);
+    check('a linear feature is anchored on its visible part',
+      Boolean(anchor) && Number.isFinite(anchor.x) && Number.isFinite(anchor.y),
+      JSON.stringify(anchor));
     Object.assign(T.state, saved);
   }
 

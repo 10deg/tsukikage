@@ -69,7 +69,12 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'manualHitTest', 'clearManualMarks', 'overlay',
   'drawDisk', 'drawSelection', 'drawGlobeSelection',
   'globeSelectionGeometry', 'globePixelFromDirection', 'paintTextAlongPath', 'drawGlobeMagnifier',
+  'globeSelectionScreen', 'globeSelectionHit', 'resizeGlobeSelectionByEdge',
   'TEXT_FOLLOW_CLASSES',
+  'openNakedEye', 'closeNakedEye', 'nakedEyePixels', 'nakedEyePayload',
+  'nakedEyePanelLayout',
+  'generateNakedEye',
+  'openExperiment', 'closeExperiment',
   'patchFitsFlatPreview',
   'clampSelectionInPlace', 'selectionGroundEllipse', 'selectionGroundBox',
   'labelTextShift', 'labelTextTracks',
@@ -964,6 +969,84 @@ function respond(url, body) {
              moon_lon: body.moon_lon, moon_lat: body.moon_lat,
              start: body.start, end: body.end,
              step_minutes: body.step_minutes, samples };
+  }
+  if (url === '/api/moon-info') {
+    const times = Array.isArray(body.times) ? body.times : [];
+    return {
+      tz_offset_hours: 8,
+      observer: { lat: 30, lon: 120 },
+      items: times.map((at, index) => ({
+        when_utc: at || '2026-05-25T07:30:00+00:00',
+        age_days: 3.2 + index * 10,
+        phase_angle_deg: 45.2,
+        illumination_percent: 40.0,
+        phase_name_zh: '盈凸月', phase_name_en: 'Waxing Gibbous',
+        libration_lon_deg: 2.1,
+        libration_lat_deg: -1.3,
+        distance_km: 384400 + index * 100,
+      })),
+    };
+  }
+  if (url === '/api/moon-report') {
+    return { geometry: {
+      when_utc: '2026-05-25T07:30:00+00:00', distance_km: 384400,
+      angular_diameter_deg: 0.5135, viewpoint: 'earth',
+      libration_lon_deg: -4.7, libration_lat_deg: 1.4,
+      sub_solar_lon_deg: -6.5, sub_solar_lat_deg: 1.5,
+      illuminated_percent: 69.6, bright_limb_position_angle_deg: 89.4,
+      phase_angle_deg: 47.9, earthshine_magnitudes_below_sunlight: 12.3,
+      earth_illuminated_percent: 60.5, utc_offset_hours: 8,
+      lunar: { year: 2026, month: 4, day: 9, is_leap: false,
+               label_zh: '四月初九', label_latin: 'M04D09',
+               civil_date: '2026-05-25' },
+      report: {
+        state: {
+          phase: { label: '上弦月 / First Quarter', age_days: 8.48,
+                   illuminated_percent_topo: 69.6,
+                   phase_angle_topo_deg: 47.9 },
+          libration: { libration_lon_deg: -4.7, libration_lat_deg: 1.4,
+                       sub_earth_lon_deg: -4.7, sub_earth_lat_deg: 1.4,
+                       subsolar_lon_deg: -6.5, subsolar_lat_deg: 1.5,
+                       colongitude_deg: 96.5 },
+          orbit: {},
+          angular_diameter_arcsec: 1793.5,
+          geo_distance_km: 384400, topo_distance_km: 384300,
+          elongation_deg: 89.4, elevation_deg: 57.08, azimuth_deg: 180.3,
+          ra_hours: 9.1, dec_deg: 18.2, sun_elevation_deg: -20.0,
+          velocity_kms: 1.02, light_time_s: 1.28,
+        },
+        rise_set: { rise_utc: '2026-05-25T01:00:00+00:00',
+                    transit_utc: '2026-05-25T07:30:00+00:00',
+                    set_utc: '2026-05-25T14:00:00+00:00',
+                    next_rise_utc: '2026-05-26T02:00:00+00:00' },
+        transit: { elevation_deg: 57.08 },
+      },
+    } };
+  }
+  if (url === '/api/calculator') {
+    const query = body.query || {};
+    return {
+      reference_utc: '2026-05-25T07:30:00+00:00',
+      window: { start_utc: '2026-04-25T07:30:00+00:00',
+                end_utc: '2026-05-25T07:30:00+00:00' },
+      query,
+      tz_offset_hours: 8,
+      fallback: true,
+      outside_span: true,
+      truncated: false,
+      items: [
+        { when_utc: '2026-05-20T10:00:00+00:00', age_days: 4.2,
+          illumination_percent: 35.0, azimuth_deg: 120.0, altitude_deg: 40.0,
+          libration_lon_deg: -4.0, libration_lat_deg: 1.0,
+          angular_diameter_arcmin: 29.9, colongitude_deg: 110.0,
+          visible: true, outside_span: false },
+        { when_utc: '2026-05-22T22:00:00+00:00', age_days: 6.6,
+          illumination_percent: 55.0, azimuth_deg: 200.0, altitude_deg: -15.0,
+          libration_lon_deg: -3.0, libration_lat_deg: 0.5,
+          angular_diameter_arcmin: 29.8, colongitude_deg: 125.0,
+          visible: false, outside_span: true },
+      ],
+    };
   }
   if (url === '/api/settings/save') return { saved: { name: 'x', bytes: 10 }, files: [] };
   if (url === '/api/patch') {
@@ -2389,10 +2472,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 23 event kinds plus 极低照明度, which shares the range boxes and the list
+  /* 29 event kinds plus 极低照明度, which shares the range boxes and the list
      but is a crescent-session report rather than an instant list. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 24 && T.state.eventKind === 'full_moon',
+    kindChips().length === 30 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
   check('最高/最低月 and the named phenomena have their own pills',
     kindChips().some((chip) => chip.id === 'event-chip-annual_extremes')
@@ -2424,10 +2507,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const order = [...more.children]
       .filter((child) => child.tagName === 'LABEL')
       .map((child) => String(child.id).replace('event-chip-', ''));
-    check('the triangle opens the later kinds, 月面 X/V/L first then English',
+    check('the triangle opens the later kinds, Lunar X/V/L first then English',
       more.hidden === false && toggle.getAttribute('aria-expanded') === 'true'
       && order.slice(0, 5).join(',') ===
-        'xvl,aries_hoofprint,barrow_ray,cassini_moon_maiden,cheshire_moon'
+        'xvl,alexanders_beaded_rim,aries_hoofprint,barrow_ray,cassini_moon_maiden'
       && !order.includes('libration_target') && !order.includes('crescent'),
       order.join(','));
     toggle.fire('click');
@@ -2826,11 +2909,11 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     T.renderEventWindowRows();
     const phaseHead = document.getElementById('event-window-head');
     const phaseLabels = [...phaseHead.children].map((cell) => cell.textContent);
-    check('a phase row gets the phase column set plus 白昼 and the note column',
+    check('a phase row gets the phase column set plus 天光状态 and the note column',
       phaseHead.children.length === 15 &&
       phaseLabels.includes('月龄') && phaseLabels.includes('农历') &&
       phaseLabels.includes('亮度') && phaseLabels.includes('月面亮度') &&
-      phaseLabels.includes('白昼') && phaseLabels.includes('备注') &&
+      phaseLabels.includes('天光状态') && phaseLabels.includes('备注') &&
       !phaseLabels.includes('地照亮度') && !phaseLabels.includes('最佳时刻'),
       phaseLabels.join(' / '));
     const phaseCells = [...body.children[0].children].map((cell) => cell.textContent);
@@ -5980,10 +6063,17 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fire('curve-close', 'click');
     /* 实验功能: the little button under the phase strip opens a window with a
        chart and a table for one lunar surface point. */
+    const sunCallsBeforeOpen = fetchCalls.filter(
+      (call) => call.url === '/api/surface-sun').length;
     fire('experiment-open', 'click');
     await tick(); await tick();
     check('the experiment window opens from the phase strip',
       document.getElementById('experiment-backdrop').hidden === false);
+    check('opening it does not calculate before 筛选',
+      fetchCalls.filter((call) => call.url === '/api/surface-sun').length
+        === sunCallsBeforeOpen);
+    fire('experiment-filter', 'click');
+    await tick(); await tick();
     const expCall = fetchCalls.filter((call) => call.url === '/api/surface-sun').pop();
     check('it asks the core endpoint for the lunar point',
       !!expCall && expCall.body.moon_lon !== undefined
@@ -5993,6 +6083,31 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('the table is filled from the reply',
       document.getElementById('experiment-rows').children.length > 0,
       String(document.getElementById('experiment-rows').children.length));
+    {
+      const allRows = document.getElementById('experiment-rows').children.length;
+      document.getElementById('experiment-filter-min').value = '20';
+      document.getElementById('experiment-filter-max').value = '30';
+      fire('experiment-filter', 'click');
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        if (document.getElementById('experiment-rows').children.length !== allRows) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const rows = [...document.getElementById('experiment-rows').children];
+      check('筛选 keeps only rows inside the solar-altitude range',
+        rows.length > 0 && rows.length < allRows,
+        `${rows.length} / ${allRows}`);
+      document.getElementById('experiment-filter-min').value = '-90';
+      document.getElementById('experiment-filter-max').value = '90';
+      fire('experiment-filter', 'click');
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        if (document.getElementById('experiment-rows').children.length === allRows) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
     check('the chart has something to draw',
       !!T.state.experiment && T.state.experiment.samples.length > 0);
     {
@@ -6459,6 +6574,339 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     }
     T.state.selection = saved;
     set('mesh-corrected', correctedBefore);
+  }
+
+  console.log('');
+  console.log('the experiment window can be moved');
+  {
+    T.openExperiment();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    check('the experimental window opens',
+      T.state.experimentOpen === true
+      && document.getElementById('experiment-backdrop').hidden === false);
+    const before = { ...T.state.experimentWindow };
+    const head = document.getElementById('experiment-head');
+    head.fire('pointerdown', {
+      clientX: 120, clientY: 120, target: head, preventDefault() {},
+    });
+    document.dispatchEvent({ type: 'pointermove', clientX: 190, clientY: 165 });
+    document.dispatchEvent({ type: 'pointerup' });
+    check('dragging the title bar moves it',
+      T.state.experimentWindow.left !== before.left
+      || T.state.experimentWindow.top !== before.top,
+      JSON.stringify(T.state.experimentWindow));
+    T.closeExperiment();
+    check('and it closes again',
+      T.state.experimentOpen === false
+      && document.getElementById('experiment-backdrop').hidden === true);
+  }
+
+  console.log('');
+  console.log('a 3D rectangle resizes one side at a time');
+  {
+    const savedView = T.state.view3d;
+    const savedSelection = T.state.selection;
+    T.state.view3d = true;
+    document.getElementById('mesh-ellipse').checked = false;
+    document.getElementById('mesh-corrected').checked = true;
+    T.state.selection = { lon: 0, lat: 80, radiusFraction: 1.2,
+                          rotationDeg: 0, aspect: 1 };
+    const shape = T.globeSelectionScreen();
+    check('a very large polar box keeps all four sides',
+      shape && shape.edges.length === 4
+      && shape.edges.every((edge) => edge.length >= 2),
+      JSON.stringify(shape && shape.edges.map((edge) => edge.length)));
+    const edgeMid = (points) => points.reduce((sum, point) => ({
+      x: sum.x + point.x / points.length,
+      y: sum.y + point.y / points.length,
+    }), { x: 0, y: 0 });
+    // The huge box above is degenerate enough that its sides crowd the limb;
+    // naming is checked on a box whose four sides are still separate.
+    T.state.selection = { lon: 0, lat: 80, radiusFraction: 0.2,
+                          rotationDeg: 0, aspect: 1 };
+    const moderate = T.globeSelectionScreen();
+    const mid = edgeMid(moderate.edges[1]);
+    check('the right side answers to its own edge name',
+      T.globeSelectionHit({ x: mid.x, y: mid.y }, moderate) === 'edge-r');
+    T.state.selection = { lon: 0, lat: 80, radiusFraction: 1.2,
+                          rotationDeg: 0, aspect: 1 };
+    const opposite = edgeMid(shape.edges[3]);
+    const centre = shape.centre;
+    const dx = mid.x - centre.x;
+    const dy = mid.y - centre.y;
+    const length = Math.max(1e-6, Math.hypot(dx, dy));
+    const ground = T.selectionGroundBox();
+    const drag = {
+      mode: 'resize3d-edge',
+      start: { ...T.state.selection },
+      side: 1,
+      anchor: opposite,
+      axis: { x: dx / length, y: dy / length },
+      half: length,
+      halfW: Math.abs(ground.x1 - ground.x0) / 2,
+      halfH: Math.abs(ground.y1 - ground.y0) / 2,
+      radiusKm: ground.camera.radiusKm,
+    };
+    const next = T.resizeGlobeSelectionByEdge(drag, {
+      x: opposite.x + drag.axis.x * length * 1.4,
+      y: opposite.y + drag.axis.y * length * 1.4,
+    });
+    check('dragging one side changes the aspect, not only the radius',
+      next && Math.abs(next.aspect - 1) > 0.1,
+      JSON.stringify(next && { aspect: next.aspect,
+        radiusFraction: next.radiusFraction }));
+    T.state.selection = savedSelection;
+    T.state.view3d = savedView;
+  }
+
+  console.log('');
+  console.log('the experiment window has two tabs and a calculator');
+  {
+    T.state.manualMarks.push({ id: 98765, number: 1, lon: 12.34, lat: -5.67,
+                              text: '标记点X' });
+    fire('experiment-open', 'click');
+    await tick();
+    fire('experiment-tab-calc', 'click');
+    check('the calculator tab shows its pane and hides the sun pane',
+      document.getElementById('experiment-pane-calc').hidden === false
+      && document.getElementById('experiment-pane-sun').hidden === true
+      && document.getElementById('experiment-reset-view').hidden === true);
+    check('the calculator is seeded from the main page',
+      !!document.getElementById('calc-when').value
+      && document.getElementById('calc-lat').value !== ''
+      && document.getElementById('calc-lon').value !== '');
+    check('the calculator can pick a manual mark',
+      [...document.getElementById('calc-mark').options]
+        .some((option) => option.value === '98765'));
+    set('calc-mark', '98765');
+    fire('calc-mark', 'change');
+    check('picking the mark fills both coordinates',
+      document.getElementById('calc-lon').value === '12.3400'
+      && document.getElementById('calc-lat').value === '-5.6700');
+    T.state.manualMarks = T.state.manualMarks.filter(
+      (mark) => mark.id !== 98765);
+    check('下一次 + 月龄 only offers 相同, with the span and error off',
+      document.getElementById('calc-span-value').disabled === true
+      && document.getElementById('calc-span-unit').value === 'year'
+      && document.getElementById('calc-error').disabled === true
+      && document.getElementById('calc-error-unit').textContent === '天'
+      && [...document.getElementById('calc-mode').options]
+        .filter((option) => !option.disabled).map((option) => option.value)
+        .join(',') === 'same');
+    set('calc-scope', 'previous');
+    fire('calc-scope', 'change');
+    set('calc-target', 'altitude');
+    fire('calc-target', 'change');
+    check('上一次 + 高度角 only offers 最高, with no span and no error',
+      document.getElementById('calc-mode').value === 'highest'
+      && [...document.getElementById('calc-mode').options]
+        .filter((option) => !option.disabled).map((option) => option.value)
+        .join(',') === 'highest'
+      && document.getElementById('calc-span-value').disabled === true
+      && document.getElementById('calc-error').disabled === true);
+    set('calc-target', 'libration');
+    fire('calc-target', 'change');
+    check('天平动 only offers 相似 and turns the degrees error on',
+      document.getElementById('calc-mode').value === 'similar'
+      && document.getElementById('calc-error').disabled === false
+      && document.getElementById('calc-error-unit').textContent === '°');
+    set('calc-scope', 'future');
+    fire('calc-scope', 'change');
+    set('calc-target', 'altitude');
+    fire('calc-target', 'change');
+    check('未来 + 高度角 offers 最高/最低 and the span',
+      document.getElementById('calc-span-value').disabled === false
+      && [...document.getElementById('calc-mode').options]
+        .filter((option) => !option.disabled).map((option) => option.value)
+        .join(',') === 'highest,lowest'
+      && document.getElementById('calc-error').disabled === true);
+    set('calc-mode', 'lowest');
+    fire('calc-mode', 'change');
+    set('calc-scope', 'past');
+    fire('calc-scope', 'change');
+    set('calc-target', 'shadow');
+    fire('calc-target', 'change');
+    check('过去 + 阴影带 uses 相同, the span and the degrees unit',
+      document.getElementById('calc-mode').value === 'same'
+      && document.getElementById('calc-span-value').disabled === false
+      && document.getElementById('calc-error').disabled === true
+      && document.getElementById('calc-error-unit').textContent === '°');
+
+    fire('calc-info-run', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const infoCall = fetchCalls.filter(
+      (call) => call.url === '/api/moon-report').pop();
+    check('the calculator asks for the complete moon report',
+      !!infoCall && !!infoCall.body.when
+      && infoCall.body.when.observer.lat !== undefined,
+      infoCall && JSON.stringify(infoCall.body.when));
+    check('its left pane is filled like the main moon readout',
+      /8\.48/.test(document.getElementById('calc-mi-age').textContent)
+      && /上弦月/.test(document.getElementById('calc-phase-name').textContent)
+      && !!T.state.calculatorInfo);
+
+    const queryCall = fetchCalls.filter(
+      (call) => call.url === '/api/calculator').pop();
+    check('the query carries the selected sentence',
+      queryCall && queryCall.body.query.target === 'shadow'
+      && queryCall.body.query.mode === 'same'
+      && queryCall.body.query.direction === 'past'
+      && queryCall.body.query.span_value === 1,
+      queryCall && JSON.stringify(queryCall.body.query));
+    const queryRows = document.getElementById('calc-rows').children;
+    check('the result table shows both rows',
+      queryRows.length === 2, String(queryRows.length));
+    check('the shadow query adds the colongitude column',
+      document.getElementById('calc-colong-head').hidden === false);
+    check('visibility is a row state, not a hidden row',
+      queryRows[0].dataset.visible === 'true'
+      && queryRows[1].dataset.visible === 'false');
+    check('the outside-span fallback is marked yellow',
+      queryRows[1].classList.contains('outside-span')
+      && /时间段外/.test(document.getElementById('calc-summary').textContent));
+
+    set('calc-target', 'altitude');
+    fire('calc-target', 'change');
+    set('calc-scope', 'future');
+    fire('calc-scope', 'change');
+    set('calc-mode', 'lowest');
+    fire('calc-mode', 'change');
+    fire('calc-info-run', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const altitudeCall = fetchCalls.filter(
+      (call) => call.url === '/api/calculator').pop();
+    check('the top button runs the altitude query with 最低',
+      altitudeCall && altitudeCall.body.query.target === 'altitude'
+      && altitudeCall.body.query.mode === 'lowest'
+      && altitudeCall.body.query.direction === 'future');
+    check('an altitude query also shows the colongitude it matched',
+      document.getElementById('calc-colong-head').hidden === false);
+    set('calc-target', 'age');
+    fire('calc-target', 'change');
+    set('calc-scope', 'next');
+    fire('calc-scope', 'change');
+    fire('calc-info-run', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    check('an age query puts the colongitude column away again',
+      document.getElementById('calc-colong-head').hidden === true);
+    {
+      const savedWhen = document.getElementById('when').value;
+      const row = document.getElementById('calc-rows').children[0];
+      row.fire('click');
+      check('clicking a result row enables 同步选中时间到主界面',
+        document.getElementById('calc-to-main').disabled === false);
+      document.getElementById('calc-to-main').click();
+      await tick();
+      check('the selected result time reaches the main page',
+        document.getElementById('when').value !== savedWhen);
+      document.getElementById('when').value = savedWhen;
+      document.getElementById('calc-from-main').click();
+      check('同步主界面时间 copies the main instant back',
+        document.getElementById('calc-when').value === savedWhen.slice(0, 16));
+    }
+    {
+      const before = T.state.calculatorSplit;
+      fire('calc-splitter', 'pointerdown', {
+        clientX: 300, preventDefault() {},
+      });
+      document.dispatchEvent({ type: 'pointermove', clientX: 360 });
+      document.dispatchEvent({ type: 'pointerup' });
+      check('the calculator columns have a draggable divider',
+        T.state.calculatorSplit > before,
+        `${before} -> ${T.state.calculatorSplit}`);
+    }
+    fire('experiment-close', 'click');
+  }
+
+  console.log('');
+  console.log('the naked-eye 3D window');
+  {
+    const saved = T.state.selection;
+    T.state.selection = { lon: 0, lat: 0, radiusFraction: 0.08,
+                          rotationDeg: 0, aspect: 1 };
+    T.openNakedEye();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    check('the window opens with a base time, a one-hour gap and a baseline',
+      T.state.nakedEyeOpen === true
+      && document.getElementById('experiment-backdrop').hidden === false
+      && document.getElementById('experiment-pane-naked').hidden === false
+      && !!document.getElementById('naked-eye-time').value
+      && document.getElementById('naked-eye-time-delta').value === '1'
+      && document.getElementById('naked-eye-baseline').value === '4'
+      && document.getElementById('naked-eye-direction').value === 'poles');
+    check('its data source menu follows 模拟设置',
+      document.getElementById('naked-eye-source').options.length > 0);
+    check('its physical-resolution menu is the simulation menu',
+      document.getElementById('naked-eye-kmpx-preset').options.length > 0);
+    const infoCalls = fetchCalls.filter(
+      (call) => call.url === '/api/moon-info').slice(-2);
+    check('the information box asks for the two polar stations one hour apart',
+      infoCalls.length === 2
+      && infoCalls[0].body.when.observer.lat === 89.9
+      && infoCalls[1].body.when.observer.lat === -89.9
+      && infoCalls.every((call) => call.body.times.length === 1)
+      && infoCalls.every((call) => call.body.when.observer.height_km === 6371)
+      && Date.parse(infoCalls[1].body.times[0])
+        - Date.parse(infoCalls[0].body.times[0]) === 3600000,
+      JSON.stringify(infoCalls.map((call) => call.body.times)));
+    check('and shows each station, time, height, age, phase and libration',
+      /北极 0\.00°, 89\.90° · 高 1\.00 R_E · \d{4}-\d{2}-\d{2}.*月龄.*相位角.*天平动/
+        .test(document.getElementById('naked-eye-info-1').textContent),
+      document.getElementById('naked-eye-info-1').textContent);
+    check('and shows the libration/time difference explicitly',
+      /天平动差.*时间差 \+1\.00 h/
+        .test(document.getElementById('naked-eye-delta').textContent),
+      document.getElementById('naked-eye-delta').textContent);
+    const payload = T.nakedEyePayload(
+      '2026-05-01T00:00:00',
+      { name: '北极', lon: 0, lat: 89.9, height_km: 6371 }, 400, 400);
+    check('the picture request is raw, earthshine-off, one sample',
+      payload && payload.raw_only === true
+      && payload.earthshine.on === false
+      && payload.output.samples === 1
+      && payload.when.at === '2026-05-01T00:00:00'
+      && payload.when.observer.lat === 89.9
+      && payload.when.observer.height_km === 6371
+      && payload.component === 'image');
+    const near = T.nakedEyePayload(
+      '2026-05-01T00:00:00',
+      { name: '北极', lon: 0, lat: 89.9, height_km: 6371 },
+      400, 400, 384400, 384400);
+    const far = T.nakedEyePayload(
+      '2026-05-01T00:00:00',
+      { name: '北极', lon: 0, lat: 89.9, height_km: 6371 },
+      400, 400, 384400, 400000);
+    check('the angular field follows the station distance',
+      !!near && !!far
+      && far.selection.fov_radius_arcsec < near.selection.fov_radius_arcsec);
+    const pixels = T.nakedEyePixels();
+    check('the physical scale gives a two-panel frame',
+      pixels && pixels.width >= 64 && pixels.height >= 64,
+      JSON.stringify(pixels));
+    for (const width of [197, 2400, 2401]) {
+      const layout = T.nakedEyePanelLayout(width);
+      check(`the black seam is 5 px at width ${width}`,
+        layout.secondX - layout.panel === 5
+        && layout.panel + 5 + layout.secondWidth === layout.width,
+        JSON.stringify(layout));
+    }
+    await T.generateNakedEye();
+    check('生成图片 renders both panels and composes them',
+      T.state.nakedEyeImages
+      && T.state.nakedEyeImages.width === pixels.width
+      && T.state.nakedEyeImages.height === pixels.height
+      && T.state.nakedEyeImages.delta === 1
+      && !!T.state.nakedEyeImages.time2
+      && !document.getElementById('naked-eye-save').disabled,
+      JSON.stringify(T.state.nakedEyeImages && {
+        width: T.state.nakedEyeImages.width,
+        height: T.state.nakedEyeImages.height,
+      }));
+    T.closeNakedEye();
+    check('and it closes again',
+      T.state.nakedEyeOpen === false
+      && document.getElementById('experiment-backdrop').hidden === true);
+    T.state.selection = saved;
   }
 
   console.log('');

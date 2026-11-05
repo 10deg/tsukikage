@@ -141,13 +141,13 @@ FEATURE_CLASSES: Tuple[str, ...] = (
     "rima",
     "vallis",
     "mons",
-    "dome",
     "dorsum",
     "rupes",
     "catena",
     "promontorium",
     "albedo",
     "statio",
+    "dome",
     "pit",
     "pyroclastic",
     "imp",
@@ -351,7 +351,11 @@ def label_weight(feature: Any, group: Optional[str] = None) -> int:
     if group == "crater":
         satellite = _satellite_letter(str(getattr(feature, "name_en", "")))
         if satellite:
-            return 3 if diameter >= _LARGE_SATELLITE_KM else 4
+            # Every main crater -- even the smallest -- outranks every
+            # satellite.  The old shared tier let a large satellite outscore a
+            # small parent, which is exactly the order the density slider
+            # showed when a main crater vanished before its lettered companion.
+            return 4 if diameter >= _LARGE_SATELLITE_KM else 5
         return 2 if diameter >= _LARGE_CRATER_KM else 3
     return 5
 
@@ -438,6 +442,13 @@ _RIM_CENTRED_CLASSES = frozenset({"crater", "basin"})
 #: historical reference-sphere projection.
 _TERRAIN_LIFT_CLASSES = frozenset({
     "crater", "rima", "vallis", "mons", "dorsum", "rupes", "catena",
+})
+
+#: Linear families that may be labelled from a *visible part* of their outline
+#: when the catalogue centre is outside the frame.  A rille or a mountain chain
+#: is long; a close-up can hold half of it with its centre still off-picture.
+_LINEAR_LABEL_CLASSES = frozenset({
+    "rima", "vallis", "mons", "dorsum", "rupes", "catena",
 })
 
 #: The genuinely round impact features, used where a *rim* is meaningful
@@ -1873,6 +1884,48 @@ def plan_annotations(
     centre_y = 0.5 * (frame.height - 1)
     half_diagonal = max(1.0, math.hypot(centre_x, centre_y))
 
+    # 线性地貌: admit a feature whose centre is outside the frame when a
+    # traced piece of its outline is inside it, and anchor its caption on that
+    # visible piece.  This is what makes a rille's name follow the part of the
+    # rille the reader is actually looking at.
+    margin = max(frame.width, frame.height)
+    for index, feature in enumerate(features):
+        if inside[index] or not facing[index]:
+            continue
+        group = feature_class(feature.kind, feature.diameter_km)
+        if group not in _LINEAR_LABEL_CLASSES:
+            continue
+        if not (-margin <= float(x[index]) <= frame.width - 1 + margin
+                and -margin <= float(y[index]) <= frame.height - 1 + margin):
+            continue
+        points, _closed = _catalogue_outline(feature.name_en)
+        if not points or len(points) < 2:
+            continue
+        lat = np.array([point[1] for point in points], dtype=np.float64)
+        lon = np.array([point[0] for point in points], dtype=np.float64)
+        try:
+            traced = frame.project(lat, lon)
+        except Exception:
+            continue
+        tx = np.asarray(traced["x"], dtype=np.float64)
+        ty = np.asarray(traced["y"], dtype=np.float64)
+        visible = (
+            np.asarray(traced["facing"], dtype=bool)
+            & (tx >= 0.0) & (tx <= frame.width - 1)
+            & (ty >= 0.0) & (ty <= frame.height - 1)
+        )
+        if int(visible.sum()) < 2:
+            continue
+        visible_index = np.nonzero(visible)[0]
+        distances = (tx[visible_index] - centre_x) ** 2 + (ty[visible_index] - centre_y) ** 2
+        best = int(visible_index[int(np.argmin(distances))])
+        x[index] = tx[best]
+        y[index] = ty[best]
+        incidence[index] = float(
+            np.asarray(traced["incidence_deg"], dtype=np.float64)[best]
+        )
+        inside[index] = True
+
     # 针对选框标注: the box is a sky-space rectangle around a point, and the
     # features inside it get their own, much finer size floor and a second
     # budget.  Membership is measured in frame pixels, so it follows the same
@@ -2215,7 +2268,11 @@ def plan_annotations(
             )
         outline = None
         if (
-            index not in forced_indices
+            # Tier 0 is laid out after the budget, but a basin's rim is still
+            # the shape that says how big it is.  Skipping every forced item
+            # is why the 大型撞击盆地 circles disappeared when basins became an
+            # always-on overlay; only the basin is allowed back in.
+            (index not in forced_indices or groups.get(index) == "basin")
             and groups.get(index) in _OUTLINE_CLASSES
             and float(radius[index]) >= outline_min_radius_px
         ):

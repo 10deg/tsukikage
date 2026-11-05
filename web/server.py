@@ -895,9 +895,12 @@ def _tz_offset(request: Dict[str, Any]) -> float:
 
 def parse_observer(when: Dict[str, Any]) -> moonlib.Observer:
     site = when.get("observer") or {}
+    # 裸眼3D places its two virtual stations several Earth radii out along a
+    # chosen axis; the height is what turns a surface site into that station.
     return moonlib.Observer(
         lat=_f(site, "lat", 30),
         lon=_f(site, "lon", 120),
+        height_km=_f(site, "height_km", 0.0),
         name=str(site.get("name") or "observer"),
     )
 
@@ -1839,6 +1842,87 @@ class MoonService:
                     self._views.clear()
                 self._views[key] = cached
         return cached
+
+    def moon_info(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Instantaneous age, phase and libration for a few instants.
+
+        裸眼3D's information box changes on every keystroke in its two time
+        fields.  Rendering a disk to answer that would be absurd, and the full
+        report solves rise/set as well; this is only the state the box shows.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        raw_times = request.get("times")
+        if not isinstance(raw_times, list) or not raw_times:
+            raw_times = [when.get("at")]
+        items = []
+        for entry in raw_times[:8]:
+            at = entry.get("at") if isinstance(entry, dict) else entry
+            state = moonlib.moon_state(site, at or None)
+            phase = state.phase
+            # The two naked-eye stations differ mainly in their topocentric
+            # libration; the geocentric value would make the two info rows
+            # look identical even though the pictures are not.
+            view = moonlib.view_geometry(site, at or None)
+            items.append({
+                "when_utc": state.when_utc.isoformat(),
+                "age_days": float(phase.age_days),
+                "phase_angle_deg": float(view.phase_angle_deg),
+                "illumination_percent": float(view.illuminated_percent),
+                "phase_name_zh": str(phase.name_zh),
+                "phase_name_en": str(phase.name_en),
+                "libration_lon_deg": float(view.libration_lon_deg),
+                "libration_lat_deg": float(view.libration_lat_deg),
+                "distance_km": float(view.distance_km),
+            })
+        return {
+            "tz_offset_hours": _tz_offset(request),
+            "observer": site.as_dict(),
+            "items": items,
+        }
+
+    def moon_report(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Full Moon readout for one instant, without rendering a frame.
+
+        The calculator's left pane is the same information the main page's
+        月球信息 column shows.  It needs the report (rise/transit/set and the
+        phase/libration state), not a picture, so this is the cached report
+        path with the view summary attached and no render slot involved.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        viewpoint = parse_viewpoint(request)
+        cached = self.report(
+            when.get("at") or None, site, viewpoint=viewpoint,
+        )
+        geometry = moonlib.view_summary(cached["view"])
+        geometry["report"] = cached["report"]
+        geometry["utc_offset_hours"] = _tz_offset(request)
+        try:
+            geometry["lunar"] = moonlib.chinese_lunar_date(
+                geometry["when_utc"]).as_dict()
+        except Exception:  # pragma: no cover - a display nicety
+            geometry["lunar"] = None
+        return {"geometry": geometry, "tz_offset_hours": _tz_offset(request)}
+
+    def calculator(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """One calculator sentence: find the instants that satisfy it."""
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        query = request.get("query") or {}
+        result = moonlib.search_conditions(
+            site,
+            when.get("at") or None,
+            direction=str(query.get("direction") or "next"),
+            target=str(query.get("target") or "age"),
+            mode=str(query.get("mode") or "same"),
+            span_value=query.get("span_value"),
+            span_unit=str(query.get("span_unit") or "month"),
+            error=query.get("error"),
+        )
+        result["tz_offset_hours"] = _tz_offset(request)
+        result["observer"] = site.as_dict()
+        return result
 
     def limits(self) -> Dict[str, Any]:
         """What the page may ask for, so it can promise the same numbers."""
@@ -2896,12 +2980,20 @@ class MoonService:
         # the photograph, and the geometry pane is the frame the camera saw.
         # Both carry the chosen component: the request picked which radiance
         # this frame is being looked at in.
-        raw, _raw_info = self.process(
+        raw, raw_info = self.process(
             {"render_id": render_id, "component": component,
              "processing": self.identity_processing(request)},
             render_id=render_id, train=train,
             arcsec_per_pixel=self._linear_meta["arcsec_per_pixel"],
         )
+        if request.get("raw_only"):
+            # 裸眼3D saves the two simulated frames untouched: no labels, no
+            # earthshine and no post-processing controls.  The processed copy
+            # would be a second tone map of the same pixels and nothing reads
+            # it, so skip it.
+            body.setdefault("instrument", raw_info["instrument"])
+            body.setdefault("image", raw_info["image"])
+            return raw, body, render_id, raw
         image, processing_info = self.process(
             {"render_id": render_id, "component": component, "when": when,
              "telescope": request.get("telescope"),
@@ -5224,6 +5316,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.curve(request))
             if path == "/api/surface-sun":
                 return self._json(200, self.service.surface_sun(request))
+            if path == "/api/moon-info":
+                return self._json(200, self.service.moon_info(request))
+            if path == "/api/moon-report":
+                return self._json(200, self.service.moon_report(request))
+            if path == "/api/calculator":
+                return self._json(200, self.service.calculator(request))
             if path == "/api/cancel":
                 # 终止: the page stops waiting *and* says so.  The render polls
                 # this between bands, which is the difference between a button

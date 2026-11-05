@@ -87,6 +87,7 @@ from . import (  # noqa: F401
 )
 #   ^ imported for their side-effect-free presence as attributes; the public
 #     names themselves are re-exported explicitly below.
+from .calculator import search_conditions
 from .crescent import extreme_crescents
 from .eclipse import (
     ECLIPSE_KINDS,
@@ -390,6 +391,7 @@ __all__ = [
     # moon
     "moon_state",
     "moon_report",
+    "search_conditions",
     "libration_angles",
     "orbit_elements",
     # sun

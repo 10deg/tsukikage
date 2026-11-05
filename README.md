@@ -1,6 +1,6 @@
 # Tsukikage
 
-**当前版本 / Version：网页客户端 1.7.0 · 月面地图 1.1.0**
+**当前版本 / Version：网页客户端 1.7.1 · 月面地图 1.1.1**
 
 一套可**完全离线**运行的月球计算内核、观测模拟器与月面地图服务。
 
@@ -103,17 +103,6 @@ print(moonlib.reporting.format_moon_report(report))
 `out/windows-service/`（`out/` 已被 git 忽略，不会出现在 `git status` 里），
 体积构成见其中的 `build-info/SIZE-BREAKDOWN.md`。
 
-macOS 独立 App（DMG）：
-
-```bash
-packaging/build_macos_app.sh
-```
-
-产物是 `out/macos-app/Tsukikage-1.7.0-macos-arm64.dmg`。它使用 Swift/AppKit
-原生窗口 + macOS 自带的 WKWebView，并把 Python 后端作为 App 的内部组件；
-**不打开系统浏览器，也不要求用户访问本地 URL**。内核同样已打包，用户只提供
-月面 `.tif` 数据。详见 [`out/macos-app/README.md`](out/macos-app/README.md)。
-
 ## 运行所需的最少文件
 
 | 路径 | 功能 |
@@ -123,7 +112,6 @@ packaging/build_macos_app.sh
 | `kernels/` 的 7 个默认内核 | 位置、月相、升落、事件、可见性、天平动；约 51 MB，打包时作为 exe 同目录附件 |
 | `web/` | 非运行必需，网页客户端与月面地图服务 |
 | `service/`、`packaging/` | 非运行必需，浏览器服务版与打包 |
-| `macapp/` | 非运行必需，macOS 原生 App 外壳与 DMG |
 | `tools/` | 非运行必需 |
 | `examples/` | 非运行必需 |
 | `assets/` | 非运行必需 |
@@ -246,7 +234,7 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 - 照片库：按日期 / 月龄 / 覆盖地貌筛选，照片叠加、透明度、手画蒙版与自定义照片目录；
 - 右侧「其他设置」显示 DEM 状态，可启动全球高分辨率 DEM 下载，并可“重新构建金字塔”。
 
-月面地图使用独立版本号；本版为 **月面地图 1.1.0**，网页客户端为 **1.7.0**。
+月面地图使用独立版本号；本版为 **月面地图 1.1.1**，网页客户端为 **1.7.1**。
 
 ---
 
@@ -263,6 +251,7 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 | 边缘／极区目标的天平动可见性预报 | `moonlib.libration` |
 | 太阳视位置与八字曲线；天区图、月相图与图表 | `moonlib.sun`、`moonlib.analemma`、`moonlib.plotting` |
 | **月面点太阳高度/方位角** | `moonlib.lunar_surface_solar`、`moonlib.lunar_surface_solar_series`、`moon sunpoint` |
+| **实验功能 · 计算器**（上一次/下一次/过去/未来 × 周/月/年 × 月龄/照明度/天平动/阴影带/高度角 × 相同/相似/最高/最低） | 网页「实验功能」→「计算器」、`moonlib.calculator`、`POST /api/calculator`、`POST /api/moon-report` |
 | **观测模拟** | `moonlib.moonview` |
 | **月背视角模拟**（假想对称地球的地心） | `moonlib.view_geometry(..., viewpoint="far_side")`、全月面标题栏「月背模式」按钮 |
 | **3D 地形切片（STL，可直接打印）** | `moonlib.selection_tile`、网页「3D模型」 |
@@ -273,12 +262,13 @@ DEM、反照率、地貌库和月球照片工程，适合查位置、看周边�
 | **天平动目标分类（独立观测列表）** | `moonlib.annotations.load_libration_targets`、网页「天平动目标」 |
 | **月面特写与自动取景** | `moonlib.moonview.render_region`、`moonlib.render_feature` |
 | **月食模拟** | `moonlib.eclipse`、`moonlib.moonview` |
-| **月面 X / V / L 预报** | `moonlib.events` |
+| **Lunar X/V/L 预报** | `moonlib.events` |
 | **月面特殊观测事件预报** | `moonlib.events` |
 | **行星位置与月掩/合行星** | `moonlib.planets`、天空位置图「行星」、事件预报「行星合月」「月掩行星」、全月面「显示掩星」（轨迹、入掩前/出掩后十分钟的时间刻度、真实角直径） |
 | **最高／最低月亮** | `moonlib.events` |
 | **地貌标注**（分类、密度、避让、月海居中、避让已有图元） | `moonlib.annotations`、网页「月海居中」 |
 | **测量工具**（线／圆的地面距离、沿线与沿半径的高程剖面；选框可隐藏） | 网页「测量工具」「隐藏选框」、`POST /api/profile`、`POST /api/map/profile`、月面地图顶栏「测量」 |
+| **裸眼3D**（实验功能标签页；主界面选框在两个时间、两个地球站点生成的并排近景，默认相差 1 小时，5 px 黑线分隔） | 网页「实验功能 → 裸眼3D」、`POST /api/moon-info`、`POST /api/region` |
 | **曲线图** | `web/static/app.js`、`moonlib.analemma`、`moonlib.moonview` |
 | **模拟实拍效果** | `moonlib.instrument` |
 | **生成动画**；**HDR 图片** | `moonlib.anim`、`moonlib.encode`、`moonlib.hdr` |
