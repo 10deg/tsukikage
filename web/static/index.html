@@ -2037,10 +2037,6 @@
         <label>观测时间
           <input type="datetime-local" id="calc-when" step="60">
         </label>
-        <button class="ghost mini" id="calc-from-main"
-                title="把观测时间设为主界面当前时间">同步主界面时间</button>
-        <button class="ghost mini" id="calc-to-main" disabled
-                title="把结果表选中行的时间设为主界面时间">同步选中时间到主界面</button>
         <label>纬度 °N
           <input type="number" id="calc-lat" value="30" step="0.0001">
         </label>
@@ -2050,6 +2046,10 @@
         <label class="calc-mark-pick">手动标注点
           <select id="calc-mark" title="从主界面的手动标注点填入经纬度"></select>
         </label>
+        <button class="ghost mini" id="calc-from-main"
+                title="把观测时间设为主界面当前时间">同步主界面时间</button>
+        <button class="ghost mini" id="calc-to-main" disabled
+                title="把结果表选中行的时间设为主界面时间">同步选中时间到主界面</button>
         <button class="ghost calc-run" id="calc-info-run">计算</button>
       </div>
       <div class="calc-body" id="calc-body">

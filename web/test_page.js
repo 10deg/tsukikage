@@ -6066,14 +6066,12 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const sunCallsBeforeOpen = fetchCalls.filter(
       (call) => call.url === '/api/surface-sun').length;
     fire('experiment-open', 'click');
-    await tick(); await tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
     check('the experiment window opens from the phase strip',
       document.getElementById('experiment-backdrop').hidden === false);
-    check('opening it does not calculate before 筛选',
+    check('opening it calculates automatically',
       fetchCalls.filter((call) => call.url === '/api/surface-sun').length
-        === sunCallsBeforeOpen);
-    fire('experiment-filter', 'click');
-    await tick(); await tick();
+        > sunCallsBeforeOpen);
     const expCall = fetchCalls.filter((call) => call.url === '/api/surface-sun').pop();
     check('it asks the core endpoint for the lunar point',
       !!expCall && expCall.body.moon_lon !== undefined

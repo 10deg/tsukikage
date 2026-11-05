@@ -65,7 +65,7 @@ from moonlib.outlines import (  # noqa: E402
     outlines_available,
 )
 
-MAP_VERSION = "1.1.1"
+MAP_VERSION = "1.1.2"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -2156,7 +2156,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.1.1"
+    server_version = "TsukikageMap/1.1.2"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

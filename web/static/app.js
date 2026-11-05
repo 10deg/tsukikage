@@ -875,6 +875,7 @@ function wireRangeNudges() {
       // that now", so it follows every way the range can be moved.  The
       // experiment's nudge row moves both ends together, so it re-asks too.
       if (range.ids.some((id) => id.startsWith('anim-'))) refreshAnimationPlan();
+      if (range.ids.includes('experiment-start')) autoRefreshExperiment();
     });
   }
 }
@@ -13781,7 +13782,8 @@ function experimentFilterRange() {
   return { min, max };
 }
 
-/** The only path that starts a 月面点太阳高度 calculation. */
+/** The range filter.  The chart now recalculates by itself; pressing this
+ *  button re-runs the request and applies a freshly typed range. */
 function filterExperiment() {
   const range = experimentFilterRange();
   if (range.error) {
@@ -13793,7 +13795,22 @@ function filterExperiment() {
   refreshExperiment();
 }
 
-/** Switch the window between its two tabs without recalculating anything. */
+/** Auto-calculation for 月面点太阳高度: first open and every field change. */
+function autoRefreshExperiment() {
+  if (!state.experimentOpen || state.experimentTab !== 'sun') return;
+  if (!state.experimentFilter) {
+    const range = experimentFilterRange();
+    if (range.error) {
+      $('experiment-empty').hidden = false;
+      $('experiment-empty').textContent = range.error;
+      return;
+    }
+    state.experimentFilter = range;
+  }
+  refreshExperiment();
+}
+
+/** Switch the window between its tabs. */
 function setExperimentTab(tab) {
   const next = ['sun', 'calc', 'naked'].includes(tab) ? tab : 'sun';
   state.experimentTab = next;
@@ -13817,6 +13834,7 @@ function setExperimentTab(tab) {
   }
   if (next === 'calc') initCalculatorFields();
   if (next === 'naked') initNakedEyePane();
+  if (next === 'sun') autoRefreshExperiment();
 }
 
 async function refreshExperiment() {
@@ -22937,13 +22955,21 @@ function init() {
   $('naked-eye-kmpx').addEventListener('change', syncNakedEyeKmPx);
   $('naked-eye-generate').addEventListener('click', generateNakedEye);
   $('naked-eye-save').addEventListener('click', saveNakedEye);
-  $('experiment-from-main').addEventListener('click', experimentSetFromMain);
+  $('experiment-from-main').addEventListener('click', () => {
+    experimentSetFromMain();
+    autoRefreshExperiment();
+  });
+  for (const id of ['experiment-lon', 'experiment-lat',
+                    'experiment-start', 'experiment-end']) {
+    $(id).addEventListener('change', autoRefreshExperiment);
+  }
   $('experiment-mark').addEventListener('change', () => {
     const id = Number($('experiment-mark').value);
     const mark = state.manualMarks.find((item) => item.id === id);
     if (!mark) return;
     $('experiment-lon').value = mark.lon.toFixed(4);
     $('experiment-lat').value = mark.lat.toFixed(4);
+    autoRefreshExperiment();
   });
   $('experiment-filter').addEventListener('click', filterExperiment);
   for (const id of ['experiment-filter-min', 'experiment-filter-max']) {

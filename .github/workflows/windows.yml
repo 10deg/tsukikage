@@ -127,13 +127,12 @@ jobs:
           files: out/windows-service/Tsukikage-windows-x64.zip
           overwrite_files: true
           body: |
-            Tsukikage 1.7.1 / 月面地图 1.1.1
+            Tsukikage 1.7.2 / 月面地图 1.1.2
 
-            - 新增「裸眼3D」：两个时间、两个地球站点并排近景，支持基线/方向/时差
-            - 实验功能改为「月面点太阳高度 / 计算器 / 裸眼3D」标签页
-            - 计算器支持余经度、照明度、月龄、天平动、高度角条件检索
-            - 事件预报新增多条射线与月面亮边事件
-            - 3D 选框可独立拖动四边；主环形坑改为蓝白色标注
-            - 修复标注、盆地轮廓、曲线横轴与地图交互问题
+            - 修复了一些 bug
+            - 月面点太阳高度改为自动计算，筛选只用于重新刷新
+            - 修正 `"L"-shaped mountain` 与 `Cauchy's interrupted shadow` 的锚点、
+              余经度窗口和太阳高度范围
+
 
             Windows 包需要 `kernels/` 目录完整才能运行；DEM/彩色底图请自行放入该目录。

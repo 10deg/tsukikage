@@ -238,9 +238,11 @@ ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
                  31.86, 31.93, -2.9, -1.7, -2.5,
                  colong_deg=150.0, colong_tolerance_deg=8.0, setting=True),
     _AnchoredRay("l_shaped_mountain", '"L"-shaped mountain',
-                 10.92, 42.95, -18.0, -15.0, -17.0),
+                 10.92, 42.95, 0.4, 2.0, 0.8,
+                 colong_deg=169.0, colong_tolerance_deg=8.0, setting=True),
     _AnchoredRay("cauchys_interrupted_shadow", "Cauchy's interrupted shadow",
-                 38.32, 9.55, -4.5, 1.0, -2.8),
+                 38.37, 9.55, 1.5, 9.0, 5.0,
+                 colong_deg=325.0, colong_tolerance_deg=5.0),
 )
 
 #: Events whose whole definition is a colongitude range.
