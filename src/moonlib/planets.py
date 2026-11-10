@@ -4,7 +4,7 @@ Everything here reads the ephemeris the rest of :mod:`moonlib` already loads:
 ``de440s.bsp`` carries the inner planets and the outer *barycentres*, which is
 all a geocentric observer needs -- the offset between a gas giant's centre and
 its barycentre is below an arcsecond at the Earth.  The radii come from
-``pck00010.tpc`` through :func:`moonlib.kernels.body_radii_km`.
+``pck00011.tpc`` through :func:`moonlib.kernels.body_radii_km`.
 
 Two products live here:
 

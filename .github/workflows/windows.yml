@@ -72,7 +72,7 @@ jobs:
           $dist = "out/windows-service/dist"
           $bad = Get-ChildItem out/windows-service/build/pyinstaller/tsukikage -Recurse -File |
             Where-Object { $_.Extension -in '.tif', '.tiff', '.exr' -or
-                           $_.Name -in @('naif0012.tls', 'de440s.bsp', 'pck00010.tpc',
+                           $_.Name -in @('naif0012.tls', 'de440s.bsp', 'pck00011.tpc',
                                         'gm_de440.tpc', 'moon_pa_de440_200625.bpc',
                                         'moon_de440_220930.tf', 'earth_latest_high_prec.bpc') }
           if ($bad) {
@@ -82,8 +82,13 @@ jobs:
           if (-not (Test-Path "$dist/Tsukikage.exe")) {
             throw "$dist/Tsukikage.exe missing"
           }
+          $outline = Get-ChildItem out/windows-service/build/pyinstaller/tsukikage `
+            -Recurse -Filter moon_outlines.geojson -File
+          if (-not $outline) {
+            throw "moon_outlines.geojson did not enter the exe bundle"
+          }
           New-Item -ItemType Directory -Force -Path "$dist/kernels" | Out-Null
-          $names = @('naif0012.tls', 'de440s.bsp', 'pck00010.tpc', 'gm_de440.tpc',
+          $names = @('naif0012.tls', 'de440s.bsp', 'pck00011.tpc', 'gm_de440.tpc',
                      'moon_pa_de440_200625.bpc', 'moon_de440_220930.tf',
                      'earth_latest_high_prec.bpc')
           foreach ($name in $names) {
@@ -127,12 +132,8 @@ jobs:
           files: out/windows-service/Tsukikage-windows-x64.zip
           overwrite_files: true
           body: |
-            Tsukikage 1.7.2 / 月面地图 1.1.2
+            Tsukikage 1.7.3 / 月面地图 1.1.3
 
-            - 修复了一些 bug
-            - 月面点太阳高度改为自动计算，筛选只用于重新刷新
-            - 修正 `"L"-shaped mountain` 与 `Cauchy's interrupted shadow` 的锚点、
-              余经度窗口和太阳高度范围
-
+            - 修正了一些 bug
 
             Windows 包需要 `kernels/` 目录完整才能运行；DEM/彩色底图请自行放入该目录。

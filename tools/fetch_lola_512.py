@@ -26,6 +26,11 @@ Four details matter and are easy to get wrong:
   strip per 16 rows: :class:`moonlib.terrain._StrippedTiff` reads a row by
   strip offset and refuses tiled or compressed files.
 
+This mosaic is optional when the goal is only ``SLDEM2015_512.tif``:
+``tools/fetch_sldem_512.py`` downloads just the 60-90 degree rows of the 45-90
+bands when this file is absent.  Building it is still worth it if the mosaic is
+wanted as a data source in its own right, or to avoid that 11 GB fetch.
+
 Usage
 -----
     ./.venv/bin/python tools/fetch_lola_512.py            # download + stitch

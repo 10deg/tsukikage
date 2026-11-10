@@ -1924,6 +1924,25 @@ class MoonService:
         result["observer"] = site.as_dict()
         return result
 
+    def ephemeris(self) -> Dict[str, Any]:
+        """The loaded SPICE ephemeris and the custom files on disk."""
+        return moonlib.ephemeris_state()
+
+    def set_ephemeris(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Switch DE440 / DE441 / one local .bsp and reload the kernel pool.
+
+        A running animation is refused rather than allowed to mix two kernel
+        pools halfway through its frames; the cached view/report answers are
+        dropped so the next request is computed against the new ephemeris.
+        """
+        if self._animation_cancel is not None:
+            raise moonlib.MoonlibError("动画正在运行，先终止动画再切换星历。")
+        mode = str(request.get("mode") or "recent")
+        result = moonlib.switch_ephemeris(mode, request.get("file"))
+        with self._lock:
+            self._views.clear()
+        return result
+
     def limits(self) -> Dict[str, Any]:
         """What the page may ask for, so it can promise the same numbers."""
         return {
@@ -4746,6 +4765,12 @@ class _AnimationLabelPainter:
             "region": bool(spec.get("region", False)),
         }
         self._frozen = None
+        #: Per-feature caption offsets from the previous frame.  They are the
+        #: temporal half of the layout: the planner still recomputes every
+        #: frame (so names follow the ground), but a name that can keep its
+        #: side of the marker does, instead of jumping to another free slot.
+        self._preferred: Dict[str, Any] = {}
+        self._size: Optional[Tuple[int, int]] = None
 
     def _projection(self, item: Any, width: int, height: int) -> Any:
         view = getattr(getattr(item, "render", None), "view", None)
@@ -4781,6 +4806,7 @@ class _AnimationLabelPainter:
         terrain = self._service.terrain()
         return plan_annotations(
             projection, self._service.catalogue(), terrain=terrain,
+            preferred=self._preferred,
             **self._options,
         )
 
@@ -4824,12 +4850,21 @@ class _AnimationLabelPainter:
         if len(shape) < 2:
             return frame
         height, width = int(shape[0]), int(shape[1])
+        if self._size != (width, height):
+            self._preferred = {}
+            self._size = (width, height)
         projection = self._projection(item, width, height)
         plan = self._frozen
         if plan is None or int(plan.frame.width) != width or int(plan.frame.height) != height:
             plan = self._plan(item, width, height, projection)
             if self._spec.get("lock"):
                 self._frozen = plan
+            else:
+                self._preferred = {
+                    str(entry.name_en): (float(entry.label_x) - float(entry.x),
+                                         float(entry.label_y) - float(entry.y))
+                    for entry in plan.items if entry.label_x is not None
+                }
         plan = self._apply_light(plan, projection)
         return paint_annotation_plan(
             frame, plan,
@@ -5184,6 +5219,8 @@ class Handler(BaseHTTPRequestHandler):
                 "data_sources": self.service.data_sources(),
                 "terrain_rebuild": self.service.terrain_rebuild_status(),
             })
+        if path == "/api/ephemeris":
+            return self._json(200, self.service.ephemeris())
         if path == "/api/terrain/rebuild":
             return self._json(200, self.service.terrain_rebuild_status())
         if path == "/api/features":
@@ -5322,6 +5359,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.moon_report(request))
             if path == "/api/calculator":
                 return self._json(200, self.service.calculator(request))
+            if path == "/api/ephemeris":
+                return self._json(200, self.service.set_ephemeris(request))
             if path == "/api/cancel":
                 # 终止: the page stops waiting *and* says so.  The render polls
                 # this between bands, which is the difference between a button

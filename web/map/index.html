@@ -393,12 +393,23 @@
           <dt>状态</dt><dd id="data-state">—</dd>
         </dl>
         <div class="data-actions">
+          <button class="ghost mini" id="map-copy-link" title="复制带当前视角坐标的链接">复制链接</button>
           <button class="ghost mini" id="data-refresh">刷新状态</button>
           <button class="ghost mini" id="data-download" title="下载 LOLA 256 ppd 全球 DEM（约 8.5 GB）">下载高分辨率 DEM</button>
           <button class="ghost mini" id="data-rebuild" title="清空已烘焙的金字塔，按当前 DEM 重新烘焙整月面金字塔；耗时较长">重新构建金字塔</button>
         </div>
         <div class="hint" id="data-download-status"></div>
         <div class="hint" id="data-rebuild-status"></div>
+        <label class="field">星历
+          <select id="map-ephemeris-mode">
+            <option value="recent">DE440</option>
+            <option value="long">DE441</option>
+            <option value="custom">自定义</option>
+          </select>
+          <select id="map-ephemeris-file" hidden></select>
+          <button class="ghost mini" id="map-ephemeris-apply">切换</button>
+        </label>
+        <div class="hint" id="map-ephemeris-note"></div>
       </section>
     </div>
 
@@ -414,7 +425,7 @@
   <span id="status">正在连接本地地图服务…</span>
   <span id="source-label"></span>
   <span id="feature-count"></span>
-  <span class="map-version" id="map-version">1.1.1</span>
+  <span class="map-version" id="map-version">1.1.3</span>
 </footer>
 
 <div class="mask-backdrop" id="photo-mask-backdrop" hidden>

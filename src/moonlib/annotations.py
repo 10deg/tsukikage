@@ -1665,6 +1665,7 @@ def plan_annotations(
     lunar100: bool = False,
     region: bool = False,
     obstacles: Optional[Sequence[Tuple[float, float, float, float]]] = None,
+    preferred: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> AnnotationPlan:
     """Choose the labels for one frame and lay them out.
 
@@ -1774,6 +1775,13 @@ def plan_annotations(
         scale bar.  Captions and their leaders are laid out around them.  The
         rectangles are only obstacles; they are not labels, so they never take a
         name's slot.
+    preferred
+        Optional ``{feature name: (dx, dy)}`` hints from the previous frame of
+        an animation.  A caption whose new box can stay at the same offset from
+        its own anchor keeps that side of the marker instead of taking a
+        different free slot; this is what stops adjacent frames from swapping
+        labels while the Moon turns.  The hint is only a preference: a blocked
+        slot still moves.
     """
     if max_labels < 0:
         raise MoonlibError("max_labels cannot be negative.")
@@ -1808,6 +1816,17 @@ def plan_annotations(
         frozenset(related_crater_names(features, related))
         if related is not None else frozenset()
     )
+    preferred_offsets: Dict[str, Tuple[float, float]] = {}
+    if preferred:
+        for name, offset in preferred.items():
+            if not isinstance(offset, (tuple, list)) or len(offset) != 2:
+                continue
+            try:
+                dx, dy = float(offset[0]), float(offset[1])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(dx) and math.isfinite(dy):
+                preferred_offsets[str(name)] = (dx, dy)
     projected = frame.project(
         [feature.lat_deg for feature in features],
         [feature.lon_deg for feature in features],
@@ -2173,6 +2192,7 @@ def plan_annotations(
             "priority": order,
             "important": index in important_indices,
             "region": bool(region) and groups.get(index) in _REGION_CLASSES,
+            "preferred": preferred_offsets.get(feature.name_en),
         })
     region_keys = {entry["key"] for entry in wanted if entry["region"]}
     #: A caption this far from its marker earns a leader line.  Below it the
@@ -2892,6 +2912,11 @@ def arrange_labels(
     on the picture -- a legend, an inset, a scale bar.  Captions and leaders
     treat them like any other caption: they are kept clear of, but they are not
     candidates themselves and they never take a slot from a name.
+
+    A request may also carry ``preferred`` = ``(dx, dy)``, the offset its box
+    had on the previous animation frame.  A free candidate near that offset
+    wins over a nearer one on the other side of the marker, so a run of frames
+    keeps each name on the same side while the feature itself moves.
     """
     ordered = sorted(wanted, key=lambda request: request.get("priority", 0))
     if max_labels is None:
@@ -2981,6 +3006,15 @@ def arrange_labels(
             anchor_x, _anchor_y = request["anchor"]
             if not request.get("region") and rect[0] >= anchor_x - 0.5:
                 score -= 1.0e3
+            previous = request.get("preferred")
+            if previous is not None:
+                px = anchor_x + float(previous[0])
+                py = request["anchor"][1] + float(previous[1])
+                drift = math.hypot(rect[0] - px, rect[1] - py)
+                # Exact reuse is worth much more than the right-of-marker
+                # convention; a blocked slot still loses, because the candidate
+                # loop has already discarded every conflicting box.
+                score += -1.0e5 if drift < 3.0 else min(drift, 48.0) * 100.0
             yield (score, rect, line)
 
     def best(request: Dict[str, Any], extended: bool = False):

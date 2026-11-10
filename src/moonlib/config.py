@@ -68,7 +68,7 @@ KERNEL_MODES: Tuple[str, ...] = ("recent", "long")
 BASE_KERNELS: Tuple[str, ...] = (
     "naif0012.tls",                 # leap seconds
     "de440s.bsp",                   # JPL DE440 short planetary ephemeris
-    "pck00010.tpc",                 # planetary constants (radii, orientation)
+    "pck00011.tpc",                 # planetary constants (radii, orientation)
     "gm_de440.tpc",                 # GM constants consistent with DE440
     "moon_pa_de440_200625.bpc",     # lunar physical libration (frames kernel)
     "moon_de440_220930.tf",         # IAU_MOON / MOON_ME / MOON_PA frame chain
@@ -82,7 +82,7 @@ MODE_KERNELS: Dict[str, Tuple[str, ...]] = {
 }
 
 #: Kernels that may be present but are never auto-loaded.
-OPTIONAL_KERNELS: Tuple[str, ...] = ("de442s.bsp", "pck00011.tpc")
+OPTIONAL_KERNELS: Tuple[str, ...] = ("de442s.bsp",)
 
 #: A directory is accepted as a kernel directory only if it holds this file.
 KERNEL_PROBE_FILE = "naif0012.tls"

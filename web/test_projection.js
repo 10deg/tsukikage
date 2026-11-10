@@ -115,7 +115,8 @@ const EXPORTS = ['state', 'pixelToLonLat', 'lonLatToPixel', 'projectSelenographi
   'collectSettings', 'applySettings', 'mirroredPlan', 'frameOrientation',
   'itemColor', 'LAND_CLASSES', 'poissonPhotons', 'gaussianSigma',
   'updateNoiseInfo', 'diskPixels', 'previewPixels', 'LIMITS', 'phaseShape',
-  'polygonArea', 'activeClasses', 'magnifierView', 'SETTING_FIELDS',
+  'polygonArea', 'activeClasses', 'magnifierView',
+  'correctedSkyBounds', 'selectionSkyHalfAngles', 'SETTING_FIELDS',
   'setMirrorMode', 'mirrorMode', 'resizeByEdge', 'moonVector', 'lonLatFromVector',
   'cameraBasis', 'diskSmoothPx', 'smoothImage', 'rulerGeometry', 'rulerText', 'defaultRulerKm',
   'applyLabelEdits', 'labelKey', 'labelEdits', 'labelHidden', 'diskKmPerFramePixel',
@@ -1155,6 +1156,25 @@ console.log('');
     near(atLimb.centreX, limbBox.centre.x, 1e-9) &&
     near(atLimb.centreY, limbBox.centre.y, 1e-9),
     atLimb.centreX + ',' + atLimb.centreY);
+  /* A corrected rectangle's marquee is the irregular preimage of the ground
+     box, larger than the nominal sky box.  The live window must frame that
+     preimage, not only the handles' box, or the close-up shows a crop of the
+     selected ground. */
+  T.state.selection = { lon: geometry.libration_lon_deg + 68, lat: 8,
+                        radiusFraction: 0.16, rotationDeg: 0 };
+  document.getElementById('mesh-corrected').checked = true;
+  const correctedLimbBox = T.boxGeometry();
+  const correctedFit = T.magnifierView(200, 200);
+  const correctedBounds = T.correctedSkyBounds();
+  check('a corrected rectangle frames its full irregular preimage',
+    !!correctedBounds
+    && correctedFit.halfW > correctedLimbBox.halfW
+    && correctedFit.halfH > correctedLimbBox.halfH,
+    `${correctedFit.halfW}/${correctedFit.halfH} vs ${correctedLimbBox.halfW}/${correctedLimbBox.halfH}`);
+  check('and stays centred on the selection target',
+    near(correctedFit.centreX, correctedLimbBox.centre.x, 1e-9)
+    && near(correctedFit.centreY, correctedLimbBox.centre.y, 1e-9));
+  document.getElementById('mesh-corrected').checked = false;
   T.state.selection = null;
   canvas.width = 560; canvas.height = 560;
 }

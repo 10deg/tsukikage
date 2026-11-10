@@ -1,4 +1,4 @@
-Tsukikage 月面模拟 1.7.2 — Windows x64（本地服务 + 浏览器）
+Tsukikage 月面模拟 1.7.3 — Windows x64（本地服务 + 浏览器）
 
 目录结构
 --------
@@ -34,12 +34,20 @@ Tsukikage 月面模拟 1.7.2 — Windows x64（本地服务 + 浏览器）
 下载 tif / exr：
   https://svs.gsfc.nasa.gov/4720
 
+星历切换
+--------
+网页「模拟设置 → 高级设置」和地图「其他设置」里可以在 DE440、DE441 与
+kernels\ 目录中的自定义 .bsp 之间切换；切换后服务会自动重载内核，不需要重启。
+DE441 需要 de441_part-1/2.bsp，自定义文件直接放进 kernels\ 即可出现在菜单里。
+
 地图与照片库
 ------------
 地图服务现在是主程序的一部分，可在启动菜单选择，也可以单独启动：
   Tsukikage.exe --service map
   Tsukikage.exe --service both
   Tsukikage.exe --map-server        （旧参数，等同 --service map）
+
+非圆形地貌轮廓随 exe 一起打包，不需要另外下载 moon_outlines.geojson。
 
 地图页“照片”标签里的“修改默认目录”可以指定照片库根目录；设置保存在
 %APPDATA%\Tsukikage\map_photos_dir.json，下次启动仍然生效。示例照片没有打包，

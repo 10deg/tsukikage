@@ -49,13 +49,16 @@ from .errors import (
 from .kernels import (
     KernelSession,
     SpiceConstants,
+    available_ephemeris_files,
     describe,
+    ephemeris_state,
     init_kernels,
     is_initialized,
     kernel_session,
     loaded_kernels,
     shutdown_kernels,
     spice,
+    switch_ephemeris,
 )
 from .numerics import bisect_root, golden_minimum, wrap_angle
 from .observer import Observer
@@ -332,6 +335,9 @@ __all__ = [
     "load_settings",
     "cache_dir",
     "init_kernels",
+    "available_ephemeris_files",
+    "ephemeris_state",
+    "switch_ephemeris",
     "kernel_session",
     "KernelSession",
     "SpiceConstants",

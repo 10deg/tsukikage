@@ -316,6 +316,8 @@ const LIGHTING = {
 
 const fetchCalls = [];
 const fetchBodies = [];
+const historyWrites = [];
+const localStore = new Map();
 function fakeFetch(url, options) {
   fetchCalls.push(String(url));
   if (options && options.body) {
@@ -340,6 +342,16 @@ function fakeFetch(url, options) {
   if (url.startsWith('/api/map/lighting')) return respond(LIGHTING);
   if (url.startsWith('/api/map/features')) return respond({ features: [], total: 0 });
   if (url.startsWith('/api/map/photos')) return respond({ photos: [] });
+  if (url.startsWith('/api/map/ephemeris')) {
+    const custom = options && options.method === 'POST';
+    return respond({
+      mode: custom ? 'custom' : 'recent',
+      label: custom ? '自定义' : 'DE440',
+      file: custom ? 'de442s.bsp' : null,
+      choices: [{ name: 'de442s.bsp', path: '/kernels/de442s.bsp' }],
+      loaded: ['de440s.bsp'],
+    });
+  }
   if (url.startsWith('/api/map/data/download')) {
     return respond({ ok: true, dem: 'ldem_64.tif', fallback: false,
       download: { running: true, last_line: '准备下载…' } });
@@ -381,12 +393,16 @@ const sandbox = {
     addEventListener() {},
     ResizeObserver: class { observe() {} disconnect() {} },
     getComputedStyle: () => ({ getPropertyValue: () => '238px' }),
-    location: { hash: '' },
-    history: { replaceState() {} },
+    location: { hash: '', href: 'http://127.0.0.1:8766/' },
+    history: { replaceState(...args) { historyWrites.push(args); } },
+    localStorage: {
+      getItem: (key) => (localStore.has(key) ? localStore.get(key) : null),
+      setItem: (key, value) => localStore.set(key, String(value)),
+    },
   },
   navigator: { clipboard: { writeText: async () => {} } },
-  location: { hash: '' },
-  history: { replaceState() {} },
+  location: { hash: '', href: 'http://127.0.0.1:8766/' },
+  history: { replaceState(...args) { historyWrites.push(args); } },
   getComputedStyle: () => ({ getPropertyValue: () => '238px' }),
   ResizeObserver: class { observe() {} disconnect() {} },
   Image: FakeImage,
@@ -1728,6 +1744,25 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('a mare ring is not treated as a linear trace',
       T.textFollowFeature(feature('ring', 'mare')) === false);
     T.state.textFollow = saved;
+  }
+
+  console.log('');
+  console.log('the map remembers its view without filling browser history');
+  {
+    const before = historyWrites.length;
+    T.zoomBy(1.25, { x: 240, y: 200 }, false);
+    await wait(450);
+    check('a pan or zoom is stored locally, not in the address bar',
+      localStore.has('moon-map-view') && historyWrites.length === before,
+      `${localStore.get('moon-map-view')} / ${historyWrites.length - before}`);
+    const button = sandbox.document.getElementById('map-copy-link');
+    check('the 复制链接 button is wired', !!button);
+    if (button) button.fire('click');
+    await wait(10);
+    check('it writes exactly one hash for the shared link',
+      historyWrites.length === before + 1
+      && /^#[\d.-]+,[\d.-]+,/.test(String(historyWrites.at(-1)[2])),
+      JSON.stringify(historyWrites.at(-1)));
   }
 
   console.log('');

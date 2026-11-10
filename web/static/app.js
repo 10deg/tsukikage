@@ -85,8 +85,16 @@ const state = {
   eventSort: { key: 'date', dir: 1 }, // table sort: column and direction
   processAbort: null,   // the /api/process request in flight
   skyWindow: null,     // {left, top, width, height} of the floating window
-  skyDrag: null,       // in-progress window or plot drag
+  skyDrag: null,       // in-progress window, plot or text drag
   skyHoverEdge: null,  // plot edge under the pointer, for the cursor and grips
+  skyText: {},         // movable sky labels: key -> {fx, fy} in plot fractions
+  skyLabels: {},       // renamed sky labels: key -> text
+  skyHidden: {},       // hidden sky labels: key -> true
+  skyTextBoxes: [],    // last painted label boxes, for hit testing
+  skyTitleBoxes: [],   // last painted axis-title boxes
+  skyHoverKey: null,   // label under the pointer
+  skyHiddenAt: 0,      // guards a double-click right after the ×
+  skyExporting: false, // no × or hover marks in a saved picture
   curve: null,         // last /api/curve payload
   curveSeries: null,   // samples in plotting coordinates
   curveView: null,     // {xMin, xMax, yMin, yMax} or null for auto-fit
@@ -153,7 +161,8 @@ const state = {
   calculatorQuerySeq: 0,
   calculatorBusy: false,
   calculatorTarget: 'age',
-  calculatorSplit: 33,
+  calculatorSplit: 27,
+  calculatorColumnWidths: {},
   calculatorSplitDrag: null,
   calculatorSelected: null,
   experimentRangeOpen: false,
@@ -8054,8 +8063,21 @@ function magnifierView(availW, availH) {
   const ratio = source && DISK.width ? source.width / DISK.width : 1;
   const centreX = box ? box.centre.x * ratio : (source ? source.width / 2 : 0);
   const centreY = box ? box.centre.y * ratio : (source ? source.height / 2 : 0);
-  const halfW = box ? box.halfW * ratio : Math.max(1, (source ? source.width : availW) / 2);
-  const halfH = box ? box.halfH * ratio : Math.max(1, (source ? source.height : availH) / 2);
+  let halfW = box ? box.halfW * ratio : Math.max(1, (source ? source.width : availW) / 2);
+  let halfH = box ? box.halfH * ratio : Math.max(1, (source ? source.height : availH) / 2);
+  // A corrected rectangle's *selection* is the irregular preimage of the ground
+  // box, and it is larger than the nominal sky box the handles sit on.  The
+  // high-resolution render uses the preimage's effective extent; the live
+  // window has to use the same one or it shows only the middle of what the
+  // reader selected.  Centre stays on the target.
+  if (selectionCorrected() && !selectionEllipse() && box) {
+    const bounds = correctedSkyBounds();
+    const half = selectionSkyHalfAngles();
+    if (bounds && half && half.w > 0 && half.h > 0) {
+      halfW = Math.max(1, bounds.halfU / Math.tan(half.w) * box.halfW * ratio);
+      halfH = Math.max(1, bounds.halfV / Math.tan(half.h) * box.halfH * ratio);
+    }
+  }
   // Exact frame: the close-up must show the same ground the render will.
   const margin = MAGNIFY_FIT_MARGIN;
   const width = 2 * halfW * margin;
@@ -8488,7 +8510,7 @@ function drawMagnifier() {
     }
   }
   if (!info) return;
-  const kmPerImage = kilometresPerImagePixel();
+  const kmPerImage = kilometresPerImagePixel(view.halfW);
   const parts = [];
   if (view.box && state.geometry) {
     // The frame's own width and height, which is what a reader compares with
@@ -8525,12 +8547,13 @@ function drawMagnifier() {
  * are a scale: no other measurement is needed, and it stays right when the
  * window is resized or the picture is re-rendered at another resolution.
  */
-function kilometresPerImagePixel() {
+function kilometresPerImagePixel(halfWidthPx) {
   const box = boxGeometry();
   const arcsec = effectiveSelectionArcsec();
-  if (!box || !arcsec || !box.halfW) return null;
+  const halfW = halfWidthPx > 0 ? halfWidthPx : (box && box.halfW);
+  if (!halfW || !arcsec) return null;
   const distance = (state.geometry && state.geometry.distance_km) || 384400;
-  return (arcsec / 206264.806) * distance / box.halfW;
+  return (arcsec / 206264.806) * distance / halfW;
 }
 
 /* ── landform search ───────────────────────────────────────────────────────
@@ -9062,6 +9085,26 @@ function skyTargetView(data, closeup) {
   if (!series.length) {
     return { azMin: 0, azMax: 90, elMin: 0, elMax: 60 };
   }
+  if (closeup) {
+    // The close-up is about *this* Moon, not about fitting a whole arc: keep
+    // its current position exactly in the middle and choose a small field
+    // around it.  A quarter of the visible track's span (capped) is enough to
+    // show which way it is moving without turning the Moon into a dot.
+    const moonAz = Number((data.moon || {}).azimuth_deg) || 0;
+    const moonEl = Number((data.moon || {}).elevation_deg) || 0;
+    let low = Infinity, high = -Infinity;
+    for (const sample of series) {
+      if (!(sample.moonEl > 0)) continue;
+      low = Math.min(low, sample.moonAz);
+      high = Math.max(high, sample.moonAz);
+    }
+    const trackSpan = high > low ? high - low : 0;
+    const half = Math.max(3.0, Math.min(10.0, trackSpan * 0.22));
+    return {
+      azMin: moonAz - half, azMax: moonAz + half,
+      elMin: moonEl - half, elMax: moonEl + half,
+    };
+  }
   // A close-up is about the part of the track the Moon is actually above the
   // horizon for.  If the whole span is below it (or the Moon never rises),
   // fall back to the whole series rather than drawing an empty frame.
@@ -9181,6 +9224,201 @@ function skyProjection(plot, view) {
   };
 }
 
+/* ── sky chart text: move, rename and hide ───────────────────────────────
+ *
+ * The curve chart has had draggable titles and labels for a while; the sky
+ * chart's axis titles, time labels, sun direction and planet names are the
+ * same kind of object.  A moved label stores its top-left corner as a fraction
+ * of the plot, so it stays where it was put when the window is resized.
+ */
+function skyLabelHidden(key) {
+  return Boolean(state.skyHidden[key]);
+}
+
+function skyLabelText(key, fallback) {
+  const value = state.skyLabels[key];
+  return value === undefined || value === '' ? fallback : String(value);
+}
+
+function skyTextBox(key, plot, defaultX, defaultY, align, baseline,
+                    width, height) {
+  const stored = state.skyText[key];
+  if (stored) {
+    return {
+      key,
+      left: plot.x + stored.fx * plot.w,
+      top: plot.y + stored.fy * plot.h,
+      width, height, stored: true,
+    };
+  }
+  let left = defaultX;
+  if (align === 'right') left -= width;
+  else if (align === 'center') left -= width / 2;
+  let top = defaultY;
+  if (baseline === 'bottom') top -= height;
+  else if (baseline === 'middle') top -= height / 2;
+  return { key, left, top, width, height, stored: false };
+}
+
+function skyCloseBox(box) {
+  const size = 11;
+  return { x: box.left + box.width + 1, y: box.top - 5, w: size, h: size };
+}
+
+/** The small × on a label, absent from an exported picture. */
+function skyPaintClose(ctx, key, box) {
+  if (state.skyExporting) return null;
+  const close = skyCloseBox(box);
+  const active = state.skyHoverKey === key;
+  ctx.save();
+  ctx.globalAlpha = active ? 1 : 0.52;
+  ctx.fillStyle = 'rgba(9,12,18,.88)';
+  ctx.beginPath();
+  ctx.arc(close.x + close.w / 2, close.y + close.h / 2,
+    close.w / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = active ? 'rgba(230,232,238,.92)' : 'rgba(150,165,185,.58)';
+  ctx.lineWidth = 0.7;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(230,232,238,.88)';
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.moveTo(close.x + 3.4, close.y + 3.4);
+  ctx.lineTo(close.x + 7.6, close.y + 7.6);
+  ctx.moveTo(close.x + 7.6, close.y + 3.4);
+  ctx.lineTo(close.x + 3.4, close.y + 7.6);
+  ctx.stroke();
+  ctx.restore();
+  return close;
+}
+
+/** Draw one horizontal sky label and record its box for dragging. */
+function skyDrawLabel(ctx, key, text, plot, defaultX, defaultY, options) {
+  const opts = options || {};
+  const shown = skyLabelText(key, text);
+  if (!shown || skyLabelHidden(key)) return null;
+  const font = opts.font || '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.font = font;
+  const pad = opts.padding || 0;
+  const height = opts.height || 15;
+  const width = Math.max(opts.width || 0, ctx.measureText(shown).width + 2 * pad);
+  const box = skyTextBox(key, plot, defaultX, defaultY,
+    opts.align || 'left', opts.baseline || 'top', width, height);
+  if (opts.box) {
+    ctx.fillStyle = opts.fill || 'rgba(9,12,18,.74)';
+    ctx.fillRect(box.left, box.top, width, height);
+    if (opts.stroke) {
+      ctx.strokeStyle = opts.stroke;
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(box.left, box.top, width, height);
+    }
+  }
+  ctx.fillStyle = opts.color || '#8b93a3';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(shown, box.left + pad, box.top + height / 2);
+  const close = opts.noClose ? null : skyPaintClose(ctx, key, box);
+  state.skyTextBoxes.push({
+    key, text: shown, x: box.left, y: box.top, w: width, h: height, close,
+  });
+  return box;
+}
+
+/** Draw a horizontal or rotated axis title, with the same move/edit/hide. */
+function skyDrawTitle(ctx, key, text, plot, defaultLeft, defaultTop,
+                      vertical, align) {
+  const hiddenKey = `title:${key}`;
+  const shown = skyLabelText(hiddenKey, text);
+  if (!shown || skyLabelHidden(hiddenKey)) return null;
+  const font = '10.5px -apple-system, "PingFang SC", sans-serif';
+  ctx.font = font;
+  const textWidth = ctx.measureText(shown).width;
+  const height = 16;
+  const boxHeight = vertical ? Math.max(20, textWidth) : height;
+  const boxWidth = vertical ? 18 : textWidth;
+  const stored = state.skyText[hiddenKey];
+  let left;
+  let top;
+  if (stored) {
+    left = plot.x + stored.fx * plot.w;
+    top = plot.y + stored.fy * plot.h;
+  } else if (vertical) {
+    top = defaultTop - boxHeight / 2;
+    left = defaultLeft - boxWidth / 2;
+  } else {
+    left = align === 'center' ? defaultLeft - boxWidth / 2 : defaultLeft;
+    top = defaultTop;
+  }
+  ctx.save();
+  if (vertical) {
+    ctx.translate(left + boxWidth / 2, top + boxHeight / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#98a0b0';
+    ctx.fillText(shown, 0, 0);
+  } else {
+    ctx.textAlign = align === 'center' ? 'center' : 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#98a0b0';
+    ctx.fillText(shown, align === 'center' ? left + boxWidth / 2 : left,
+      top + boxHeight / 2);
+  }
+  ctx.restore();
+  const box = { left, top, width: boxWidth, height: boxHeight };
+  const close = skyPaintClose(ctx, hiddenKey, box);
+  state.skyTitleBoxes.push({
+    key, text: shown, x: left, y: top, w: boxWidth, h: boxHeight,
+    close, closeKey: hiddenKey,
+  });
+  return box;
+}
+
+function skyPointerHits(point) {
+  const hits = [];
+  for (const box of state.skyTextBoxes) {
+    hits.push({ ...box, kind: 'text', dragKey: box.key });
+  }
+  for (const box of state.skyTitleBoxes) {
+    hits.push({ ...box, kind: 'title', dragKey: box.closeKey });
+  }
+  return hits.reverse().find((box) => (
+    point.x >= box.x - 2 && point.x <= box.x + box.w + 2
+    && point.y >= box.y - 2 && point.y <= box.y + box.h + 2
+  ));
+}
+
+function skyCloseHit(point) {
+  const boxes = [...state.skyTextBoxes, ...state.skyTitleBoxes];
+  for (let index = boxes.length - 1; index >= 0; index -= 1) {
+    const box = boxes[index];
+    const close = box.close;
+    if (!close) continue;
+    if (point.x >= close.x - 2 && point.x <= close.x + close.w + 2
+        && point.y >= close.y - 2 && point.y <= close.y + close.h + 2) {
+      return { ...box, key: box.closeKey || box.key };
+    }
+  }
+  return null;
+}
+
+function skyHideLabel(key) {
+  state.skyHidden[key] = true;
+  state.skyHoverKey = null;
+  state.skyHiddenAt = Date.now();
+  drawSky();
+}
+
+function skyEditLabel(key, fallback) {
+  const value = curveAskText('文字内容（留空恢复默认）',
+    skyLabelText(key, fallback));
+  if (value === null) return;
+  const text = value.trim();
+  if (text) state.skyLabels[key] = text;
+  else delete state.skyLabels[key];
+  drawSky();
+}
+
 function niceSkyStep(span, target) {
   const raw = Math.max(1e-6, span / Math.max(2, target));
   const power = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -9276,7 +9514,7 @@ function skyLabelItems(data, options, view, projection, plot) {
     const y = projection.y(point.moonEl);
     if (x < plot.x + 2 || x > plot.x + plot.w - 2
         || y < plot.y + 2 || y > plot.y + plot.h - 2) continue;
-    raw.push({ x, y, text: skyClockText(moment + offset) });
+    raw.push({ key: `time:${moment}`, x, y, text: skyClockText(moment + offset) });
   }
   // A five-minute interval across a long span is a wall of numbers; keep the
   // requested interval when it fits and thin by a whole multiple when it does
@@ -9324,7 +9562,7 @@ function skyPlaceLabels(ctx, items, plot, obstacles) {
     }
     if (!best) continue;
     boxes.push(best.box);
-    placed.push({ text: item.text, x: item.x, y: item.y, box: best.box });
+    placed.push({ key: item.key, text: item.text, x: item.x, y: item.y, box: best.box });
   }
   return placed;
 }
@@ -9460,6 +9698,8 @@ function skyPaintEdgeHandles(ctx, plot, hovered) {
 /** Everything inside the canvas.  Returns the plot rectangle. */
 function paintSkyChart(ctx, area, data, view, options) {
   const plot = skyPlotLayout(area);
+  state.skyTextBoxes = [];
+  state.skyTitleBoxes = [];
   const projection = skyProjection(plot, view);
   const series = state.skySeries && state.skySeries.length
     ? state.skySeries : skySeries(data);
@@ -9599,8 +9839,11 @@ function paintSkyChart(ctx, area, data, view, options) {
   // The line between the two bodies: one line at the chart's own instant,
   // labelled with the separation it measures.  It is deliberately the only
   // one -- a line per tick would be a comb, not an annotation.
+  const sunInsidePlot = sunPoint.x > plot.x && sunPoint.x < plot.x + plot.w
+    && sunPoint.y > plot.y && sunPoint.y < plot.y + plot.h
+    && Number(data.sun.elevation_deg) > -18;
   let elongationBox = null;
-  if (options.elongation) {
+  if (options.elongation && sunInsidePlot) {
     ctx.beginPath();
     ctx.moveTo(moonPoint.x, moonPoint.y);
     ctx.lineTo(sunPoint.x, sunPoint.y);
@@ -9619,20 +9862,20 @@ function paintSkyChart(ctx, area, data, view, options) {
       ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
       const width = ctx.measureText(text).width + 10;
       const height = 15;
-      elongationBox = { x: middle.x - width / 2, y: middle.y - height / 2,
-                        w: width, h: height };
-      ctx.fillStyle = 'rgba(9,12,18,.74)';
-      ctx.fillRect(elongationBox.x, elongationBox.y, width, height);
-      ctx.fillStyle = 'rgba(160,187,240,.95)';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(text, middle.x, middle.y);
+      elongationBox = skyDrawLabel(ctx, 'elongation', text, plot,
+        middle.x - width / 2, middle.y - height / 2, {
+          width, height, padding: 5, box: true,
+          color: 'rgba(160,187,240,.95)',
+          font: '10.5px -apple-system, "PingFang SC", sans-serif',
+        });
     }
   }
 
-  // Sun marker, when it is in the view; otherwise the direction arrow.
-  if (sunRelevant && sunPoint.x > plot.x - 12 && sunPoint.x < plot.x + plot.w + 12
-      && sunPoint.y > plot.y - 12 && sunPoint.y < plot.y + plot.h + 12) {
+  // Sun marker, when it is in the view; otherwise the direction arrow.  In a
+  // close-up the Sun may be inside the small field: then it is a body, not a
+  // direction, and no arrow is drawn.
+  const sunInFrame = sunInsidePlot;
+  if ((sunRelevant || closeup) && sunInFrame) {
     ctx.beginPath();
     ctx.arc(sunPoint.x, sunPoint.y, 5, 0, Math.PI * 2);
     ctx.fillStyle = '#ffd166';
@@ -9649,7 +9892,7 @@ function paintSkyChart(ctx, area, data, view, options) {
   // a little bigger and carries the Earth's shadow: it is the one state where
   // the Moon's own face, not its position, is what the reader came to see.
   const eclipse = data.eclipse && data.eclipse.active ? data.eclipse : null;
-  const moonMarkerRadius = eclipse ? 11 : 7.5;
+  const moonMarkerRadius = eclipse ? 11 : (closeup ? 13 : 7.5);
   if (moonPoint.x > plot.x - 26 && moonPoint.x < plot.x + plot.w + 26
       && moonPoint.y > plot.y - 26 && moonPoint.y < plot.y + plot.h + 26) {
     if (eclipse) {
@@ -9661,9 +9904,12 @@ function paintSkyChart(ctx, area, data, view, options) {
     }
   }
 
-  // In the close-up the Sun is reduced to a direction: an arrow from the Moon
-  // towards it, clipped at the frame, with the compass direction on its tip.
-  if (closeup) {
+  // When the Sun is outside the frame it is reduced to a direction: an arrow
+  // from the Moon towards it, clipped at the frame, with the compass direction
+  // on its tip.  This is the close-up's usual case, but a horizon view that
+  // has panned the Sun off-screen needs the same cue.
+  if (!sunInFrame && (closeup
+      || Number(data.sun.elevation_deg) > -18)) {
     let dx = sunPoint.x - moonPoint.x;
     let dy = sunPoint.y - moonPoint.y;
     const length = Math.hypot(dx, dy);
@@ -9697,17 +9943,15 @@ function paintSkyChart(ctx, area, data, view, options) {
       ctx.strokeStyle = '#ffb040';
       ctx.lineWidth = 1.4;
       ctx.stroke();
-      const label = `太阳 ${skyAzText(data.sun.azimuth_deg)}`;
+      const label = `太阳 距角 ${elongation.toFixed(1)}°`;
       ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
       const width = ctx.measureText(label).width;
-      const textX = skyClamp(endX + dx * 7, plot.x + 3, plot.x + plot.w - width - 3);
+      const textX = skyClamp(endX + dx * 7, plot.x + 3, plot.x + plot.w - width - 5);
       const textY = skyClamp(endY + dy * 7, plot.y + 10, plot.y + plot.h - 4);
-      ctx.fillStyle = 'rgba(9,12,18,.68)';
-      ctx.fillRect(textX - 2, textY - 8, width + 4, 13);
-      ctx.fillStyle = '#ffc266';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(label, textX, textY);
+      skyDrawLabel(ctx, 'elongation', label, plot, textX, textY - 6.5, {
+        width: width + 4, height: 13, padding: 2, box: true,
+        color: '#ffc266', font: '10px -apple-system, "PingFang SC", sans-serif',
+      });
     }
   }
 
@@ -9730,19 +9974,10 @@ function paintSkyChart(ctx, area, data, view, options) {
     const y = projection.y(el);
     ctx.fillText(skyElText(el), plot.x - 7, y);
   }
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.fillStyle = '#98a0b0';
-  ctx.font = '10.5px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText('方位角 (°)   0 = 北 · 90 = 东', plot.x + plot.w / 2,
-               plot.y + plot.h + SKY_MARGIN.bottom - 2);
-  ctx.save();
-  ctx.translate(plot.x - 42, plot.y + plot.h / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('高度角 (°)', 0, 0);
-  ctx.restore();
+  skyDrawTitle(ctx, 'x', '方位角 (°)   0 = 北 · 90 = 东', plot,
+    plot.x + plot.w / 2, plot.y + plot.h + SKY_MARGIN.bottom - 16, false, 'center');
+  skyDrawTitle(ctx, 'y', '高度角 (°)', plot, plot.x - 42,
+    plot.y + plot.h / 2, true, 'center');
   ctx.strokeStyle = 'rgba(150,165,185,.34)';
   ctx.lineWidth = 1;
   ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
@@ -9769,16 +10004,19 @@ function paintSkyChart(ctx, area, data, view, options) {
       if (textX + width > plot.x + plot.w - 2) textX = x - 5 - width;
       textX = Math.max(plot.x + 2, textX);
       const textY = skyClamp(y, plot.y + 7, plot.y + plot.h - 3);
-      ctx.fillStyle = 'rgba(9,12,18,.68)';
-      ctx.fillRect(textX - 1.5, textY - 6.5, width + 3, 12);
-      ctx.fillStyle = planet.colour;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(planet.text, textX, textY);
-      obstacles.push({
-        x: Math.min(x, textX) - 3, y: textY - 8,
-        w: Math.max(x, textX + width) - Math.min(x, textX) + 6, h: 16,
-      });
+      const box = skyDrawLabel(ctx, `planet:${planet.key}`, planet.text, plot,
+        textX, textY - 6, {
+          width: width + 4, height: 12, padding: 2, box: true,
+          color: planet.colour,
+          font: '10px -apple-system, "PingFang SC", sans-serif',
+        });
+      if (box) {
+        obstacles.push({
+          x: Math.min(x, box.left) - 3, y: Math.min(box.top, textY - 8),
+          w: Math.max(x, box.left + box.width) - Math.min(x, box.left) + 6,
+          h: 16,
+        });
+      }
     }
   }
 
@@ -9820,17 +10058,12 @@ function paintSkyChart(ctx, area, data, view, options) {
 
   // The mode badge, and the edge grips that say the axes can be re-ranged.
   const badge = closeup ? '轨迹特写' : '地平线视图';
-  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
-  const badgeWidth = ctx.measureText(badge).width + 14;
-  ctx.fillStyle = 'rgba(122,162,247,.10)';
-  ctx.fillRect(plot.x + 4, plot.y + 4, badgeWidth, 17);
-  ctx.strokeStyle = 'rgba(122,162,247,.55)';
-  ctx.lineWidth = 0.8;
-  ctx.strokeRect(plot.x + 4, plot.y + 4, badgeWidth, 17);
-  ctx.fillStyle = '#9db8f5';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(badge, plot.x + 4 + badgeWidth / 2, plot.y + 12.5);
+  skyDrawLabel(ctx, 'mode', skyLabelText('mode', badge), plot,
+    plot.x + 4, plot.y + 4, {
+      box: true, padding: 7, height: 17, color: '#9db8f5',
+      fill: 'rgba(122,162,247,.10)', stroke: 'rgba(122,162,247,.55)',
+      font: '10px -apple-system, "PingFang SC", sans-serif',
+    });
 
   if (options.interactive !== false) {
     skyPaintEdgeHandles(ctx, plot, state.skyHoverEdge);
@@ -10019,8 +10252,9 @@ async function refreshSky() {
     state.sky = payload;
     state.skySeries = skySeries(payload);
     // 轨迹特写是读者的选择，不再"月亮高就自动切过去"：自动取景会在拨时间时
-    // 把画面和坐标轴一起跳走，而锁定的意义正是让时间轴独自移动。
-    if (!state.skyViewLocked) state.skyView = null;
+    // 把画面和坐标轴一起跳走，而锁定的意义正是让时间轴独自移动。 特写是例外：
+    // 它的定义就是"当前月亮在中心"，所以每次换时刻都重新取景。
+    if (!state.skyViewLocked || $('sky-closeup').checked) state.skyView = null;
     drawSky();
   } catch (error) {
     if (sequence !== state.skySeq) return;
@@ -10132,6 +10366,19 @@ function skyCanvasDown(event) {
   event.preventDefault();
   const point = skyCanvasPoint(event);
   const plot = state.skyLayout;
+  const close = skyCloseHit(point);
+  if (close) {
+    skyHideLabel(close.key);
+    return;
+  }
+  const hit = skyPointerHits(point);
+  if (hit) {
+    state.skyDrag = {
+      kind: 'text', key: hit.dragKey,
+      dx: point.x - hit.x, dy: point.y - hit.y,
+    };
+    return;
+  }
   const edge = skyEdgeAt(point.x, point.y, plot);
   const inside = point.x >= plot.x && point.x <= plot.x + plot.w
     && point.y >= plot.y && point.y <= plot.y + plot.h;
@@ -10146,22 +10393,46 @@ function skyCanvasHover(event) {
   if (!state.skyLayout || state.skyDrag) return;
   const point = skyCanvasPoint(event);
   const edge = skyEdgeAt(point.x, point.y, state.skyLayout);
+  const close = skyCloseHit(point);
+  const hit = close || skyPointerHits(point);
+  const key = hit ? (hit.closeKey || hit.dragKey || hit.key) : null;
+  if (key !== state.skyHoverKey) {
+    state.skyHoverKey = key;
+    drawSky();
+  }
   if (edge !== state.skyHoverEdge) {
     state.skyHoverEdge = edge;
     drawSky();
   }
   const canvas = $('sky-canvas');
-  canvas.style.cursor = edge
-    ? (edge === 'left' || edge === 'right' ? 'ew-resize' : 'ns-resize')
-    : 'crosshair';
+  canvas.style.cursor = close ? 'pointer'
+    : hit ? 'move'
+      : edge
+        ? (edge === 'left' || edge === 'right' ? 'ew-resize' : 'ns-resize')
+        : 'crosshair';
+}
+
+function skyCanvasLeave() {
+  if (!state.skyHoverKey && !state.skyHoverEdge) return;
+  state.skyHoverKey = null;
+  state.skyHoverEdge = null;
+  drawSky();
 }
 
 function skyDragPlot(event) {
   const drag = state.skyDrag;
   if (!drag || !state.skyLayout) return;
-  if (drag.kind !== 'edge' && drag.kind !== 'pan') return;
   const point = skyCanvasPoint(event);
   const plot = state.skyLayout;
+  if (drag.kind === 'text') {
+    state.skyText[drag.key] = {
+      fx: skyClamp((point.x - drag.dx - plot.x) / Math.max(1, plot.w), 0, 1),
+      fy: skyClamp((point.y - drag.dy - plot.y) / Math.max(1, plot.h), 0, 1),
+    };
+    drawSky();
+    return;
+  }
+  if (drag.kind !== 'edge' && drag.kind !== 'pan') return;
   const view = drag.view;
   if (drag.kind === 'pan') {
     const projection = skyProjection(plot, view);
@@ -10234,7 +10505,29 @@ function skyCanvasWheel(event) {
   drawSky();
 }
 
-function skyCanvasDoubleClick() {
+function skyCanvasDoubleClick(event) {
+  const point = event && event.clientX !== undefined
+    ? skyCanvasPoint(event) : null;
+  if (point && skyCloseHit(point)) return;
+  if (point && Date.now() - state.skyHiddenAt < 500) return;
+  if (point) {
+    const title = state.skyTitleBoxes.slice().reverse().find((box) => (
+      point.x >= box.x - 2 && point.x <= box.x + box.w + 2
+      && point.y >= box.y - 2 && point.y <= box.y + box.h + 2
+    ));
+    if (title) {
+      skyEditLabel(title.closeKey, title.text);
+      return;
+    }
+    const label = state.skyTextBoxes.slice().reverse().find((box) => (
+      point.x >= box.x - 2 && point.x <= box.x + box.w + 2
+      && point.y >= box.y - 2 && point.y <= box.y + box.h + 2
+    ));
+    if (label) {
+      skyEditLabel(label.key, label.text);
+      return;
+    }
+  }
   state.skyView = null;
   drawSky();
 }
@@ -10254,62 +10547,6 @@ function skyCanvasBlob(canvas, callback) {
     bytes[index] = binary.charCodeAt(index);
   }
   callback(new Blob([bytes], { type: 'image/png' }));
-}
-
-/** The window's own chrome, plus the chart, at the requested resolution.
- *
- * The controls are drawn as a summary rather than as widgets: what a saved
- * picture needs is the state they are in, not eight form fields. */
-function paintSkyExport(ctx, width, height, data, view, options) {
-  ctx.fillStyle = '#171a21';
-  ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = '#39404e';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-
-  const offset = Number(data.tz_offset_hours) || 0;
-  const local = skyLocalText(data.when_utc, offset, true);
-  const geometry = data.geometry || {};
-  const illum = Number(geometry.illumination_percent_topo
-                       || geometry.illumination_percent_geo || 0);
-  const elong = Number(geometry.elongation_deg) || 0;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = '#e6e8ee';
-  ctx.font = '600 15px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText('天空位置示意图', 16, 24);
-  ctx.fillStyle = '#98a0b0';
-  ctx.font = '11px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText(`${local} · 照亮 ${illum.toFixed(1)}% · 距角 ${elong.toFixed(1)}°`, 16, 42);
-  // The close affordance is part of the window; the saved picture keeps it so
-  // the image reads as this window rather than as a loose chart.
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#98a0b0';
-  ctx.font = '16px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText('×', width - 16, 27);
-  ctx.textAlign = 'left';
-
-  const mode = options.closeup ? '轨迹特写' : '地平线视图';
-  ctx.fillStyle = '#7aa2f7';
-  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText(`${mode} · 时间标注 ${options.labels ? `${options.labelStep} min` : '关'}`
-    + ` · 距角连线 ${options.elongation ? '开' : '关'}`, 16, 60);
-
-  const area = { x: 12, y: 72, w: width - 24, h: height - 72 - 34 };
-  const plot = skyPlotLayout(area);
-  const exportView = { ...view };
-  skyGrowAspect(exportView, plot.w / Math.max(1, plot.h));
-  paintSkyChart(ctx, area, data, exportView,
-                { ...options, view: exportView, interactive: false });
-
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#98a0b0';
-  ctx.font = '10px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText(fillSkySummaryText(data), 16, height - 17, width * 0.62);
-  ctx.textAlign = 'right';
-  ctx.fillText('实线 月亮 · 虚线 太阳 · 蓝色虚线 距角',
-               width - 16, height - 17, width * 0.34);
 }
 
 function fillSkySummaryText(data) {
@@ -10332,20 +10569,22 @@ function saveSkyPng() {
     $('sky-empty').textContent = '还没有天空数据可保存。';
     return;
   }
-  const rect = $('sky-window').getBoundingClientRect();
-  const baseWidth = Math.max(480, rect.width || 960);
-  const baseHeight = Math.max(380, rect.height || 680);
+  // The file is the chart canvas, not the window around it: no window border,
+  // no title bar, no footer summary.  Its aspect is the on-screen canvas's, so
+  // the saved picture is the part the reader is actually looking at.
+  const rect = $('sky-canvas').getBoundingClientRect();
+  const baseWidth = Math.max(320, rect.width || 760);
+  const baseHeight = Math.max(240, rect.height || 520);
   const target = skyClamp(Number($('sky-save-px').value) || 2400, 320, 10000);
   $('sky-save-px').value = String(Math.round(target));
   const reference = $('sky-save-ref').value === 'short' ? 'short' : 'long';
-  const longSide = Math.max(baseWidth, baseHeight);
-  const shortSide = Math.min(baseWidth, baseHeight);
-  const scale = target / (reference === 'short' ? shortSide : longSide);
+  const basis = reference === 'short'
+    ? Math.min(baseWidth, baseHeight) : Math.max(baseWidth, baseHeight);
+  let scale = target / Math.max(1, basis);
   let width = Math.round(baseWidth * scale);
   let height = Math.round(baseHeight * scale);
-  const ceiling = 10000;
-  if (Math.max(width, height) > ceiling) {
-    const shrink = ceiling / Math.max(width, height);
+  if (Math.max(width, height) > 10000) {
+    const shrink = 10000 / Math.max(width, height);
     width = Math.round(width * shrink);
     height = Math.round(height * shrink);
   }
@@ -10357,7 +10596,14 @@ function saveSkyPng() {
   const options = skyOptions();
   const plot = skyPlotLayout({ x: 0, y: 0, w: baseWidth, h: baseHeight });
   const view = skyEnsureView(plot, state.sky, options);
-  paintSkyExport(ctx, baseWidth, baseHeight, state.sky, view, options);
+  state.skyExporting = true;
+  try {
+    paintSkyChart(ctx, { x: 0, y: 0, w: baseWidth, h: baseHeight },
+      state.sky, view, { ...options, interactive: false });
+  } finally {
+    state.skyExporting = false;
+  }
+  drawSky();
   const offset = Number(state.sky.tz_offset_hours) || 0;
   const stamp = skyLocalText(state.sky.when_utc, offset, true).replace(/[: ]/g, '-');
   const name = `moon-sky-${stamp}.png`;
@@ -13253,12 +13499,20 @@ function syncExperimentMarkOptions() {
   syncCalculatorMarkOptions();
 }
 
-/** The same anchors in the calculator's 手动标注点 menu. */
+/** The same anchors in the calculator, read-only.
+ *
+ * The calculator's latitude/longitude are the *observer's*, while a manual
+ * mark is a point on the Moon.  Writing the mark's numbers into the observer
+ * fields was the bug that made the same instant disagree with the main page;
+ * this menu now shows the mark's selenographic coordinates beside the picker
+ * and never touches the observation point.
+ */
 function syncCalculatorMarkOptions() {
   const select = $('calc-mark');
   if (!select) return;
   const previous = select.value;
   select.innerHTML = '';
+  select.options.length = 0;
   const blank = document.createElement('option');
   blank.value = '';
   blank.textContent = state.manualMarks.length
@@ -13272,12 +13526,16 @@ function syncCalculatorMarkOptions() {
   }
   const keep = state.manualMarks.some((mark) => String(mark.id) === previous);
   select.value = keep ? previous : '';
+  const readout = $('calc-mark-coord');
+  if (!readout) return;
   if (keep) {
     const mark = state.manualMarks.find((item) => String(item.id) === previous);
-    if (mark) {
-      $('calc-lon').value = mark.lon.toFixed(4);
-      $('calc-lat').value = mark.lat.toFixed(4);
-    }
+    readout.hidden = !mark;
+    readout.textContent = mark
+      ? `月面点 ${coordText(mark.lon, mark.lat)}` : '';
+  } else {
+    readout.hidden = true;
+    readout.textContent = '';
   }
 }
 
@@ -14051,8 +14309,99 @@ const CALC_ERROR_DEFAULTS = {
   altitude: 1,
 };
 
+/** The calculator table's columns, in the order the header repeats them. */
+const CALC_COLUMNS = [
+  'time', 'age', 'illumination', 'azimuth', 'altitude', 'libration',
+  'diameter', 'colongitude',
+];
+const CALC_COLUMN_DEFAULTS = {
+  time: 92, age: 52, illumination: 62, azimuth: 62, altitude: 56,
+  libration: 108, diameter: 82, colongitude: 66,
+};
+
+/** Give every calculator header a drag handle and restore its saved width. */
+function initCalculatorColumns() {
+  const table = document.querySelector('.calc-table');
+  const colgroup = $('calc-cols');
+  if (!table || !colgroup || !table.tHead || !table.tHead.rows.length) return;
+  const saved = state.calculatorColumnWidths;
+  const headers = [...table.tHead.rows[0].children];
+  for (let index = 0; index < CALC_COLUMNS.length; index += 1) {
+    const key = CALC_COLUMNS[index];
+    const th = headers[index];
+    if (!th) continue;
+    if (!(saved[key] > 0)) saved[key] = CALC_COLUMN_DEFAULTS[key] || 80;
+    let col = colgroup.children[index];
+    if (!col) {
+      col = document.createElement('col');
+      colgroup.appendChild(col);
+    }
+    col.dataset.col = key;
+    col.style.width = `${saved[key]}px`;
+    th.dataset.col = key;
+    if (th.querySelector('.event-col-resize')) continue;
+    const resize = document.createElement('span');
+    resize.className = 'event-col-resize calc-col-resize';
+    resize.title = '拖动调整列宽';
+    resize.addEventListener('click', (event) => event.stopPropagation());
+    resize.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const start = saved[key];
+      if (resize.setPointerCapture) resize.setPointerCapture(event.pointerId);
+      const move = (moveEvent) => {
+        setCalculatorColumnWidth(key, start + moveEvent.clientX - startX);
+      };
+      const up = () => {
+        resize.removeEventListener('pointermove', move);
+        resize.removeEventListener('pointerup', up);
+      };
+      resize.addEventListener('pointermove', move);
+      resize.addEventListener('pointerup', up);
+    });
+    th.appendChild(resize);
+  }
+  syncCalculatorColongColumn();
+  syncCalculatorTableWidth();
+}
+
+/** The 余经度 column only exists for some queries; hide its <col> with it. */
+function syncCalculatorColongColumn() {
+  const head = $('calc-colong-head');
+  const hidden = !head || head.hidden;
+  const col = document.querySelector('#calc-cols col[data-col="colongitude"]');
+  if (col) col.hidden = hidden;
+  syncCalculatorTableWidth();
+}
+
+/** Make the table exactly as wide as its columns, so a drag is visible even
+ *  when the columns would otherwise be stretched to fill the pane. */
+function syncCalculatorTableWidth() {
+  const table = document.querySelector('.calc-table');
+  if (!table) return;
+  const head = $('calc-colong-head');
+  const hidden = !head || head.hidden;
+  let total = 0;
+  for (const key of CALC_COLUMNS) {
+    if (key === 'colongitude' && hidden) continue;
+    total += Number(state.calculatorColumnWidths[key]) || 0;
+  }
+  if (total > 0) table.style.width = `${total}px`;
+}
+
+/** Store one column width and, when the page has the <col>, apply it. */
+function setCalculatorColumnWidth(key, width) {
+  const next = Math.max(40, Math.round(Number(width) || 0));
+  state.calculatorColumnWidths[key] = next;
+  const col = document.querySelector(`#calc-cols col[data-col="${key}"]`);
+  if (col) col.style.width = `${next}px`;
+  syncCalculatorTableWidth();
+  return next;
+}
+
 function applyCalculatorSplit(percent) {
-  const value = clamp(Number(percent) || 33, 18, 72);
+  const value = clamp(Number(percent) || 27, 18, 72);
   state.calculatorSplit = value;
   const body = $('calc-body');
   if (body && body.style && body.style.setProperty) {
@@ -14096,9 +14445,10 @@ function initCalculatorFields() {
     $('calc-lon').value = $('lon').value || '120';
     state.calculatorInitialized = true;
   }
-  syncCalculatorMarkOptions();
   syncCalculatorControls();
+  syncCalculatorMarkOptions();
   applyCalculatorSplit(state.calculatorSplit);
+  initCalculatorColumns();
 }
 
 function calculatorWhenPayload() {
@@ -14280,6 +14630,7 @@ function renderCalculatorRows(result) {
   const showColong = target === 'shadow' || target === 'altitude';
   const colongHead = $('calc-colong-head');
   if (colongHead) colongHead.hidden = !showColong;
+  syncCalculatorColongColumn();
   const offset = result && Number.isFinite(Number(result.tz_offset_hours))
     ? Number(result.tz_offset_hours) : (Number($('tz').value) || 0);
   for (const item of items) {
@@ -15183,7 +15534,7 @@ function skyHeadDown(event) {
 function skyPointerMove(event) {
   const drag = state.skyDrag;
   if (!drag) return;
-  if (drag.kind === 'edge' || drag.kind === 'pan') {
+  if (drag.kind === 'edge' || drag.kind === 'pan' || drag.kind === 'text') {
     skyDragPlot(event);
     return;
   }
@@ -16798,6 +17149,81 @@ function updateDataSourceNote() {
   const provenance = source.note ? ` · ${source.note}` : '';
   note.textContent = `${dataSourceText(source)} · 近景与分辨率上限 ` +
     `${source.km_per_px.toFixed(4)} km/px${provenance}${pyramid}`;
+}
+
+/* ── 星历 ─────────────────────────────────────────────────────────────────
+ *
+ * Three choices, one menu: DE440, DE441, or a local .bsp already in kernels/.
+ * The switch reloads the kernel pool in the server and drops its cached views;
+ * the page then re-renders so the picture and every readout use the new one.
+ */
+function syncEphemerisFileMenu() {
+  const mode = $('ephemeris-mode');
+  const file = $('ephemeris-file');
+  if (!mode || !file) return;
+  file.hidden = mode.value !== 'custom';
+}
+
+function paintEphemeris(payload) {
+  if (!payload) return;
+  state.ephemeris = payload;
+  const mode = $('ephemeris-mode');
+  const file = $('ephemeris-file');
+  const note = $('ephemeris-note');
+  if (!mode || !file) return;
+  mode.value = ['recent', 'long', 'custom'].includes(payload.mode)
+    ? payload.mode : 'recent';
+  file.innerHTML = '';
+  file.options.length = 0;
+  for (const choice of payload.choices || []) {
+    const option = document.createElement('option');
+    option.value = choice.name;
+    option.textContent = choice.name;
+    file.appendChild(option);
+  }
+  if (payload.file) file.value = payload.file;
+  syncEphemerisFileMenu();
+  if (note) {
+    note.textContent = payload.label
+      + (payload.file ? ` · ${payload.file}` : '');
+  }
+}
+
+async function loadEphemeris() {
+  try {
+    const response = await fetch('/api/ephemeris');
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
+    paintEphemeris(payload);
+  } catch (error) {
+    if ($('ephemeris-note')) {
+      $('ephemeris-note').textContent = '读取星历失败：' + String(error.message || error);
+    }
+  }
+}
+
+async function applyEphemeris() {
+  const mode = $('ephemeris-mode').value;
+  const file = $('ephemeris-file').value;
+  const button = $('ephemeris-apply');
+  if (mode === 'custom' && !file) {
+    setStatus('kernels 目录里没有可用的自定义 .bsp', 'error');
+    return;
+  }
+  if (button) { button.disabled = true; button.textContent = '重载中…'; }
+  setStatus('正在切换星历并重载内核…', 'busy');
+  try {
+    const payload = await post('/api/ephemeris', {
+      mode, file: mode === 'custom' ? file : null,
+    });
+    paintEphemeris(payload);
+    setStatus(`星历已切换为 ${payload.label}${payload.file ? ' · ' + payload.file : ''}`);
+    autoRefresh();
+  } catch (error) {
+    setStatus('星历切换失败：' + String(error.message || error), 'error');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '切换'; }
+  }
 }
 
 /* ── 重新构建金字塔 ───────────────────────────────────────────────────────
@@ -19083,10 +19509,10 @@ function buildEventKinds() {
   const host = $('event-kinds');
   if (!host) return;
   host.innerHTML = '';
-  // The first nine are the calendar-level categories and stay visible.  The
-  // rest live behind the same triangle the landform panel uses, ordered by
-  // their English name so a reader looking for "Plato's Hook" finds the row in
-  // the same place every time.
+  // The first eleven are the calendar-level categories and stay visible.  The
+  // transient Clair-Obscur effects live in one menu under them, ordered by
+  // their English name so a reader looking for "Plato's Hook" finds it in the
+  // same place every time.
   const fixed = [
     ['new_moon', '朔月'], ['first_quarter', '上弦月'],
     ['full_moon', '满月'], ['last_quarter', '下弦月'],
@@ -19135,6 +19561,7 @@ function buildEventKinds() {
   more.sort((left, right) => sortKey(left).localeCompare(sortKey(right), 'en',
     { sensitivity: 'base' }));
   more.unshift(firstMore);
+  const moreKeys = new Set(more.map((entry) => entry[0]));
   const makeChip = (key, label) => {
     const chip = document.createElement('label');
     chip.className = 'mark-chip';
@@ -19156,24 +19583,27 @@ function buildEventKinds() {
     return chip;
   };
   for (const [key, label] of fixed) host.appendChild(makeChip(key, label));
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.id = 'event-more';
-  toggle.className = 'ghost caret event-more';
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.title = '展开更多事件';
-  const moreHost = document.createElement('span');
-  moreHost.id = 'event-kinds-more';
-  moreHost.className = 'event-kinds-more';
-  moreHost.hidden = true;
-  for (const [key, label] of more) moreHost.appendChild(makeChip(key, label));
-  toggle.addEventListener('click', () => {
-    const open = moreHost.hidden;
-    moreHost.hidden = !open;
-    toggle.setAttribute('aria-expanded', String(open));
-    toggle.title = open ? '收起更多事件' : '展开更多事件';
-  });
-  host.append(toggle, moreHost);
+  const select = $('event-clair');
+  if (select) {
+    select.innerHTML = '';
+    select.options.length = 0;
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '—';
+    select.appendChild(blank);
+    for (const [key, label] of more) {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+    select.addEventListener('change', () => {
+      if (!moreKeys.has(select.value)) return;
+      state.eventKind = select.value;
+      syncEventKinds();
+      loadEvents();
+    });
+  }
   state.eventKind = state.eventKind || 'full_moon';
   syncEventKinds();
 }
@@ -19184,6 +19614,12 @@ function syncEventKinds() {
     const on = !!box && box.value === state.eventKind;
     if (box) box.checked = on;
     chip.dataset.on = on ? 'true' : 'false';
+  }
+  const select = $('event-clair');
+  if (select) {
+    const known = [...select.options].some(
+      (option) => option.value === state.eventKind);
+    select.value = known ? state.eventKind : '';
   }
 }
 
@@ -21756,6 +22192,7 @@ function init() {
     setMoonLanguage(state.moonLang === 'en' ? 'zh' : 'en');
   });
   loadLimits();
+  loadEphemeris();
   // The landform index is 900 KB and 60 ms over loopback; fetching it while the
   // first render is still running is what makes the search box instant and puts
   // the per-class counts on the switches.
@@ -22118,6 +22555,10 @@ function init() {
   $('data-source').addEventListener('change', () => {
     chooseDataSource($('data-source').value);
   });
+  if ($('ephemeris-mode')) {
+    $('ephemeris-mode').addEventListener('change', syncEphemerisFileMenu);
+    $('ephemeris-apply').addEventListener('click', applyEphemeris);
+  }
   // 区域高清补片: download only the ground the selection covers.
   $('patch-download').addEventListener('click', () => { downloadPatch(); });
   if ($('patch-cancel')) {
@@ -22872,6 +23313,13 @@ function init() {
     state.skyView = null;
     setSkyViewLock(false);
   });
+  $('sky-reset-text').addEventListener('click', () => {
+    state.skyText = {};
+    state.skyLabels = {};
+    state.skyHidden = {};
+    state.skyHoverKey = null;
+    drawSky();
+  });
   $('sky-span').addEventListener('change', refreshSky);
   // 这张图有自己的时刻：日期、时间、时区改了就重算，± 一组按钮把它当钟表走。
   for (const id of ['sky-date', 'sky-time', 'sky-tz']) {
@@ -22891,18 +23339,16 @@ function init() {
   }
   $('sky-closeup').addEventListener('change', () => {
     state.skyCloseupTouched = true;
-    // A locked view keeps its axes even when the kind of chart changes; the
-    // reader asked for the frame to stay put.
-    if (!state.skyViewLocked) state.skyView = null;
+    // Entering or leaving the close-up changes what the chart is about, so it
+    // always re-fits; in the close-up the current Moon is the centre by
+    // definition, even if the axes were locked.
+    state.skyView = null;
     drawSky();
   });
   $('sky-save').addEventListener('click', saveSkyPng);
   $('sky-canvas').addEventListener('pointerdown', skyCanvasDown);
   $('sky-canvas').addEventListener('pointermove', skyCanvasHover);
-  $('sky-canvas').addEventListener('pointerleave', () => {
-    state.skyHoverEdge = null;
-    drawSky();
-  });
+  $('sky-canvas').addEventListener('pointerleave', skyCanvasLeave);
   $('sky-canvas').addEventListener('wheel', skyCanvasWheel, { passive: false });
   $('sky-canvas').addEventListener('dblclick', skyCanvasDoubleClick);
   $('sky-head').addEventListener('pointerdown', skyHeadDown);
@@ -22987,9 +23433,11 @@ function init() {
   $('calc-mark').addEventListener('change', () => {
     const id = Number($('calc-mark').value);
     const mark = state.manualMarks.find((item) => item.id === id);
-    if (!mark) return;
-    $('calc-lon').value = mark.lon.toFixed(4);
-    $('calc-lat').value = mark.lat.toFixed(4);
+    const readout = $('calc-mark-coord');
+    if (!readout) return;
+    readout.hidden = !mark;
+    readout.textContent = mark
+      ? `月面点 ${coordText(mark.lon, mark.lat)}` : '';
   });
   for (const id of ['calc-scope', 'calc-target', 'calc-mode',
                     'calc-span-unit']) {

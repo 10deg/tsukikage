@@ -26,13 +26,12 @@ kernels/*
 # rise/set, libration and visibility work straight after a clone.
 !kernels/naif0012.tls
 !kernels/de440s.bsp
-!kernels/pck00010.tpc
 !kernels/gm_de440.tpc
 !kernels/moon_pa_de440_200625.bpc
 !kernels/moon_de440_220930.tf
 !kernels/earth_latest_high_prec.bpc
-# Not loaded by default -- see kernels/README.md -- but small and from the same
-# NAIF family, so it travels with the rest.
+# The one planetary-constants file the default set uses.  pck00010 is
+# retired: two pck files in one pool would make the constants ambiguous.
 !kernels/pck00011.tpc
 
 # A half-downloaded DEM is not a DEM.
@@ -108,3 +107,20 @@ AGENTS.md
 # Photos imported into the map's personal library are local user data, not
 # repository content.  The server recreates this directory when needed.
 /web/map_photos/
+
+# ---- published scope -------------------------------------------------------
+# The repository ships the library and the DEM download tools.  Everything
+# else in tools/ is a local curation/QA script; examples/ is not needed to run
+# anything and was removed from GitHub.
+/examples/
+/tools/*
+!/tools/_bootstrap.py
+!/tools/_striped_tiff.py
+!/tools/fetch_lola_global.py
+!/tools/fetch_lola_512.py
+!/tools/fetch_sldem_512.py
+
+# Locally saved page settings and scratch configs.
+/web/settings/*.conf
+!/web/settings/default.conf
+/gs.conf

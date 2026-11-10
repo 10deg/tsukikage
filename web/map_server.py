@@ -65,7 +65,7 @@ from moonlib.outlines import (  # noqa: E402
     outlines_available,
 )
 
-MAP_VERSION = "1.1.2"
+MAP_VERSION = "1.1.3"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -333,6 +333,25 @@ class LunarMapService:
     def set_data_download(self, downloader) -> None:
         """Install the launcher's DEM downloader (or None for the fallback)."""
         self._data_download = downloader
+
+    def ephemeris(self) -> Dict[str, Any]:
+        """The loaded SPICE ephemeris and the custom .bsp files on disk."""
+        return moonlib.ephemeris_state()
+
+    def set_ephemeris(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Switch ephemeris and drop every cache derived from the Sun/Moon."""
+        mode = str(request.get("mode") or "recent")
+        result = moonlib.switch_ephemeris(mode, request.get("file"))
+        with self._lock:
+            # Lighting, shadows, tiles and photo projections all depend on the
+            # ephemeris through the sun direction; none of them may survive the
+            # switch.  The DEM-derived layers are unchanged.
+            self._shadows.clear()
+            self._tiles.clear()
+            self._photo_tiles.clear()
+            self._photo_project.clear()
+            self._photo_coverage.clear()
+        return result
 
     def data_status(self) -> Dict[str, Any]:
         terrain = self.terrain()
@@ -2156,7 +2175,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.1.2"
+    server_version = "TsukikageMap/1.1.3"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -2230,6 +2249,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.layers())
             if path == "/api/map/data":
                 return self._json(200, self.service.data_status())
+            if path == "/api/map/ephemeris":
+                return self._json(200, self.service.ephemeris())
             if path == "/api/map/data/rebuild":
                 return self._json(200, self.service.terrain_rebuild_status())
             if path == "/api/map/features":
@@ -2325,6 +2346,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/map/data/download":
                 return self._json(200, self.service.start_data_download())
+            if path == "/api/map/ephemeris":
+                payload = self._read_json_body()
+                return self._json(200, self.service.set_ephemeris(payload))
             if path == "/api/map/data/rebuild":
                 payload = self._read_json_body()
                 return self._json(200, self.service.start_terrain_rebuild(payload))

@@ -1600,40 +1600,33 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 }
 .event-window-foot #event-window-status { flex: 0 0 auto; }
 
-/* 事件预报's later kinds live behind a triangle; the nine calendar kinds stay
-   on the first row. */
-#event-kinds .event-more {
-  display: inline-flex;
+/* 事件预报：瞬变光影事件收在一个固定行里，不再有展开三角。 */
+#proc-events .event-clair {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 20px;
-  padding: 0;
-  line-height: 0;
-  font-size: 0;
-  color: var(--ink-dim);
+  column-gap: 6px;
+  margin: 1px 0 6px;
+  font-size: 10px;
 }
-#event-kinds .event-more::before {
-  content: "";
-  display: block;
-  width: 0;
-  height: 0;
-  border-top: 4.5px solid transparent;
-  border-bottom: 4.5px solid transparent;
-  border-left: 6px solid currentColor;
-  transform: translateX(0.5px);
-  transition: transform .12s ease;
-}
-#event-kinds .event-more[aria-expanded="true"]::before {
-  transform: translateX(0.5px) rotate(90deg);
-}
-.event-kinds-more {
+#proc-events .event-clair label {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 6px;
-  flex-basis: 100%;
+  align-items: center;
+  height: 24px;
+  line-height: 24px;
+  color: var(--ink-dim);
+  white-space: nowrap;
 }
-.event-kinds-more[hidden] { display: none; }
+#proc-events .event-clair select {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 24px;
+  box-sizing: border-box;
+  vertical-align: middle;
+}
 
 /* A folded-away block of advanced settings (高级设置). */
 details.fold { margin-top: 7px; }
@@ -2791,7 +2784,19 @@ h2 .mini.curve-open:hover {
 .calc-top input[type="datetime-local"] { width: 11.4em; }
 .calc-top input[type="number"] { width: 7.4em; }
 .calc-top .calc-mark-pick select { max-width: 12em; }
+.calc-mark-coord {
+  align-self: center;
+  color: var(--ink-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
 .calc-top .calc-run { margin-left: auto; }
+#ephemeris-mode, #ephemeris-file { min-width: 0; }
+#ephemeris-apply, #map-ephemeris-apply {
+  flex: 0 0 auto;
+  min-width: 3.4em;
+  white-space: nowrap;
+}
 /* These two are secondary actions: keep the earlier mini height and let the
    row's flex-end alignment put their bottom on the same line as the inputs. */
 .calc-top #calc-from-main,
@@ -2810,7 +2815,7 @@ h2 .mini.curve-open:hover {
 }
 .calc-run:hover { background: rgba(122, 162, 247, .14); }
 .calc-body {
-  --calc-left: 33%;
+  --calc-left: 27%;
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
@@ -2875,7 +2880,7 @@ h2 .mini.curve-open:hover {
 .calc-query {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   flex-wrap: wrap;
   gap: 5px 6px;
   padding: 6px 8px;
@@ -2910,7 +2915,8 @@ h2 .mini.curve-open:hover {
   background: var(--panel);
 }
 .calc-table {
-  width: 100%;
+  width: max-content;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 10.5px;
 }
@@ -2927,7 +2933,12 @@ h2 .mini.curve-open:hover {
   background: var(--panel-2);
   font-weight: 600;
   text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.calc-table td { overflow: hidden; text-overflow: ellipsis; }
+.calc-col-resize { touch-action: none; }
 .calc-table tbody tr { cursor: pointer; }
 .calc-table tbody tr[data-visible="false"] {
   color: var(--ink-dim);

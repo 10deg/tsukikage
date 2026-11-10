@@ -789,6 +789,21 @@
               <select id="data-source"></select>
             </label>
             <p class="hint" id="data-source-note"></p>
+            <!-- 星历: DE440 / DE441 / kernels 目录里的一个自定义 .bsp。切换会
+                 重载内核池，已经缓存的视图与报告由服务端丢弃。 -->
+            <label class="wide-field" title="选择星历表；切换后自动重载内核，无需重启服务">
+              星历 <span class="en">Ephemeris</span>
+              <span class="pick-row">
+                <select id="ephemeris-mode">
+                  <option value="recent">DE440</option>
+                  <option value="long">DE441</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <select id="ephemeris-file" hidden></select>
+                <button class="ghost mini" id="ephemeris-apply">切换</button>
+              </span>
+            </label>
+            <p class="hint" id="ephemeris-note"></p>
             <!-- 区域高清补片: 只下当前选框这一小块。整月面的产品是几十 GB，
                  而近景要的常常只是坑边几度——按选框去取，才可能拿到比本地
                  更细或更好的数据。 -->
@@ -1236,6 +1251,10 @@
               <button class="ghost mini" id="events-end-sync" title="把「结束」设为主界面当前选择的时间">同步所选时间</button>
             </div>
             <span class="mark-bar" id="event-kinds"></span>
+            <div class="event-clair">
+              <label for="event-clair">Clair-Obscur Effects</label>
+              <select id="event-clair" title="选择一种瞬变光影事件"></select>
+            </div>
             <div class="event-actions">
               <button class="ghost mini" id="event-window-open" title="在更大的窗口中浏览表格">在新窗口查看表格</button>
               <button class="ghost mini" id="event-visible-only" aria-pressed="false"
@@ -1488,6 +1507,7 @@
         <button class="ghost" id="sky-lock-view" aria-pressed="true" title="视角已锁定">锁定当前视角</button>
         <button class="ghost" id="sky-refresh" title="按主界面的时间和地点重新计算">重新计算</button>
         <button class="ghost" id="sky-reset" title="把显示范围恢复到自动适配的状态，并解除锁定">复位视角</button>
+        <button class="ghost" id="sky-reset-text" title="恢复所有文字的位置、内容和显示">复位文字</button>
         <button class="ghost icon" id="sky-close" aria-label="关闭">×</button>
       </div>
     </header>
@@ -1588,7 +1608,7 @@
 
     <footer class="sky-foot" id="sky-foot">
       <span id="sky-summary">—</span>
-      <span class="sky-hint">拖动图框边缘调范围（两轴等比） · 滚轮缩放 · 双击复位</span>
+      <span class="sky-hint">拖动文字或标题改位置 · × 隐藏 · 双击改名 · 拖动图框边缘调范围（两轴等比） · 滚轮缩放 · 双击空白复位</span>
     </footer>
   </div>
 </div>
@@ -2044,8 +2064,9 @@
           <input type="number" id="calc-lon" value="120" step="0.0001">
         </label>
         <label class="calc-mark-pick">手动标注点
-          <select id="calc-mark" title="从主界面的手动标注点填入经纬度"></select>
+          <select id="calc-mark" title="读取主界面手动标注点的月面经纬度；不改变观测点"></select>
         </label>
+        <span class="calc-mark-coord" id="calc-mark-coord" hidden></span>
         <button class="ghost mini" id="calc-from-main"
                 title="把观测时间设为主界面当前时间">同步主界面时间</button>
         <button class="ghost mini" id="calc-to-main" disabled
@@ -2130,16 +2151,17 @@
           </div>
           <div class="calc-table-wrap">
             <table class="event-table calc-table">
+              <colgroup id="calc-cols"></colgroup>
               <thead>
                 <tr>
-                  <th>时间</th>
-                  <th>月龄</th>
-                  <th>照明度</th>
-                  <th>方位角</th>
-                  <th>高度</th>
-                  <th>天平动</th>
-                  <th>角直径（角分）</th>
-                  <th class="calc-colong" id="calc-colong-head" hidden>余经度</th>
+                  <th data-col="time">时间</th>
+                  <th data-col="age">月龄</th>
+                  <th data-col="illumination">照明度</th>
+                  <th data-col="azimuth">方位角</th>
+                  <th data-col="altitude">高度</th>
+                  <th data-col="libration">天平动</th>
+                  <th data-col="diameter">角直径（角分）</th>
+                  <th class="calc-colong" id="calc-colong-head" data-col="colongitude" hidden>余经度</th>
                 </tr>
               </thead>
               <tbody id="calc-rows"></tbody>

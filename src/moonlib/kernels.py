@@ -42,12 +42,13 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import numpy as np
 import spiceypy as _spiceypy
 
 from .config import (
+    BASE_KERNELS,
     KERNEL_MODES,
     MODE_KERNELS,
     Settings,
@@ -66,6 +67,9 @@ __all__ = [
     "loaded_kernels",
     "describe",
     "body_radii_km",
+    "available_ephemeris_files",
+    "ephemeris_state",
+    "switch_ephemeris",
 ]
 
 _BASE_FRAME = "J2000"
@@ -423,6 +427,95 @@ def shutdown_kernels() -> None:
         spice.kclear()
         _SESSION = None
         _LOADED_FILES = ()
+
+
+def _standard_bsp_names() -> set:
+    """SPICE kernels this package loads by mode, not as a custom choice."""
+    names = set(BASE_KERNELS) | set(MODE_KERNELS.get("recent", ()))
+    for extra in MODE_KERNELS.values():
+        names.update(extra)
+    return {name for name in names if name.lower().endswith(".bsp")}
+
+
+def available_ephemeris_files(kernel_dir: Optional[Path] = None) -> list:
+    """``.bsp`` files a reader may choose as a custom ephemeris.
+
+    The standard DE440 short and DE441 parts are modes, not custom files, so
+    they are left out.  Everything else in the kernel directory is offered by
+    name, which is what the page's menu shows.
+    """
+    session = kernel_session()
+    directory = Path(kernel_dir or session.settings.kernel_dir).expanduser()
+    standard = _standard_bsp_names()
+    choices = []
+    try:
+        paths = sorted(directory.glob("*.bsp"))
+    except OSError:  # pragma: no cover - unreadable directory
+        paths = []
+    for path in paths:
+        if path.name in standard:
+            continue
+        choices.append({"name": path.name, "path": str(path)})
+    return choices
+
+
+def ephemeris_state() -> Dict[str, Any]:
+    """What the page needs to draw the 星历 menu and say what is loaded."""
+    session = kernel_session()
+    settings = session.settings
+    mode = str(settings.kernel_mode)
+    extra = [str(item) for item in settings.extra_kernels]
+    custom = extra[0] if mode == "recent" and extra else None
+    choices = available_ephemeris_files(settings.kernel_dir)
+    current = "custom" if custom else mode
+    label = "DE441" if mode == "long" else ("自定义" if custom else "DE440")
+    file_name = Path(custom).name if custom else None
+    if custom and not any(choice["name"] == file_name for choice in choices):
+        choices.insert(0, {"name": file_name, "path": custom})
+    return {
+        "mode": current,
+        "label": label,
+        "file": file_name,
+        "path": custom,
+        "kernel_dir": str(settings.kernel_dir),
+        "choices": choices,
+        "loaded": list(loaded_kernels()),
+    }
+
+
+def switch_ephemeris(
+    mode: str, file: Optional[str] = None, *, reload: bool = True
+) -> Dict[str, Any]:
+    """Reload the SPICE pool with one of the three choices the page offers.
+
+    ``recent`` is DE440, ``long`` is DE441 (both parts), and ``custom`` loads
+    one local ``.bsp`` on top of the DE440 base.  The reload is atomic with
+    respect to every other SPICE call: :data:`_SPICE_LOCK` is held across the
+    whole clear-and-furnsh sequence.
+    """
+    choice = str(mode or "recent")
+    if choice not in ("recent", "long", "custom"):
+        raise ConfigurationError(
+            f"未知星历模式 {choice!r}；可选 recent / long / custom。"
+        )
+    if choice == "custom":
+        if not file:
+            raise ConfigurationError("自定义星历需要选择一个 .bsp 文件。")
+        path = Path(str(file)).expanduser()
+        if not path.is_absolute():
+            base = Path(kernel_session().settings.kernel_dir)
+            path = base / path
+        path = path.resolve()
+        if not path.is_file():
+            raise ConfigurationError(f"找不到自定义星历文件：{path}")
+        if path.suffix.lower() != ".bsp":
+            raise ConfigurationError("自定义星历必须是 .bsp 文件。")
+        init_kernels(
+            mode="recent", extra_kernels=[str(path)], reload=reload,
+        )
+    else:
+        init_kernels(mode=choice, extra_kernels=[], reload=reload)
+    return ephemeris_state()
 
 
 def describe() -> dict:

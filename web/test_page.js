@@ -36,6 +36,8 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'DEFAULT_OFF_CLASSES', 'animationRequest',
   'animationRenderSize', 'animationOutputPixels', 'animationSkyKm',
   'setLabelControls', 'syncResolutionPicker', 'previewPixels',
+  'loadEphemeris', 'applyEphemeris',
+  'setCalculatorColumnWidth',
   'applySettings', 'centrePlacement', 'setAllClasses',
   'eyepieceSettings', 'applyEyepiece', 'renderEvents', 'setEventVisibleOnly', 'setProcTab',
   'buildEventKinds', 'drawViewLabels', 'composeImage', 'labelEdits', 'labelHidden', 'labelClass',
@@ -56,7 +58,7 @@ const EXPORTS = ['state', 'views', 'setZoom', 'setResultTab', 'setTrainTab',
   'litCentreFromPixels', 'skyAutoCloseup', 'skyTargetView', 'skyGrowAspect',
   'imageToScreen',
   'skyFitAspectFromAz', 'skyEdgeAt', 'skyPlaceLabels', 'skySeries', 'skyOptions',
-  'skyLabelItems', 'saveSkyPng', 'fillMoonInfo', 'eclipseReadout',
+  'skyLabelItems', 'saveSkyPng', 'drawSky', 'fillMoonInfo', 'eclipseReadout',
   'skyPaintEclipseMoon', 'openEventWindow', 'closeEventWindow', 'occultationTimeBoxes', 'applyOccultationTick',
   'eventCsvText', 'eventsFromCsv', 'eventRowFromForecast',
   'eventColumnsFor', 'eventCellText', 'eventMetric', 'renderEventHeader',
@@ -529,6 +531,18 @@ function respond(url, body) {
                                  min_px: 64, terrain_km_per_px: 0.11845058759433393,
                                  label_outline_px: 9, cpu_count: 8 },
              data_sources: SOURCES };
+  }
+  if (url === '/api/ephemeris') {
+    const custom = body && body.mode === 'custom';
+    return {
+      mode: custom ? 'custom' : 'recent',
+      label: custom ? '自定义' : 'DE440',
+      file: custom ? (body.file || 'de442s.bsp') : null,
+      path: custom ? `/kernels/${body.file || 'de442s.bsp'}` : null,
+      kernel_dir: '/kernels',
+      choices: [{ name: 'de442s.bsp', path: '/kernels/de442s.bsp' }],
+      loaded: custom ? ['de440s.bsp', body.file || 'de442s.bsp'] : ['de440s.bsp'],
+    };
   }
   if (url === '/api/source') {
     const picked = SOURCES.sources.find((item) => item.id === body.id) || SOURCES.sources[1];
@@ -1402,7 +1416,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
      plus the animation's own km/px row, which is marked data-own so re-copying
      the ladder cannot duplicate it. */
   check('every menu offers a way in by hand',
-    (html.match(/<option value="custom"/g) || []).length === 6,
+    (html.match(/<option value="custom"/g) || []).length === 7,
     (html.match(/<option value="custom"/g) || []).length);
   check('the preview menu offers the sizes the page may ask for',
     previewMenu.length >= 7 && previewMenu.every((px) => px <= T.LIMITS.preview_px),
@@ -2472,20 +2486,17 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('the forecasting pane is the one on screen',
     document.getElementById('proc-events').hidden === false &&
     document.getElementById('proc-animation').hidden === true);
-  /* 29 event kinds plus 极低照明度, which shares the range boxes and the list
-     but is a crescent-session report rather than an instant list. */
+  /* The eleven calendar-level kinds are pills; the twenty transient
+     Clair-Obscur effects are one menu under them. */
   check('the kind switches are single-choice pills',
-    kindChips().length === 30 && T.state.eventKind === 'full_moon',
+    kindChips().length === 11 && T.state.eventKind === 'full_moon',
     String(kindChips().length));
-  check('最高/最低月 and the named phenomena have their own pills',
+  check('最高/最低月 and the calendar-level kinds have their own pills',
     kindChips().some((chip) => chip.id === 'event-chip-annual_extremes')
-    && kindChips().some((chip) => chip.id === 'event-chip-eyes_of_clavius')
-    && kindChips().some((chip) => chip.id === 'event-chip-cheshire_moon')
     && kindChips().some((chip) => chip.id === 'event-chip-libration_target')
     && kindChips().some((chip) => chip.id === 'event-chip-planet_conjunction')
     && kindChips().some((chip) => chip.id === 'event-chip-planet_occultation')
-    && kindChips().some((chip) => chip.id === 'event-chip-platos_hook')
-    && kindChips().some((chip) => chip.id === 'event-chip-curtiss_cross'));
+    && !kindChips().some((chip) => chip.id === 'event-chip-platos_hook'));
   {
     const ids = kindChips().map((chip) => chip.id);
     const eclipse = ids.indexOf('event-chip-lunar_eclipse');
@@ -2495,26 +2506,27 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       ids.slice(0, 9).join(' '));
   }
   {
-    const more = document.getElementById('event-kinds-more');
-    const toggle = document.getElementById('event-more');
-    check('the later event kinds start folded away',
-      !!more && more.hidden === true
-      && toggle.getAttribute('aria-expanded') === 'false');
-    check('极低照明度 and 极端天平动目标 stay on the always-visible row',
-      !!document.getElementById('event-chip-crescent')
-      && !!document.getElementById('event-chip-libration_target'));
-    toggle.fire('click');
-    const order = [...more.children]
-      .filter((child) => child.tagName === 'LABEL')
-      .map((child) => String(child.id).replace('event-chip-', ''));
-    check('the triangle opens the later kinds, Lunar X/V/L first then English',
-      more.hidden === false && toggle.getAttribute('aria-expanded') === 'true'
+    const select = document.getElementById('event-clair');
+    const order = [...select.options]
+      .filter((option) => option.value)
+      .map((option) => option.value);
+    check('the transient effects are one Clair-Obscur menu under the pills',
+      !!select && order.length === 19
       && order.slice(0, 5).join(',') ===
         'xvl,alexanders_beaded_rim,aries_hoofprint,barrow_ray,cassini_moon_maiden'
       && !order.includes('libration_target') && !order.includes('crescent'),
       order.join(','));
-    toggle.fire('click');
-    check('and closing it puts them away again', more.hidden === true);
+    check('and the menu starts on its placeholder below the label',
+      select.value === '' && select.options[0].textContent === '—'
+      && /Clair-Obscur Effects/.test(html));
+    set('event-clair', 'platos_hook');
+    fire('event-clair', 'change');
+    check('picking an effect selects it like a pill',
+      T.state.eventKind === 'platos_hook' && select.value === 'platos_hook',
+      `${T.state.eventKind} / ${select.value}`);
+    fire('event-kind-full_moon', 'change');
+    check('picking a pill clears the effect menu',
+      T.state.eventKind === 'full_moon' && select.value === '');
   }
   check('the event window carries a move grip and eight resize edges',
     !!document.getElementById('event-window-headbar')
@@ -4558,6 +4570,37 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   }
 
   console.log('');
+  console.log('星历：DE440 / DE441 / 本地 .bsp');
+  {
+    await T.loadEphemeris();
+    const mode = document.getElementById('ephemeris-mode');
+    const file = document.getElementById('ephemeris-file');
+    check('the menu starts on the loaded DE440 and hides the file picker',
+      mode.value === 'recent' && file.hidden === true
+      && /DE440/.test(document.getElementById('ephemeris-note').textContent));
+    set('ephemeris-mode', 'custom');
+    fire('ephemeris-mode', 'change');
+    check('custom reveals the local .bsp choices',
+      file.hidden === false
+      && [...file.options].some((option) => option.value === 'de442s.bsp'));
+    set('ephemeris-file', 'de442s.bsp');
+    fire('ephemeris-apply', 'click');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const call = fetchCalls.filter((c) => c.url === '/api/ephemeris'
+      && c.body && c.body.mode).pop();
+    check('switching posts the chosen file and reloads',
+      !!call && call.body.mode === 'custom' && call.body.file === 'de442s.bsp',
+      call && JSON.stringify(call.body));
+    check('the note says what is now loaded',
+      /自定义/.test(document.getElementById('ephemeris-note').textContent)
+      && /de442s\.bsp/.test(document.getElementById('ephemeris-note').textContent),
+      document.getElementById('ephemeris-note').textContent);
+    set('ephemeris-mode', 'recent');
+    fire('ephemeris-mode', 'change');
+    check('going back to DE440 hides the file picker', file.hidden === true);
+  }
+
+  console.log('');
   console.log('the ruler is an object on the picture');
   /* It used to be a caption in the corner: fixed place, fixed length, drawn in
      screen pixels so an export got a differently-sized one.  It is now one of
@@ -5390,13 +5433,34 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('time labels are on the canvas',
       ctx.drawn.texts.some((text) => /^\d\d:\d\d$/.test(text.text)));
 
+    {
+      const savedSun = { ...T.state.sky.sun };
+      T.state.sky.sun = { azimuth_deg: 200, elevation_deg: 30 };
+      ctx.drawn.strokes.length = 0;
+      ctx.drawn.texts.length = 0;
+      T.drawSky();
+      check('a Sun outside the frame is drawn as a direction arrow',
+        ctx.drawn.strokes.includes('#ffb040')
+        && ctx.drawn.texts.some((text) => /^太阳 /.test(text.text)),
+        JSON.stringify({ strokes: ctx.drawn.strokes.slice(-4),
+          texts: ctx.drawn.texts.map((text) => text.text).slice(-4) }));
+      T.state.sky.sun = savedSun;
+      T.drawSky();
+    }
+
     // The planet layer: a dot and a name, and only for planets above the
-    // horizon (Jupiter is below it in the canned answer).
+    // horizon (Jupiter is below it in the canned answer).  The close-up now
+    // keeps a deliberately small field around the Moon, so check the planet
+    // layer in the horizon view where the sky is wide enough for Venus.
+    document.getElementById('sky-closeup').checked = false;
+    fire('sky-closeup', 'change');
     check('a planet in the sky is named on the chart',
       ctx.drawn.texts.some((text) => text.text === '金星'),
       JSON.stringify(ctx.drawn.texts.map((text) => text.text).slice(-12)));
     check('a planet below the horizon is not drawn',
       !ctx.drawn.texts.some((text) => text.text === '木星'));
+    document.getElementById('sky-closeup').checked = true;
+    fire('sky-closeup', 'change');
     ctx.drawn.texts.length = 0;
     set('sky-planets', false);
     fire('sky-planets', 'change');
@@ -5419,7 +5483,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('sky-elongation', false);
     fire('sky-elongation', 'change');
     check('turning the elongation line off removes its label',
-      !ctx.drawn.texts.some((text) => text.text.includes('距角')));
+      !ctx.drawn.texts.some((text) => /^距角 /.test(text.text)));
     set('sky-elongation', true);
     fire('sky-elongation', 'change');
 
@@ -5473,10 +5537,101 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('when').value = savedMain;
     document.getElementById('tz').value = savedTz;
 
+    /* Sky-chart text behaves like the curve chart's text: drag it, rename it
+       with a double-click, hide it with its ×.  Time ticks are deliberately
+       static; the distance-angle label is the movable one. */
+    {
+      document.getElementById('sky-closeup').checked = false;
+      fire('sky-closeup', 'change');
+      const savedSun = { ...T.state.sky.sun };
+      T.state.sky.sun = {
+        azimuth_deg: Number(T.state.sky.moon.azimuth_deg) + 55,
+        elevation_deg: Number(T.state.sky.moon.elevation_deg) + 8,
+      };
+      T.drawSky();
+      const text = T.state.skyTextBoxes.find((box) => box.key === 'elongation');
+      check('the chart records a hit box for the elongation label', !!text,
+        JSON.stringify(T.state.skyTextBoxes.map((box) => box.key).slice(0, 6)));
+      if (text) {
+        fire('sky-canvas', 'pointerdown', {
+          clientX: text.x + 6, clientY: text.y + 6,
+          preventDefault() {}, stopPropagation() {},
+        });
+        document.dispatchEvent({
+          type: 'pointermove', clientX: text.x + 26, clientY: text.y + 14,
+        });
+        document.dispatchEvent({ type: 'pointerup' });
+        check('dragging the距角 label stores its new plot position',
+          !!T.state.skyText.elongation,
+          JSON.stringify(T.state.skyText.elongation));
+      }
+      const title = T.state.skyTitleBoxes.find((box) => box.key === 'x');
+      check('axis titles are hit-testable too', !!title);
+      if (title) {
+        fire('sky-canvas', 'pointerdown', {
+          clientX: title.x + 6, clientY: title.y + 6,
+          preventDefault() {}, stopPropagation() {},
+        });
+        document.dispatchEvent({
+          type: 'pointermove', clientX: title.x + 16, clientY: title.y + 12,
+        });
+        document.dispatchEvent({ type: 'pointerup' });
+        check('an axis title can be dragged',
+          !!T.state.skyText['title:x']);
+      }
+      const hidden = T.state.skyTextBoxes.find(
+        (box) => box.close && box.key === 'elongation');
+      if (hidden) {
+        fire('sky-canvas', 'pointerdown', {
+          clientX: hidden.close.x + 4, clientY: hidden.close.y + 4,
+          preventDefault() {}, stopPropagation() {},
+        });
+        check('the × hides the距角 label',
+          T.state.skyHidden.elongation === true);
+        delete T.state.skyHidden.elongation;
+        T.drawSky();
+      }
+      T.state.skyHiddenAt = 0;
+      sandbox.window.prompt = () => '自定义标题';
+      const editable = T.state.skyTextBoxes.find((box) => box.key === 'mode');
+      if (editable) {
+        fire('sky-canvas', 'dblclick', {
+          clientX: editable.x + 6, clientY: editable.y + 6,
+        });
+        check('double-click renames a label',
+          T.state.skyLabels.mode === '自定义标题',
+          T.state.skyLabels.mode);
+        delete T.state.skyLabels.mode;
+        sandbox.window.prompt = undefined;
+        T.drawSky();
+      }
+      T.state.sky.sun = savedSun;
+      document.getElementById('sky-closeup').checked = true;
+      fire('sky-closeup', 'change');
+    }
+
+    const beforeSave = created.length;
     T.saveSkyPng();
-    check('the whole window can be saved as a PNG',
+    check('the chart, not the window chrome, is saved as a PNG',
       document.getElementById('sky-summary').textContent.includes('已保存'),
       document.getElementById('sky-summary').textContent);
+    {
+      const exportCanvas = created.slice(beforeSave).reverse()
+        .find((el) => String(el.tagName).toUpperCase() === 'CANVAS');
+      const rect = document.getElementById('sky-canvas')
+        .getBoundingClientRect();
+      check('the saved PNG keeps the on-screen chart aspect',
+        !!exportCanvas && Math.abs(
+          exportCanvas.width / exportCanvas.height
+          - rect.width / rect.height) < 0.01,
+        exportCanvas ? `${exportCanvas.width}x${exportCanvas.height}` : 'no canvas');
+      const exportTexts = exportCanvas
+        ? exportCanvas.getContext('2d').drawn.texts.map((text) => text.text) : [];
+      check('and carries no window title or footer summary',
+        !exportTexts.includes('天空位置示意图')
+        && !exportTexts.some((text) => /实线 月亮/.test(text)),
+        JSON.stringify(exportTexts.slice(-6)));
+    }
 
     fire('sky-close', 'click');
     check('the close button hides the window',
@@ -6353,6 +6508,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     set('sky-moon-track', true);
     set('sky-sun-track', true);
     set('sky-phase-frame', true);
+    const oldView = { azMin: 0, azMax: 50, elMin: 0, elMax: 40 };
+    T.state.skyView = oldView;
+    document.getElementById('sky-closeup').checked = true;
+    fire('sky-closeup', 'change');
+    check('entering the track close-up refits around the current Moon',
+      T.state.skyView !== oldView);
+    document.getElementById('sky-closeup').checked = false;
+    fire('sky-closeup', 'change');
   }
 
   console.log('');
@@ -6369,6 +6532,26 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     check('a low Moon is not',
       T.skyAutoCloseup({ ...high, moon: { azimuth_deg: 100, elevation_deg: 5 },
         samples: [{ moon_elevation_deg: 5 }, { moon_elevation_deg: 12 }] }) === false);
+    {
+      const saved = T.state.skySeries;
+      T.state.skySeries = [
+        { t: 0, moonAz: 90, moonEl: 40 },
+        { t: 1, moonAz: 100, moonEl: 55 },
+        { t: 2, moonAz: 112, moonEl: 60 },
+      ];
+      const close = T.skyTargetView({
+        moon: { azimuth_deg: 100, elevation_deg: 55 },
+        samples: [], geometry: {},
+      }, true);
+      check('the track close-up keeps the current Moon at its centre',
+        Math.abs((close.azMin + close.azMax) / 2 - 100) < 1e-9
+        && Math.abs((close.elMin + close.elMax) / 2 - 55) < 1e-9,
+        JSON.stringify(close));
+      check('and chooses a small field around it',
+        close.azMax - close.azMin <= 20 && close.elMax - close.elMin <= 20,
+        JSON.stringify(close));
+      T.state.skySeries = saved;
+    }
 
     const grown = { azMin: 0, azMax: 100, elMin: 0, elMax: 20 };
     T.skyGrowAspect(grown, 2);
@@ -6673,14 +6856,21 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       !!document.getElementById('calc-when').value
       && document.getElementById('calc-lat').value !== ''
       && document.getElementById('calc-lon').value !== '');
-    check('the calculator can pick a manual mark',
+    const observerLat = document.getElementById('calc-lat').value;
+    const observerLon = document.getElementById('calc-lon').value;
+    check('the calculator can still read a manual lunar mark',
       [...document.getElementById('calc-mark').options]
         .some((option) => option.value === '98765'));
     set('calc-mark', '98765');
     fire('calc-mark', 'change');
-    check('picking the mark fills both coordinates',
-      document.getElementById('calc-lon').value === '12.3400'
-      && document.getElementById('calc-lat').value === '-5.6700');
+    check('picking the mark shows its selenographic coordinates',
+      /12\.34/.test(document.getElementById('calc-mark-coord').textContent)
+      && /5\.67°S/.test(document.getElementById('calc-mark-coord').textContent),
+      document.getElementById('calc-mark-coord').textContent);
+    check('but it never rewrites the observer latitude/longitude',
+      document.getElementById('calc-lat').value === observerLat
+      && document.getElementById('calc-lon').value === observerLon,
+      `${document.getElementById('calc-lat').value}/${document.getElementById('calc-lon').value}`);
     T.state.manualMarks = T.state.manualMarks.filter(
       (mark) => mark.id !== 98765);
     check('下一次 + 月龄 only offers 相同, with the span and error off',
@@ -6812,6 +7002,17 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
       check('the calculator columns have a draggable divider',
         T.state.calculatorSplit > before,
         `${before} -> ${T.state.calculatorSplit}`);
+    }
+    {
+      check('the calculator table has a <colgroup> to size its columns',
+        /id="calc-cols"/.test(html)
+        && (html.match(/<th[^>]*data-col="/g) || []).length === 8);
+      T.setCalculatorColumnWidth('time', 151);
+      check('a column width is stored by key',
+        T.state.calculatorColumnWidths.time === 151);
+      check('and a too-narrow drag is clamped',
+        T.setCalculatorColumnWidth('time', 3) === 40
+        && T.state.calculatorColumnWidths.time === 40);
     }
     fire('experiment-close', 'click');
   }

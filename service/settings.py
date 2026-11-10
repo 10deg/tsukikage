@@ -24,7 +24,7 @@ CONFIG_FILENAME = "service.json"
 FALLBACK_KERNELS: Tuple[str, ...] = (
     "naif0012.tls",
     "de440s.bsp",
-    "pck00010.tpc",
+    "pck00011.tpc",
     "gm_de440.tpc",
     "moon_pa_de440_200625.bpc",
     "moon_de440_220930.tf",

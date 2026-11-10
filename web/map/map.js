@@ -608,7 +608,7 @@ function fitView() {
     state.earthPanY = 0;
     flushRender();
     scheduleFeatures();
-    scheduleHash();
+    scheduleViewSave();
     return;
   }
   const small = Math.min(state.width / TILE, state.height / (TILE / 2));
@@ -623,7 +623,7 @@ function fitView() {
   clampCenter();
   flushRender();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 /** Put the projection point under the zoom pivot back under it.
@@ -674,7 +674,7 @@ function zoomTo(nextZoom, anchor) {
   clampCenter();
   render();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 function zoomBy(factor, anchor, defer) {
@@ -705,7 +705,7 @@ function zoomBy(factor, anchor, defer) {
   if (defer) renderSoon();
   else render();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 /* ── canvas ─────────────────────────────────────────────────────────────── */
@@ -853,7 +853,7 @@ function locatePhoto() {
   }
   render();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 function samplePhoto(pixels, width, height, x, y) {
@@ -1930,7 +1930,89 @@ async function loadRebuildStatus() {
   }
 }
 
+function syncMapEphemerisFileMenu() {
+  const mode = $('map-ephemeris-mode');
+  const file = $('map-ephemeris-file');
+  if (!mode || !file) return;
+  file.hidden = mode.value !== 'custom';
+}
+
+function paintMapEphemeris(payload) {
+  if (!payload) return;
+  const mode = $('map-ephemeris-mode');
+  const file = $('map-ephemeris-file');
+  const note = $('map-ephemeris-note');
+  if (!mode || !file) return;
+  mode.value = ['recent', 'long', 'custom'].includes(payload.mode)
+    ? payload.mode : 'recent';
+  file.innerHTML = '';
+  file.options.length = 0;
+  for (const choice of payload.choices || []) {
+    const option = document.createElement('option');
+    option.value = choice.name;
+    option.textContent = choice.name;
+    file.appendChild(option);
+  }
+  if (payload.file) file.value = payload.file;
+  syncMapEphemerisFileMenu();
+  if (note) {
+    note.textContent = `${payload.label}${payload.file ? ' · ' + payload.file : ''}`;
+  }
+}
+
+async function loadMapEphemeris() {
+  try {
+    const response = await fetch('/api/map/ephemeris');
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
+    paintMapEphemeris(payload);
+  } catch (error) {
+    if ($('map-ephemeris-note')) {
+      $('map-ephemeris-note').textContent =
+        '读取星历失败：' + String(error.message || error);
+    }
+  }
+}
+
+async function applyMapEphemeris() {
+  const mode = $('map-ephemeris-mode').value;
+  const file = $('map-ephemeris-file').value;
+  const button = $('map-ephemeris-apply');
+  if (mode === 'custom' && !file) {
+    setStatus('kernels 目录里没有可用的自定义 .bsp', 'error');
+    return;
+  }
+  if (button) { button.disabled = true; button.textContent = '重载中…'; }
+  setStatus('正在切换星历并重载内核…');
+  try {
+    const response = await fetch('/api/map/ephemeris', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, file: mode === 'custom' ? file : null }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
+    paintMapEphemeris(payload);
+    clearBaseCaches();
+    state.projectedBase = null;
+    await loadLighting().catch(() => {});
+    render();
+    setStatus(`星历已切换为 ${payload.label}${payload.file ? ' · ' + payload.file : ''}`);
+  } catch (error) {
+    setStatus('星历切换失败：' + String(error.message || error), 'error');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '切换'; }
+  }
+}
+
 function wireDataSettings() {
+  if ($('map-ephemeris-mode')) {
+    $('map-ephemeris-mode').addEventListener('change', syncMapEphemerisFileMenu);
+    $('map-ephemeris-apply').addEventListener('click', applyMapEphemeris);
+  }
+  if ($('map-copy-link')) {
+    $('map-copy-link').addEventListener('click', copyMapLink);
+  }
   if ($('data-rebuild')) {
     $('data-rebuild').addEventListener('click', () => {
       fetch('/api/map/data/rebuild', {
@@ -5486,7 +5568,7 @@ function focusFeature(feature) {
   selectFeature(feature);
   render();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 function updateFeatureCount() {
@@ -6018,7 +6100,7 @@ stage.addEventListener('pointermove', (event) => {
     }
     renderSoon();
     scheduleFeatures();
-    scheduleHash();
+    scheduleViewSave();
     hideTooltip();
     event.preventDefault();
     return;
@@ -6159,24 +6241,63 @@ function hideTooltip() {
   if (box) box.hidden = true;
 }
 
-/* ── url hash ───────────────────────────────────────────────────────────── */
+/* ── view persistence and share links ───────────────────────────────────── */
 
-function scheduleHash() {
-  if (state.hashTimer) clearTimeout(state.hashTimer);
-  state.hashTimer = setTimeout(writeHash, 250);
+/** The current view as the hash a shared link carries. */
+function mapViewHash() {
+  return `#${state.centerLon.toFixed(4)},${state.centerLat.toFixed(4)},`
+    + `${state.zoom},${state.scale.toFixed(3)}`;
 }
 
-function writeHash() {
-  const hash = `#${state.centerLon.toFixed(4)},${state.centerLat.toFixed(4)},`
-    + `${state.zoom},${state.scale.toFixed(3)}`;
+/** Remember the view without touching the address bar.
+ *
+ * Writing ``history.replaceState`` on every pan and wheel tick is what filled
+ * a Windows browser's history with one entry per gesture.  The view now lives
+ * in local storage; the URL only changes when the reader asks for a link.
+ */
+function scheduleViewSave() {
+  if (state.hashTimer) clearTimeout(state.hashTimer);
+  state.hashTimer = setTimeout(saveViewState, 350);
+}
+
+function saveViewState() {
+  state.hashTimer = null;
+  try {
+    window.localStorage.setItem('moon-map-view', mapViewHash().slice(1));
+  } catch (error) { /* private mode or a locked-down host */ }
+}
+
+function readSavedView() {
+  let raw = '';
+  try {
+    raw = window.localStorage.getItem('moon-map-view') || '';
+  } catch (error) {
+    return false;
+  }
+  return applyViewHash(raw);
+}
+
+/** Copy the current view into the address bar over the existing entry, then
+ *  put the whole URL on the clipboard. */
+function copyMapLink() {
+  const hash = mapViewHash();
   try {
     history.replaceState(null, '', hash);
   } catch (error) { /* file:// or a locked-down host */ }
+  const current = String((window.location && window.location.href) || '');
+  const url = current ? current.split('#')[0] + hash : hash;
+  const done = () => setStatus('已复制当前视角链接');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(() => {
+      setStatus('链接：' + url);
+    });
+  } else {
+    setStatus('链接：' + url);
+  }
 }
 
-function readHash() {
-  const raw = (window.location.hash || '').replace(/^#/, '');
-  const parts = raw.split(',');
+function applyViewHash(raw) {
+  const parts = String(raw || '').replace(/^#/, '').split(',');
   if (parts.length < 3) return false;
   const lon = Number(parts[0]);
   const lat = Number(parts[1]);
@@ -6188,6 +6309,10 @@ function readHash() {
   state.zoom = clamp(Math.round(zoom), MIN_ZOOM, MAX_ZOOM);
   if (Number.isFinite(scale) && scale > 0) state.scale = clamp(scale, 0.18, 16);
   return true;
+}
+
+function readHash() {
+  return applyViewHash(window.location && window.location.hash);
 }
 
 /* ── wiring ─────────────────────────────────────────────────────────────── */
@@ -6835,7 +6960,7 @@ function panBy(fractionX, fractionY) {
   renderSoon();
   endInteractionSoon();
   scheduleFeatures();
-  scheduleHash();
+  scheduleViewSave();
 }
 
 /** Re-measure while the first projected texture is still being fetched.
@@ -6885,7 +7010,12 @@ async function boot() {
       }
     }, delay);
   }
-  readHash();
+  if (readHash()) {
+    // A shared link is also the view the next plain load should restore.
+    saveViewState();
+  } else {
+    readSavedView();
+  }
   clampCenter();
   try {
     await Promise.all([loadHealth(), loadLayers()]);
@@ -6897,6 +7027,7 @@ async function boot() {
   }
   updatePositionReadout(state.centerLon, state.centerLat);
   render();
+  loadMapEphemeris().catch(() => {});
   scheduleFeatures();
 }
 

@@ -369,8 +369,11 @@ def find_sources(
         for pattern, enc in (("lroc_color.exr", "linear"),
                              ("lroc_color*.tif", "srgb"),
                              ("lroc_color*.tiff", "srgb"),
+                             ("lroc_color*.jpg", "srgb"),
+                             ("lroc_color*.jpeg", "srgb"),
                              ("*color*.exr", "linear"),
-                             ("*color*.tif", "srgb")):
+                             ("*color*.tif", "srgb"),
+                             ("*color*.jpg", "srgb")):
             hits = sorted(Path(p) for p in _glob.glob(str(root / pattern)))
             if hits:
                 albedo_path = hits[0]
@@ -1456,9 +1459,30 @@ def _bake_albedo_levels(
                 fetch, height, factor, progress=colour_progress)
         else:
             coarse = _downsample_compressed_tiff(path, factor, hook)
+    elif suffix in (".jpg", ".jpeg"):
+        # The 2k CGI Moon Kit JPEG is the lightest colour source the project
+        # ships.  It is ordinary 8-bit sRGB, so Pillow decodes it whole and an
+        # integer box reduction builds the coarse level.
+        try:
+            from PIL import Image
+        except ImportError as error:  # pragma: no cover - install dependent
+            raise TerrainDataError(
+                f"{path.name}: reading a JPEG colour map needs Pillow "
+                "(`pip install -e '.[tiff]'`)."
+            ) from error
+        image = Image.open(path)
+        width, height = image.size
+        if width % factor or height % factor:
+            raise TerrainDataError(
+                f"{path.name}: {width}x{height} is not divisible by {factor}."
+            )
+        if factor > 1:
+            image = image.reduce(factor)
+        coarse = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+        colour_progress(1.0)
     else:
         raise TerrainDataError(
-            f"Unsupported colour raster format {suffix!r}; expected .exr or .tif."
+            f"Unsupported colour raster format {suffix!r}; expected .exr, .tif or .jpg."
         )
 
     if integer_peak > 1.0:

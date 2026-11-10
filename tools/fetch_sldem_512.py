@@ -8,8 +8,11 @@ The PDS delivery is 32 float32 tiles of 45 x 30 degrees (45 GB), and it stops
 at +/-60 degrees -- there is no 512 ppd polar product.
 
 This repository draws global rasters on a 2:1 equirectangular grid, so the
-polar caps are taken from the LOLA GDR 512 ppd mosaic already produced by
-``tools/fetch_lola_512.py``.  The result is one global raster:
+polar caps are taken from the LOLA GDR 512 ppd product.  When the mosaic built
+by ``tools/fetch_lola_512.py`` is on disk it is reused as is; when it is not,
+the 45-90 degree bands are range-fetched from PDS for their 60-90 rows only --
+11.3 GB instead of the mosaic's 34 GB -- so this script needs no earlier
+download.  The result is one global raster:
 
 ``kernels/SLDEM2015_512.tif``
     184 320 x 92 160 int16, half-metres above the 1737.4 km sphere.  Equator
@@ -21,7 +24,9 @@ The download is row-aligned and resumable.  Each tile arrives as 30 chunks of
 512 rows (45 MB each); a chunk is converted to half-metres and written straight
 into the preallocated BigTIFF, then a marker records that it is safe to skip on
 the next run.  There is never a whole tile on disk, so the peak footprint is
-the 34 GB output plus a handful of 45 MB chunks.
+the 34 GB output plus a handful of 45 MB chunks -- and, only when the LOLA
+mosaic is absent, an 11 GB polar cache that the run deletes once the caps are
+written.
 
 Usage
 -----
@@ -78,6 +83,36 @@ MARKERS = ROOT / "kernels" / ".sldem2015_512_chunks"
 #: place over an hour or two, and offering a half-written product as a data
 #: source would let a close-up sample rows that are still zero.
 INCOMPLETE = OUTPUT.with_name(OUTPUT.name + ".incomplete")
+
+# ---- the LOLA polar caps -------------------------------------------------
+# The caps are LOLA GDR V3.0 at the same 512 px/deg grid, delivered as 16 tiles
+# of 90 x 45 degrees: 46 080 x 23 040 int16 samples, no header (the label is a
+# separate ``.lbl``), north-up, 0-360 E.  Only the 45-90 degree bands touch the
+# caps, and only their 60-90 portion is needed: 8 tiles x 15 360 rows = 11.3 GB
+# of the mosaic's 34 GB.
+LOLA_BASE_URL = (
+    "https://pds-geosciences.wustl.edu/lro/lro-l-lola-3-rdr-v1/lrolol_1xxx"
+    "/data/lola_gdr/cylindrical/img/"
+)
+LOLA_TILE_W = 90 * PPD            # 46 080
+LOLA_TILE_H = 45 * PPD            # 23 040
+LOLA_ROW_BYTES = LOLA_TILE_W * 2  # 92 160
+#: 512 rows is 47 MB: the same request size the SLDEM tiles use.
+LOLA_CHUNK_ROWS = 512
+LOLA_BLOCKS = ("000_090", "090_180", "180_270", "270_360")
+#: ``(PDS band, first row inside that tile, first output row, rows)``.
+#: Row 0 of a PDS tile is its northern edge, so 45n_90n starts at 90 N while the
+#: 60-90 S cap starts 7 680 rows into 90s_45s (which begins at 45 S).
+LOLA_POLAR_BANDS = (
+    ("45n_90n", 0, 0, POLAR_ROWS[0]),
+    ("90s_45s", LOLA_TILE_H - POLAR_ROWS[1], HEIGHT - POLAR_ROWS[1],
+     POLAR_ROWS[1]),
+)
+#: Downloaded polar rows wait here, one file per range request, so a killed run
+#: resumes instead of starting the 11 GB again.
+LOLA_POLAR_TMP = ROOT / "kernels" / ".sldem2015_polar"
+LOLA_POLAR_BYTES = sum(rows for _, _, _, rows in LOLA_POLAR_BANDS) * WIDTH * 2
+
 
 #: Every 512 ppd SLDEM tile, in the product's own 0-360 E / north-up convention.
 BANDS = (
@@ -146,22 +181,31 @@ def _encode(blob: bytes) -> np.ndarray:
     return np.clip(np.rint(values * 2000.0), -32768, 32767).astype("<i2")
 
 
-def _copy_polar_caps(destination: np.ndarray) -> None:
-    """Copy 60-90 N and 60-90 S from the local LOLA 512 mosaic.
+def _copy_polar_caps(destination: np.ndarray, *, workers: int = WORKERS) -> None:
+    """Fill 60-90 N and 60-90 S, from the local LOLA mosaic or from PDS.
 
-    SLDEM2015 has no 512 ppd product beyond +/-60 degrees.  The alternative is
-    to resample the 256 ppd LOLA polar tiles, which would be *coarser* than the
-    raster already on disk; reusing the global LOLA 512 mosaic keeps the whole
-    file at 59.2 m and only gives up the stereo fill where none exists.
+    SLDEM2015 has no 512 ppd product beyond +/-60 degrees.  The LOLA GDR 512
+    grid covers those caps at exactly the sampling the rest of the file uses, so
+    the whole raster stays at 59.2 m and only gives up the stereo fill where
+    none exists.  A mosaic built earlier by ``tools/fetch_lola_512.py`` is
+    reused when it is there; otherwise just the polar rows are downloaded, which
+    is what makes this script runnable on a clean machine.
     """
+    if LOLA_SOURCE.is_file():
+        _copy_polar_caps_from_mosaic(destination)
+        return
+    print(f"  polar caps: {LOLA_SOURCE.name} is not on disk, fetching only "
+          f"the 60-90 degree rows of the LOLA 45-90 bands from PDS "
+          f"(no {LOLA_SOURCE.name} is written)", flush=True)
+    _download_polar_caps(destination, workers=workers)
+
+
+def _copy_polar_caps_from_mosaic(destination: np.ndarray) -> None:
+    """Copy the caps out of ``kernels/ldem_512.tif``."""
     from moonlib import terrain
 
-    if not LOLA_SOURCE.is_file():
-        raise SystemExit(
-            f"missing {LOLA_SOURCE}\n"
-            "The polar caps come from the LOLA GDR 512 mosaic; build it first:\n"
-            "  ./.venv/bin/python tools/fetch_lola_512.py"
-        )
+    if not LOLA_SOURCE.is_file():  # pragma: no cover - guarded by the caller
+        raise SystemExit(f"missing {LOLA_SOURCE}")
     reader = terrain._StrippedTiff(LOLA_SOURCE)
     try:
         if (reader.width, reader.height) != (WIDTH, HEIGHT):
@@ -203,6 +247,102 @@ def _copy_polar_caps(destination: np.ndarray) -> None:
         reader.close()
     print(f"  polar caps: {POLAR_ROWS[0]} N rows + {POLAR_ROWS[1]} S rows "
           f"from {LOLA_SOURCE.name}", flush=True)
+
+
+def _polar_chunk_path(tile: str, index: int) -> Path:
+    return LOLA_POLAR_TMP / f"{tile}.{index:03d}.part"
+
+
+def _polar_chunks(rows: int) -> int:
+    return -(-rows // LOLA_CHUNK_ROWS)
+
+
+def _polar_chunk_span(index: int, rows: int) -> tuple[int, int]:
+    """``(first row, row count)`` of chunk *index* inside the polar range."""
+    first = index * LOLA_CHUNK_ROWS
+    return first, min(LOLA_CHUNK_ROWS, rows - first)
+
+
+def _fetch_polar_chunk(tile: str, band_first: int, rows: int, index: int) -> None:
+    """One range of one PDS LOLA tile, written where a resume can find it."""
+    first, count = _polar_chunk_span(index, rows)
+    start = (band_first + first) * LOLA_ROW_BYTES
+    stop = start + count * LOLA_ROW_BYTES - 1
+    target = _polar_chunk_path(tile, index)
+    blob = _fetch(LOLA_BASE_URL + tile, start, stop)
+    temporary = target.with_suffix(".part.writing")
+    temporary.write_bytes(blob)
+    temporary.replace(target)
+
+
+def _download_polar_caps(destination: np.ndarray, *, workers: int) -> None:
+    """Range-fetch the 60-90 degree rows of the eight polar LOLA tiles."""
+    tasks = [
+        (f"ldem_512_{band}_{block}.img", first, rows, index)
+        for band, first, _, rows in LOLA_POLAR_BANDS
+        for block in LOLA_BLOCKS
+        for index in range(_polar_chunks(rows))
+    ]
+    pending = [task for task in tasks
+               if not _polar_chunk_path(task[0], task[3]).is_file()]
+    todo = sum(_polar_chunk_span(task[3], task[2])[1] * LOLA_ROW_BYTES
+               for task in pending)
+    print(f"  polar caps: {len(tasks) - len(pending)}/{len(tasks)} ranges "
+          f"cached, {todo / 1e9:.1f} GB to fetch", flush=True)
+    if pending:
+        started = time.time()
+        done = itertools.count()
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                futures = {pool.submit(_fetch_polar_chunk, *task): task
+                           for task in pending}
+                for future in as_completed(futures):
+                    future.result()
+                    finished = next(done) + 1
+                    if finished % 5 == 0 or finished == len(pending):
+                        elapsed = max(time.time() - started, 1e-9)
+                        rate = (finished * LOLA_CHUNK_ROWS * LOLA_ROW_BYTES
+                                / elapsed / 1e6)
+                        print(f"    {finished}/{len(pending)} ranges, "
+                              f"{rate:.1f} MB/s", flush=True)
+        except Exception as error:  # noqa: BLE001 - reported, then resumable
+            raise SystemExit(
+                f"polar caps: {error}\n"
+                f"Finished ranges are cached in {LOLA_POLAR_TMP.name}; "
+                "rerun to resume."
+            ) from error
+    _assemble_polar_caps(destination)
+    shutil.rmtree(LOLA_POLAR_TMP, ignore_errors=True)
+
+
+def _assemble_polar_caps(destination: np.ndarray) -> None:
+    """Paste the cached polar ranges into the output, then drop the cache."""
+    for band, first, dest_row, rows in LOLA_POLAR_BANDS:
+        for block in LOLA_BLOCKS:
+            tile = f"ldem_512_{band}_{block}.img"
+            col0 = ((int(block[:3]) + 180) % 360) * PPD
+            for index in range(_polar_chunks(rows)):
+                blob = _polar_chunk_path(tile, index).read_bytes()
+                values = np.frombuffer(blob, dtype="<i2").reshape(-1, LOLA_TILE_W)
+                row = dest_row + index * LOLA_CHUNK_ROWS
+                destination[row:row + values.shape[0],
+                            col0:col0 + LOLA_TILE_W] = values
+    # Every PDS tile starts its band with ~2 020 zero samples on line 1.  For
+    # the 45-90 band that line *is* the pole row, so the caps would carry four
+    # 4-degree notches of sea level around 90 N.  Only zeros with real data
+    # directly south of them are touched, which a true zero crossing is not.
+    here = destination[0]
+    below = destination[1]
+    broken = (here == 0) & (below != 0)
+    count = int(broken.sum())
+    if count:
+        here[broken] = below[broken]
+        print(f"  polar caps: filled {count} zero samples on the pole row",
+              flush=True)
+    destination.flush()
+    print(f"  polar caps: {POLAR_ROWS[0]} N rows + {POLAR_ROWS[1]} S rows "
+          f"downloaded from PDS; {LOLA_POLAR_TMP.name}/ removed, "
+          f"no {LOLA_SOURCE.name} created", flush=True)
 
 
 def _pending_chunks(tile: str) -> list:
@@ -329,6 +469,19 @@ def check() -> int:
     return 0 if ok else 1
 
 
+def _reset() -> None:
+    """Delete the partial output, the tile markers and the polar cache."""
+    INCOMPLETE.unlink(missing_ok=True)
+    if OUTPUT.is_file():
+        print(f"  removing {OUTPUT} ({OUTPUT.stat().st_size / 1e9:.1f} GB)",
+              flush=True)
+        OUTPUT.unlink()
+    for directory in (MARKERS, LOLA_POLAR_TMP):
+        if directory.is_dir():
+            shutil.rmtree(directory)
+    print("  reset complete", flush=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true",
@@ -343,15 +496,7 @@ def main(argv=None) -> int:
         return check()
 
     if args.reset:
-        INCOMPLETE.unlink(missing_ok=True)
-        for path in (OUTPUT,):
-            if path.is_file():
-                print(f"  removing {path} ({path.stat().st_size / 1e9:.1f} GB)",
-                      flush=True)
-                path.unlink()
-        if MARKERS.is_dir():
-            shutil.rmtree(MARKERS)
-        print("  reset complete", flush=True)
+        _reset()
 
     from _striped_tiff import strip_layout
 
@@ -368,10 +513,16 @@ def main(argv=None) -> int:
               f"({OUTPUT.stat().st_size / 1e9:.1f} GB)", flush=True)
     else:
         free = shutil.disk_usage(ROOT).free
-        if free < layout["size"] + (1 << 30):
+        # The output plus, when the LOLA mosaic is absent, the polar cache.  A
+        # local mosaic needs no extra room beyond its own file.
+        polar_cache = 0 if LOLA_SOURCE.is_file() else LOLA_POLAR_BYTES
+        need = layout["size"] + polar_cache + (1 << 30)
+        if free < need:
             raise SystemExit(
-                f"need about {layout['size'] / 1e9:.1f} GB free, "
-                f"only {free / 1e9:.1f} GB available."
+                f"need about {need / 1e9:.1f} GB free "
+                f"({layout['size'] / 1e9:.1f} GB output"
+                + (f" + {polar_cache / 1e9:.1f} GB polar cache" if polar_cache else "")
+                + f"), only {free / 1e9:.1f} GB available."
             )
         write_int16_header(OUTPUT, WIDTH, HEIGHT)
         MARKERS.mkdir(parents=True, exist_ok=True)
@@ -386,7 +537,7 @@ def main(argv=None) -> int:
         if polar_marker.is_file():
             print("  polar caps: already written", flush=True)
         else:
-            _copy_polar_caps(target)
+            _copy_polar_caps(target, workers=max(1, args.workers))
             polar_marker.parent.mkdir(parents=True, exist_ok=True)
             polar_marker.write_text("ok\n", encoding="ascii")
 
