@@ -49,6 +49,8 @@ const state = {
   panning: null,       // in-progress pan
   renderId: null,
   trainScale: 0,
+  frameScale: 0,       // arcsec per pixel of the frame the PSF panel describes
+  psfAuto: null,       // diffraction-ring values the 自动 placeholders stand for
   regionInfo: null,    // region block of the last close-up, for pixel <-> lon/lat
   labelsOn: false,     // show named landforms on the pictures
   labels: { disk: null, region: null },   // last plans, in frame pixels
@@ -412,6 +414,23 @@ function trainPayload() {
   };
 }
 
+/** The plate scale the current train would have, without a rendered frame.
+ *
+ * The same ``206265 * pixel / focal length`` the instrument uses.  It is only a
+ * fallback for the PSF panel's 自动 values before the first render: once a
+ * frame exists, its own ``arcsec_per_pixel`` is the number that matters.
+ */
+function defaultPlateScale() {
+  const aperture = num('aperture');
+  const ratio = num('focal-ratio');
+  const typedFocal = num('focal-length');
+  const focal = typedFocal > 0 ? typedFocal : aperture * ratio;
+  const used = focal * (num('barlow') || 1) * (num('back-focus') || 1);
+  const pixel = num('pixel-um');
+  if (!(used > 0) || !(pixel > 0)) return 0;
+  return 206264.80624709636 * (pixel * 1e-3) / used;
+}
+
 function atmospherePayload() {
   // 叠加优化 used to ride along here as ``frame_selection_gain``: the site's
   // seeing divided by a "how many of the best frames went into this" factor.
@@ -706,7 +725,8 @@ function wireDoubleClickReset(ids) {
  *  density, which is the same kind of thing on the other side of the page. */
 const RESETTABLE_SLIDERS = [
   'seeing', 'seeing-num', 'blur-strength', 'diffraction', 'sharpen-radius',
-  'sharpen-radius-num', 'sharpen-strength', 'saturation', 'gain', 'offset', 'gamma',
+  'sharpen-radius-num', 'sharpen-strength', 'contrast', 'brightness', 'saturation',
+  'gain', 'offset', 'gamma',
   'noise-poisson', 'noise-gaussian', 'image-rotation', 'image-rotation-num',
   'label-density',
 ];
@@ -719,15 +739,25 @@ const OUTPUT_FIELDS = [
   'out-samples', 'parallel', 'light-advanced',
 ];
 
-/** 后期处理: the atmosphere, the instrument and the sensor. */
-const PROC_FIELDS = [
+/** 成像模拟: the light before it reaches the sensor. */
+const PROC_IMAGING_FIELDS = [
   'seeing', 'seeing-num', 'blur-strength', 'diffraction',
   'diffraction-radius', 'diffraction-width', 'diffraction-asymmetry',
   'diffraction-share', 'sharpen-method', 'sharpen-radius', 'sharpen-radius-num',
-  'sharpen-levels', 'sharpen-strength', 'contrast', 'brightness', 'saturation',
-  'gain', 'offset',
-  'gamma',
+  'sharpen-levels', 'sharpen-strength',
+];
+
+/** 后期处理: the finished photograph's tone, colour, noise and orientation. */
+const PROC_POST_FIELDS = [
+  'contrast', 'brightness', 'saturation', 'gain', 'offset', 'gamma',
   'noise-poisson', 'noise-gaussian', 'image-rotation', 'image-rotation-num',
+];
+
+/** Every processing control, for the page's load-time snapshot.  The eyepiece
+ *  lives above the two tabs (it belongs to the instrument), so it is reset
+ *  nowhere; it still needs its starting value recorded like every other field. */
+const PROC_FIELDS = [
+  ...PROC_IMAGING_FIELDS, ...PROC_POST_FIELDS,
   'eyepiece-on', 'eyepiece-falloff', 'eyepiece-vignette', 'eyepiece-distortion',
   'eyepiece-mask',
 ];
@@ -4003,7 +4033,7 @@ function lunar100Wanted() {
 function classChipLabel(entry) {
   const language = labelLanguage();
   if (language === 'en') return entry.en;
-  if (language === 'both') return `${entry.zh} ${entry.en}`;
+  if (language === 'both') return `${entry.zh}·${entry.en}`;
   return entry.zh;
 }
 
@@ -8768,7 +8798,8 @@ function polygonArea(points) {
 const RESET_LABEL = '复位';
 
 /** Every button that resets something. */
-const RESET_BUTTONS = ['label-reset', 'sel-reset-rot', 'output-reset', 'proc-reset'];
+const RESET_BUTTONS = ['label-reset', 'sel-reset-rot', 'output-reset',
+  'proc-reset-imaging', 'proc-reset-post'];
 
 const PHASE_EXPORT_PX = 600;
 
@@ -18634,6 +18665,13 @@ function describeResult(info, ms) {
   // The instrument's own numbers are not printed anywhere any more; the plate
   // scale is kept because the derived hints use it.
   if (tr) state.trainScale = tr.plate_scale_arcsec;
+  if (Number(inst.arcsec_per_pixel) > 0) {
+    state.frameScale = Number(inst.arcsec_per_pixel);
+  }
+  // What the PSF panel's 自动 fields would resolve to on this frame.  The page
+  // writes one into a field the first time it is clicked, so "自动" and the
+  // number are the same optics rather than two slightly different guesses.
+  if (inst.diffraction_ring) state.psfAuto = inst.diffraction_ring;
   // The close-up camera, kept for the pointer readout and the manual anchors.
   // /api/process reports the same region block but not the roll, so the last
   // known roll (or the box the frame was asked for) fills the gap.
@@ -19442,6 +19480,10 @@ function setProcImageTab(name) {
   $('proc-imaging').hidden = state.procImageTab !== 'imaging';
   $('proc-post').hidden = state.procImageTab !== 'post';
   $('proc-model').hidden = state.procImageTab !== 'model';
+  // One 复位 per page: the visible button is also the only one a press can
+  // reach, so it cannot clear the other page's parameters by accident.
+  $('proc-reset-imaging').hidden = state.procImageTab !== 'imaging';
+  $('proc-reset-post').hidden = state.procImageTab !== 'post';
   // 镜像 / 更新图像 belong to the image pages; the 3D page is a file
   // exporter and has no picture to process.
   const actions = document.querySelector('.proc-actions');
@@ -22460,11 +22502,23 @@ function init() {
       });
     }
   }
-  $('proc-reset').addEventListener('click', () => {
-    resetFields(PROC_FIELDS);
+  // 成像模拟 and 后期处理 have one 复位 each, and a press only touches the
+  // page whose button is showing: the two halves of the light path are tuned
+  // separately, so clearing both at once throws away work the reader did not
+  // ask to lose.  The eyepiece belongs to the instrument and stays put.
+  $('proc-reset-imaging').addEventListener('click', () => {
+    resetFields(PROC_IMAGING_FIELDS);
+    updateSharpenMethod();
+    reprocess(0);
+    setStatus('成像模拟已复位');
+  });
+  $('proc-reset-post').addEventListener('click', () => {
+    resetFields(PROC_POST_FIELDS);
+    // 镜像 is the rotation's companion -- both say which way the finished
+    // picture faces -- so the 后期处理 reset puts it back too.  It stays out of
+    // the 成像模拟 reset, which must not move the picture's orientation.
     setMirrorMode('none');
     updateNoiseInfo();
-    updateSharpenMethod();
     reprocess(0);
     setStatus('后期处理已复位');
   });
@@ -23247,6 +23301,53 @@ function init() {
     const element = $(id);
     if (!element) continue;
     element.addEventListener('change', () => reprocess(0));
+  }
+  // An empty PSF field means 自动.  Clicking it for the first time should show
+  // the number the page is already using -- otherwise the reader is editing a
+  // value they cannot see.  Filling it does not change the picture, so this
+  // writes the field without dispatching a change.
+  let psfAutoRequest = null;
+  const writePsfAuto = (element, value) => {
+    const auto = Number(value);
+    if (!Number.isFinite(auto) || auto <= 0) return false;
+    if (String(element.value || '').trim()) return true;
+    element.value = String(Number(auto.toFixed(3)));
+    return true;
+  };
+  // Without a rendered frame there is no report to read, so ask the server for
+  // the same arithmetic against the train on screen.  One request serves all
+  // three fields; it is only made when the report is missing.
+  const askPsfAuto = () => {
+    if (psfAutoRequest) return psfAutoRequest;
+    const scale = Number(state.frameScale) || Number(state.trainScale)
+      || defaultPlateScale();
+    psfAutoRequest = post('/api/psf', {
+      telescope: trainPayload().telescope,
+      camera: trainPayload().camera,
+      arcsec_per_pixel: scale || null,
+    }).then((payload) => {
+      if (payload && Number(payload.radius_px) > 0) state.psfAuto = payload;
+      return payload;
+    }).catch(() => null).finally(() => { psfAutoRequest = null; });
+    return psfAutoRequest;
+  };
+  const fillPsfAuto = (element, key) => {
+    if (String(element.value || '').trim()) return;
+    if (writePsfAuto(element, state.psfAuto && state.psfAuto[key])) return;
+    askPsfAuto().then((payload) => {
+      if (payload) writePsfAuto(element, payload[key]);
+    });
+  };
+  for (const [id, key] of [['diffraction-radius', 'radius_px'],
+                           ['diffraction-width', 'width_px'],
+                           ['diffraction-share', 'share']]) {
+    const element = $(id);
+    if (!element) continue;
+    // Both events: a first click focuses the field, but a field that already
+    // has focus (tabbed into, or clicked once before the request landed) only
+    // sees the click.
+    element.addEventListener('focus', () => fillPsfAuto(element, key));
+    element.addEventListener('click', () => fillPsfAuto(element, key));
   }
 
   // Output size and selection change what has to be ray-marched.

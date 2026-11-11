@@ -33,7 +33,7 @@ DEM_FILENAME = "Lunar_LRO_LOLA_Global_LDEM_118m_Mar2014.tif"
 DEM_BYTES = 8_494_203_833
 DEFAULT_CHUNK = 64 * 1024 * 1024
 DEFAULT_WORKERS = 16
-USER_AGENT = "Tsukikage/1.7.3 (+https://github.com/10deg/tsukikage)"
+USER_AGENT = "Tsukikage/1.7.5 (+https://github.com/10deg/tsukikage)"
 
 
 class DemDownloadError(RuntimeError):

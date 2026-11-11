@@ -69,6 +69,10 @@ def _read(path: Path) -> Dict[str, Dict[str, Any]]:
             "radius_deg_lon": label.get("radius_deg_lon"),
             "rotation_deg": label.get("rotation_deg"),
             "path": label.get("path"),
+            #: A closed IAU ring, kept beside the older path for long mountain
+            #: chains: the ring is what gets painted *and* what the name follows.
+            #: ``None`` for the features whose only shape is a trace.
+            "ring": label.get("ring"),
             #: True when the download only had a bounding box (no trace): the
             #: entry still gives a centre and a heading, but there is no shape
             #: to draw and drawing one would invent a rille.

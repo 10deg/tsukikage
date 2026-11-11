@@ -48,6 +48,7 @@ __all__ = [
     "effective_seeing_arcsec",
     "blur_budget",
     "blur_image",
+    "diffraction_ring_defaults",
     "diffraction_ring_kernel",
     "diffraction_rings",
     "instrument_blur",
@@ -531,6 +532,33 @@ def instrument_blur(
     return blur_image(image, sigma / arcsec_per_pixel, strength=strength)
 
 
+def diffraction_ring_defaults(
+    telescope: Telescope,
+    *,
+    arcsec_per_pixel: float,
+    wavelength_nm: float = DEFAULT_WAVELENGTH_NM,
+) -> Dict[str, float]:
+    """The radius, width and share the 衍射环 panel uses when a field is 自动.
+
+    The drawing code derives these from the aperture and the frame's sampling
+    (see :func:`process_photograph`); this is the same arithmetic in one place,
+    so the page can show the numbers it would have used instead of leaving the
+    reader to guess.  ``share`` is the pupil's own ring fraction, computed from
+    the obstruction like the kernel does.
+    """
+    if arcsec_per_pixel <= 0.0:
+        raise MoonlibError("arcsec_per_pixel must be positive.")
+    radius_px = max(
+        _MIN_RING_RADIUS_PX,
+        telescope.airy_first_minimum_arcsec(wavelength_nm) / arcsec_per_pixel,
+    )
+    return {
+        "radius_px": round(float(radius_px), 3),
+        "width_px": round(max(0.5, 0.28 * float(radius_px)), 3),
+        "share": round(_psf_ring_share(round(float(telescope.obstruction), 4)), 5),
+    }
+
+
 def instrument_report(
     telescope: Telescope,
     *,
@@ -592,6 +620,15 @@ def instrument_report(
             else None
         ),
         "arcsec_per_pixel": arcsec_per_pixel,
+        # What the PSF panel's 自动 placeholders stand for on this frame.  The
+        # page fills a field with these the first time the reader clicks it,
+        # so "auto" and an explicit number are the same shape for the same
+        # optics rather than two slightly different guesses.
+        "diffraction_ring": diffraction_ring_defaults(
+            telescope,
+            arcsec_per_pixel=arcsec_per_pixel,
+            wavelength_nm=wavelength_nm,
+        ),
         "blur_sigma_px": sigma_px,
         "blur_fwhm_px": sigma_px * _FWHM_OVER_SIGMA,
         "diffraction_limited": (

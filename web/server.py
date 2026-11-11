@@ -3371,6 +3371,23 @@ class MoonService:
             })
             return blend, info, "application/x-blender"
 
+    def psf_defaults(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """The PSF panel's 自动 numbers, without needing a rendered frame.
+
+        The same arithmetic :func:`process` uses (:func:`moonlib.diffraction_ring_defaults`),
+        fed the current train and either the frame's own sampling or the
+        instrument's plate scale.  The page calls it only when it has no report
+        from a render yet, so the first click on an empty 自动 field can show the
+        number that would be used.
+        """
+        train = parse_train(request)
+        scale = _f(request, "arcsec_per_pixel", train.plate_scale_arcsec)
+        if scale <= 0.0:
+            scale = train.plate_scale_arcsec
+        return moonlib.diffraction_ring_defaults(
+            train.telescope, arcsec_per_pixel=scale,
+        )
+
     def process(
         self,
         request: Dict[str, Any],
@@ -5370,6 +5387,8 @@ class Handler(BaseHTTPRequestHandler):
             if finished:
                 # 立即保存: stop after the current frame and encode the rest.
                 return self._json(200, self.service.finish_animation(finished.group(1)))
+            if path == "/api/psf":
+                return self._json(200, self.service.psf_defaults(request))
             if path == "/api/process":
                 image, info = self.service.process(request)
                 body = {"info": info, "image": _data_url(encode_png(image))}

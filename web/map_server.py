@@ -65,7 +65,7 @@ from moonlib.outlines import (  # noqa: E402
     outlines_available,
 )
 
-MAP_VERSION = "1.1.3"
+MAP_VERSION = "1.1.5"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -164,6 +164,10 @@ def _outline_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
         return payload
     if kind in ("line", "centerline"):
         payload["path"] = entry.get("path") or []
+        if entry.get("ring"):
+            # A closed mountain ring travels beside the typesetting path: the
+            # map paints the ring, and the caption follows that same ring.
+            payload["ring"] = entry["ring"]
         payload["rotation_deg"] = entry.get("rotation_deg")
         return payload
     geometry = entry.get("geometry") or {}
@@ -745,10 +749,10 @@ class LunarMapService:
         min_diameter = _MIN_DIAMETER_BY_ZOOM.get(zoom, 0.0)
         limit = int(max(1, min(12000, _finite(query.get("limit"), 2000.0))))
 
-        def in_lon(lon: float) -> bool:
+        def in_lon(lon: float, margin: float = 0.0) -> bool:
             if west <= east:
-                return west <= lon <= east
-            return lon >= west or lon <= east
+                return west - margin <= lon <= east + margin
+            return lon >= west - margin or lon <= east + margin
 
         want_outlines = str(query.get("outlines", "") or "") in ("1", "true", "yes")
         shown: List[Dict[str, Any]] = []
@@ -756,7 +760,26 @@ class LunarMapService:
         for row in rows:
             if row["class"] not in classes:
                 continue
-            if not (south <= row["lat"] <= north and in_lon(row["lon"])):
+            # A large formation can be on screen while its catalogue centre is
+            # outside the viewport.  Filtering on the centre alone dropped it
+            # from the catalogue as soon as the reader zoomed in, and its label
+            # vanished with it.  Let its own diameter reach into the query.
+            diameter = max(0.0, float(row.get("diameter_km") or 0.0))
+            radius_deg = (
+                math.degrees((diameter / 2.0) / 1737.4) if diameter > 0.0 else 0.0
+            )
+            if radius_deg > 0.0:
+                lat = float(row["lat"])
+                lon = float(row["lon"])
+                if not (south - radius_deg <= lat <= north + radius_deg):
+                    continue
+                lon_margin = min(
+                    180.0,
+                    radius_deg / max(0.05, math.cos(math.radians(lat))),
+                )
+                if not in_lon(lon, lon_margin):
+                    continue
+            elif not (south <= row["lat"] <= north and in_lon(row["lon"])):
                 continue
             if (row["diameter_km"] < min_diameter
                     and row["class"] not in _POINT_CLASSES
@@ -2175,7 +2198,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.1.3"
+    server_version = "TsukikageMap/1.1.5"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

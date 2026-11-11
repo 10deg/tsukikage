@@ -1209,8 +1209,11 @@
                     title="左右镜像：整帧沿竖直轴翻转">◀▶</button>
             <button class="ghost icon mirror" id="mirror-v" aria-pressed="false"
                     title="上下镜像：整帧沿水平轴翻转">▲▼</button>
-            <!-- 复位键跟着它复位的那一页：紧挨着「更新图像」，而不是整栏的标题上 -->
-            <button class="ghost icon reset" id="proc-reset"
+            <!-- 复位键跟着它复位的那一页：成像模拟与后期处理各一个，切到哪页
+                 就只显示哪页的复位，按下去也只动那一页的参数。 -->
+            <button class="ghost icon reset" id="proc-reset-imaging"
+                    title="把成像模拟里的每一项恢复为默认值"></button>
+            <button class="ghost icon reset" id="proc-reset-post" hidden
                     title="把后期处理里的每一项恢复为默认值"></button>
             <button class="outline" id="refresh-image-proc">更新图像 <span class="en">Refresh image</span></button>
           </div>

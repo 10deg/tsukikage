@@ -419,7 +419,7 @@ sandbox.globalThis = sandbox;
 const source = fs.readFileSync(path.join(__dirname, 'map', 'map.js'), 'utf8')
   + '\n;globalThis.__t = { state, zoomBy, fitView, lightingWhen, nudgeLighting, '
   + 'terminatorPoints, readMarks, syncMarkChips, setAllLayers, wireSplitters, featureRimSegments, '
-  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord, projectOutlineSegments, drawFeatureOutline, textAlongPath, selectedTextHit, beginTextDrag, textDragMove, textTrackKey, selectFeature, textFollowFeature, densityGateSet, labelColourFor, labelTextColourFor, labelFontFor, visibleOutlineAnchor };';
+  + 'applyLightingSoon, loadLayers, resizeCanvas, moonToPhoto, photoToSphere, drawPhotoOverlay, movePhoto, orderedPhotos, setRightTab, screenToLonLat, lonlatToScreen, filteredPhotos, reorderPhoto, rebuildPhotoList, featureAt, clampCenter, addManualMarkAt, manualAt, clearManualMarks, labelAvoidanceEnabled, densityIsMax, setMapFullscreen, graticuleStep, selectPhoto, drawGraticule, labelTier, paintGlobeBase, globeRadius, globeBasis, placeFeatureLabel, layoutFeatureLabel, paintFeatureLabel, drawFeatures, featureName, searchName, refreshFeatures, viewZoom, globeFeatureBounds, projectionSourceWindow, measure, setMapMeasure, measureDistanceKm, measureText, measureCirclePoint, measureLinePoint, measureScreen, formatCoord, projectOutlineSegments, drawFeatureOutline, textAlongPath, selectedTextHit, beginTextDrag, textDragMove, textTrackKey, selectFeature, textFollowFeature, densityGateSet, labelColourFor, labelTextColourFor, labelFontFor, visibleOutlineAnchor };';
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'map.js' });
 
@@ -1130,6 +1130,116 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   console.log('');
+  console.log('中英 names and selection-stable captions');
+  {
+    const saved = { language: T.state.language, craterSuffix: T.state.craterSuffix };
+    const feature = {
+      class: 'crater', name_en: 'Abbe', name_zh: '阿贝', name: '', lon: 0, lat: 0,
+      diameter_km: 64,
+    };
+    T.state.language = 'both';
+    T.state.craterSuffix = false;
+    check('the map offers 中英 in its name menu',
+      /<option value="both">中英<\/option>/.test(html));
+    check('中英 joins the two names with a middle dot',
+      T.featureName(feature) === '阿贝·Abbe', T.featureName(feature));
+    T.state.craterSuffix = true;
+    check('the 坑 suffix stays on the Chinese half only',
+      T.featureName(feature) === '阿贝坑·Abbe', T.featureName(feature));
+    T.state.language = 'en';
+    check('English alone is unchanged', T.featureName(feature) === 'Abbe',
+      T.featureName(feature));
+    T.state.language = saved.language;
+    T.state.craterSuffix = saved.craterSuffix;
+  }
+  {
+    /* A click selects; it must not re-run avoidance.  The selected name used
+       to be set bold, which widened its box, and every neighbour shuffled. */
+    const saved = { ...T.state };
+    T.state.labels = true;
+    T.state.active = new Set(['crater']);
+    T.state.language = 'en';
+    T.state.projection = 'equirect';
+    T.state.width = 1200;
+    T.state.height = 800;
+    T.state.zoom = 4;
+    T.state.scale = 1;
+    T.state.centerLon = 0;
+    T.state.centerLat = 0;
+    T.state.mercY = 0;
+    T.state.selected = null;
+    T.state.avoidOverlap = true;
+    T.state.density = {};
+    T.state.labelFont = 0;
+    T.state.outlines = false;
+    T.state.textFollow = false;
+    T.state.features = [
+      { class: 'crater', name_en: 'Alpha', name_zh: '阿尔法', lon: -20, lat: 0,
+        diameter_km: 100 },
+      { class: 'crater', name_en: 'Beta', name_zh: '贝塔', lon: 0, lat: 0,
+        diameter_km: 100 },
+      { class: 'crater', name_en: 'Gamma', name_zh: '伽马', lon: 20, lat: 0,
+        diameter_km: 100 },
+    ];
+    T.drawFeatures();
+    const before = JSON.stringify(T.state.labelHits.map((hit) => [hit.feature.name_en,
+      hit.left, hit.top, hit.right, hit.bottom]));
+    check('three captions were laid out to begin with',
+      T.state.labelHits.length === 3, String(T.state.labelHits.length));
+    T.selectFeature(T.state.features[1]);
+    const after = JSON.stringify(T.state.labelHits.map((hit) => [hit.feature.name_en,
+      hit.left, hit.top, hit.right, hit.bottom]));
+    check('selecting a feature leaves every caption box where it was',
+      before === after, `${before} -> ${after}`);
+    T.selectFeature(null);
+    const cleared = JSON.stringify(T.state.labelHits.map((hit) => [hit.feature.name_en,
+      hit.left, hit.top, hit.right, hit.bottom]));
+    check('clearing the selection does not move them either',
+      cleared === before, `${before} -> ${cleared}`);
+    // A big formation zoomed until its catalogue centre is outside the frame
+    // still has a visible rim; the caption belongs on that rim, not nowhere.
+    const huge = {
+      class: 'mare', name_en: 'Huge Sea', name_zh: '大海',
+      lon: 40, lat: 0, diameter_km: 1000,
+      outline: {
+        kind: 'point',
+        ring: [[0, -5], [5, -5], [5, 5], [0, 5], [0, -5]],
+      },
+    };
+    T.state.active = new Set(['mare']);
+    T.state.features = [huge];
+    T.drawFeatures();
+    check('a large formation whose centre left the view keeps its caption',
+      T.state.labelHits.some((hit) => hit.feature === huge),
+      JSON.stringify(T.state.labelHits.map((hit) => hit.feature.name_en)));
+    Object.assign(T.state, saved);
+  }
+  {
+    /* 全月 shows more than a full turn of longitude; asking the catalogue for
+       just the two edge longitudes gave a narrow dateline window and put every
+       label on the left and right edges. */
+    const saved = { ...T.state };
+    T.state.active = new Set(['crater']);
+    T.state.width = 1200;
+    T.state.height = 700;
+    T.state.zoom = 2;
+    T.state.scale = 0.55;
+    T.state.centerLon = 0;
+    T.state.centerLat = 0;
+    T.state.mercY = 0;
+    for (const projection of ['equirect', 'mercator']) {
+      T.state.projection = projection;
+      await T.refreshFeatures();
+      const call = fetchCalls.filter((url) => url.startsWith('/api/map/features')).pop();
+      const params = new URLSearchParams(String(call).split('?')[1] || '');
+      check(`${projection} 全月 asks for every longitude`,
+        params.get('west') === '-180' && params.get('east') === '180',
+        `${projection}: ${params.get('west')} .. ${params.get('east')}`);
+    }
+    Object.assign(T.state, saved);
+  }
+
+  console.log('');
   console.log('mercantor has no mirrored poles and photos select without showing');
   {
     const saved = { ...T.state };
@@ -1662,6 +1772,69 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     check('显示线状地貌轮廓 still owns every line',
       T.drawFeatureOutline(mountain) === false);
     T.state.linearOutlines = true;
+    // 山脉 now carries the closed IAU ring beside its text path: the painter
+    // must draw the ring, and the ring is an area outline rather than a line.
+    const ringMountain = {
+      feature: {
+        class: 'mons', lon: 2, lat: 2, diameter_km: 100,
+        outline: {
+          kind: 'centerline',
+          path: [[0, 0], [4, 0], [4, 4]],
+          ring: [[0, 0], [4, 0], [4, 4], [0, 4], [0, 0]],
+        },
+      },
+      radius: 10, kmPerPixel: 1,
+    };
+    T.state.linearOutlines = false;
+    check('a closed mountain ring is drawn as an area outline, not hidden as a line',
+      T.drawFeatureOutline(ringMountain) === true);
+    const ringAnchor = T.visibleOutlineAnchor({
+      class: 'mons', lon: 40, lat: 0,
+      outline: {
+        kind: 'centerline',
+        path: [[40, 0], [41, 0]],
+        ring: [[0, 0], [5, 0], [5, 5], [0, 5], [0, 0]],
+      },
+    }, 30);
+    check('the visible ring anchors a feature whose old trace is off-screen',
+      !!ringAnchor && ringAnchor.x > 0 && ringAnchor.x < T.state.width,
+      JSON.stringify(ringAnchor));
+    T.state.linearOutlines = true;
+    const ringSegments = T.projectOutlineSegments(ringMountain.feature.outline, true);
+    const pathSegments = T.projectOutlineSegments(ringMountain.feature.outline);
+    check('the ring is the painted outline; the trace stays available separately',
+      ringSegments && ringSegments[0].length === 5
+      && pathSegments && pathSegments[0].length === 3,
+      JSON.stringify({ ring: ringSegments && ringSegments[0].length,
+                       path: pathSegments && pathSegments[0].length }));
+    // The caption follows the ring too: after the outline was fixed, a caption
+    // still running down the retired centreline read as the old shape.
+    const follow = {
+      feature: {
+        id: 99123, class: 'mons', name_en: 'Ring Ridge', lon: 5, lat: 5,
+        diameter_km: 500,
+        outline: {
+          kind: 'centerline',
+          path: [[4.5, 5], [5.5, 5]],
+          ring: [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]],
+        },
+      },
+      screen: { x: 600, y: 400 }, radius: 20, marker: 3, tier: 2,
+    };
+    const savedText = { textFollow: T.state.textFollow,
+                        textTracks: T.state.textTracks,
+                        labelShift: T.state.labelShift };
+    T.state.textFollow = true;
+    T.state.textTracks = {};
+    T.state.labelShift = {};
+    const followBox = T.textAlongPath(follow, 'AB', 12, '#ffffff', false);
+    const followTrack = T.state.textTracks[T.textTrackKey(follow.feature)];
+    check('a mountain caption follows the new ring, not the old centreline',
+      !!followBox && !!followTrack && followTrack.length > 100,
+      JSON.stringify({ box: followBox, length: followTrack && followTrack.length }));
+    T.state.textFollow = savedText.textFollow;
+    T.state.textTracks = savedText.textTracks;
+    T.state.labelShift = savedText.labelShift;
     // The IAU download has no basin polygons; the gazetteer diameter is the
     // fallback that keeps 大型撞击盆地's ring on the map.
     const basin = {

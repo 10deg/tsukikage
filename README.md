@@ -4,8 +4,8 @@
 
 ## 当前版本：
 
-光照模拟 1.7.3  
-月面地图 1.1.3
+光照模拟 1.7.5  
+月面地图 1.1.5
 
 ---
 
@@ -174,29 +174,32 @@ NASA SVS CGI Moon Kit 提供的 **64 px/deg** 数据已不够用，需要下载�
 
 更高分辨率的数据（1024 pdd），或全球覆盖不全，或来自于 512 ppd 数据的插值，且数据体积庞大（超过100 GB）故不再推荐使用。
 
+---
+
 **256 px/deg** 数据可选择 [USGS](https://astrogeology.usgs.gov/search/map/moon_lro_lola_dem_118m) 的 LRO LOLA 全球高程数据 `Lunar_LRO_LOLA_Global_LDEM_118m_Mar2014.tif`， `tools/`目录中提供了一个下载脚本：
 
 ```bash
 ./.venv/bin/python tools/fetch_lola_global.py
 ```
 
-更高分辨率的 **512 px/deg** 高程数据，可选择 USGS 的 LRO LOLA 全球高程数据 `ldem_512.tif`，该数据需要分块下载，`tools/`目录中提供了一个下载脚本实现自动下载与拼接转换：
+---
+
+更高分辨率的 **512 px/deg** 高程数据，可选择 USGS 的 LRO LOLA 全球高程数据 `ldem_512.tif`，该数据需要分块下载，`tools/`目录中提供了一个下载脚本实现自动下载与拼接转换。脚本会逐张下载 16 块瓦片、写进预分配的 `kernels/ldem_512.tif`、删掉瓦片，拼接完共约 34 GB。支持断点续传。
 
 ```bash
 ./.venv/bin/python tools/fetch_lola_512.py
 ```
 
-逐张下载 16 块瓦片、写进预分配的 `kernels/ldem_512.tif`、删掉瓦片，拼接完共约 34 GB。支持断点续传。
-
-但我更推荐使用 `SLDEM2015+LOLA`方案，在 ±60° 内由辉夜号（Kaguya） TC 立体填缝，极区用上面的 LOLA 512 数据补全：
+但我更推荐使用 `SLDEM2015+LOLA`方案，在 ±60° 内由辉夜号（Kaguya） TC 立体填缝，极区用上面的 LOLA 512 数据补全。脚本会逐张下载 32 块 ±60° 瓦片（约 45 GB），因 SLDEM2015 没有 512 ppd 的极区产品，所以 ±60–90° 从本机已有的 `ldem_512.tif` 直接复制。若本地没有`ldem_512.tif`，则会下载依赖的 LOLA 数据再进行合成。支持断点续传。
 
 ```bash
 ./.venv/bin/python tools/fetch_sldem_512.py
 ```
 
-逐张下载 32 块 ±60° 瓦片（约 45 GB），因 SLDEM2015 没有 512 ppd 的极区产品，所以 ±60–90° 从本机已有的 `ldem_512.tif` 直接复制。若本地没有`ldem_512.tif`，则会下载依赖的 LOLA 数据再进行合成。支持断点续传。
 
 如有临时需求，只想在某一处实现高分辨率模拟时，也可不下载整份产品。高级设置里的「区域高清补片」按**当前选框**可从在线产品匹配所需的高程数据（`POST /api/patch`，开启后台任务）。
+
+---
 
 ### 总结：
 

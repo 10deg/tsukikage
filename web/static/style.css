@@ -1322,7 +1322,8 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
    复位: 镜像 stays against the left edge, where the parameter names above it
    are, and the two actions stay against the right. */
 .proc-actions > button { flex: 0 0 auto; }
-.proc-actions #proc-reset { margin-left: auto; padding: 4px 7px; }
+.proc-actions #proc-reset-imaging,
+.proc-actions #proc-reset-post { margin-left: auto; padding: 4px 7px; }
 /* 后期处理的进度条：单独一行，占满整栏。 */
 .proc-progress { margin: 7px 0 1px; }
 

@@ -953,12 +953,18 @@ function respond(url, body) {
                                    earth_geometric_albedo: 0.367, earthshine_gain: 1 },
                      train: { plate_scale_arcsec: 0.2, telescope: { name: 'SCT' },
                               camera: { name: 'IMX' }, field_deg: [0.2, 0.2] },
-                     instrument: { fwhm_total_arcsec: 1.1, sharpen_sigma_arcsec: 0.3 } } };
+                     instrument: { fwhm_total_arcsec: 1.1, sharpen_sigma_arcsec: 0.3,
+                                   diffraction_ring: { radius_px: 3.25, width_px: 0.91,
+                                                      share: 0.33 } } } };
+  }
+  if (url === '/api/psf') {
+    return { radius_px: 4.5, width_px: 1.26, share: 0.31 };
   }
   if (url === '/api/process') {
     const image = componentImage(body);
     return { info: { component: body.component || 'image', image: { shape: [400, 400] },
-                     instrument: {} },
+                     instrument: { diffraction_ring: { radius_px: 3.25, width_px: 0.91,
+                                                      share: 0.33 } } },
              image, image_raw: body.raw ? image : undefined };
   }
   if (url === '/api/surface-sun') {
@@ -2981,6 +2987,37 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     document.getElementById('diffraction-toggle')
       .getAttribute('aria-expanded') === 'false' &&
     document.getElementById('diffraction-psf').hidden === true);
+  /* 自动 is a placeholder, not a number.  Clicking an empty PSF field has to
+     show what "automatic" currently means, or the reader is editing a value
+     they cannot see. */
+  check('an empty 自动 PSF field fills with the value it was using',
+    (() => {
+      const radius = document.getElementById('diffraction-radius');
+      const width = document.getElementById('diffraction-width');
+      const share = document.getElementById('diffraction-share');
+      radius.value = '';
+      width.value = '';
+      share.value = '';
+      radius.fire('focus');
+      width.fire('focus');
+      share.fire('focus');
+      const ok = radius.value === '3.25' && width.value === '0.91'
+        && share.value === '0.33';
+      radius.value = '';
+      width.value = '';
+      share.value = '';
+      return ok;
+    })());
+  T.state.psfAuto = null;
+  {
+    const radius = document.getElementById('diffraction-radius');
+    radius.value = '';
+    radius.fire('click');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    check('an automatic field resolves before the first frame too',
+      radius.value === '4.5', radius.value);
+    radius.value = '';
+  }
   check('and the column holds the forecast and the animation',
     document.getElementById('proc-animation').hidden === false &&
     document.getElementById('proc-events').hidden === true);
@@ -3200,6 +3237,10 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     fire('gain', 'input');
     set('sharpen-radius', 5.5);
     fire('sharpen-radius', 'dblclick');
+    set('contrast', 1.7);
+    fire('contrast', 'dblclick');
+    set('brightness', 0.22);
+    fire('brightness', 'dblclick');
     set('label-density', 1);
     fire('label-density', 'dblclick');
     // reprocess() is debounced by 90 ms, so the request the double-click caused
@@ -3208,9 +3249,13 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
     const sent = fetchCalls.filter((c) => c.url === '/api/process').pop();
     check('double-clicking a slider puts it back where the page found it',
       document.getElementById('sharpen-radius').value === '1' &&
+      document.getElementById('contrast').value === '1' &&
+      document.getElementById('brightness').value === '0' &&
       document.getElementById('label-density').value === '0.5' &&
       (!sent || sent.body.processing.sharpen_radius_px === 1),
       `${document.getElementById('sharpen-radius').value} / ` +
+      `${document.getElementById('contrast').value} / ` +
+      `${document.getElementById('brightness').value} / ` +
       `${document.getElementById('label-density').value} / ` +
       `${sent && sent.body.processing.sharpen_radius_px}`);
     set('gain', 1);
@@ -3254,19 +3299,49 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
                        km: T.ruler.km, x: T.ruler.x }));
   }
 
-  /* The two panel resets use the same snapshot: what the markup said. */
+  /* The panel resets use the same snapshot -- what the markup said -- but
+     成像模拟 and 后期处理 are two pages with their own 复位.  A press may only
+     put back the page it belongs to: tuning the optics and tuning the finished
+     photograph are separate jobs, and one wipes work the other did not ask to
+     lose. */
+  fire('proc-image-tab-imaging', 'click');
   set('roughness', 30);
+  set('seeing', 2.5);
   set('noise-poisson', 0.7);
+  set('contrast', 1.7);
   fire('output-reset', 'click');
-  fire('proc-reset', 'click');
+  fire('proc-reset-imaging', 'click');
   await new Promise((resolve) => setTimeout(resolve, 60));
-  check('模拟设置 / 后期处理 resets put their panels back',
+  check('模拟设置 / 成像模拟 resets put their own panels back',
     document.getElementById('roughness').value === '0' &&
-    document.getElementById('noise-poisson').value === '0' &&
+    document.getElementById('seeing').value === '0.8' &&
+    document.getElementById('noise-poisson').value === '0.7' &&
+    document.getElementById('contrast').value === '1.7' &&
     document.getElementById('photometric-model').value === 'lunar_lambert',
     `${document.getElementById('roughness').value} / ` +
+    `${document.getElementById('seeing').value} / ` +
     `${document.getElementById('noise-poisson').value} / ` +
+    `${document.getElementById('contrast').value} / ` +
     `${document.getElementById('photometric-model').value}`);
+  check('and each processing page shows only its own 复位',
+    document.getElementById('proc-reset-imaging').hidden === false &&
+    document.getElementById('proc-reset-post').hidden === true);
+  set('seeing', 2.2);
+  fire('proc-image-tab-post', 'click');
+  check('the post page brings its own 复位',
+    document.getElementById('proc-reset-imaging').hidden === true &&
+    document.getElementById('proc-reset-post').hidden === false);
+  fire('proc-reset-post', 'click');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  check('后期处理 resets its page and leaves 成像模拟 alone',
+    document.getElementById('noise-poisson').value === '0' &&
+    document.getElementById('contrast').value === '1' &&
+    document.getElementById('seeing').value === '2.2',
+    `${document.getElementById('noise-poisson').value} / ` +
+    `${document.getElementById('contrast').value} / ` +
+    `${document.getElementById('seeing').value}`);
+  set('seeing', 0.8);
+  fire('proc-image-tab-imaging', 'click');
   check('and every reset button is the word 复位, not a glyph',
     [...document.querySelectorAll('button.reset')].length >= 4 &&
     [...document.querySelectorAll('button.reset')]
@@ -3952,14 +4027,14 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   check('picking the other one turns the first off',
     document.getElementById('mirror-v').getAttribute('aria-pressed') === 'false' &&
     document.getElementById('mirror-h').getAttribute('aria-pressed') === 'true');
-  /* 后期处理's own 复位 has to put both the angle and the mirror back -- and the
+  /* 后期处理's 复位 puts both the angle and its companion mirror back -- the
      fields are what it has to move, because they are what the next request is
-     built from.  The little ↺ that used to sit beside 旋转 is gone: the mirror
-     moved down to the action row, and one reset for the whole column is what a
-     reader reaching for "put the picture back" actually wants. */
+     built from.  It is the post page's button, so switch there first: the
+     成像模拟 page shows its own 复位 instead. */
+  fire('proc-image-tab-post', 'click');
   set('image-rotation', 42);
   fire('image-rotation', 'input');
-  fire('proc-reset', 'click');
+  fire('proc-reset-post', 'click');
   await new Promise((resolve) => setTimeout(resolve, 150));
   const afterReset = fetchCalls.filter((c) => c.url === '/api/process').pop().body.processing;
   check('复位 puts the angle back and clears the mirror',
@@ -3984,7 +4059,7 @@ const fire = (id, name, event) => document.getElementById(id).fire(name, event);
   // The noise sliders are left at zero for the checks that follow: the Poisson
   // count is drawn from a seeded generator, and a frame with grain in it is not
   // the frame the next block compares against.
-  fire('proc-reset', 'click');
+  fire('proc-reset-post', 'click');
   await tick();
   set('image-rotation', 0);
   set('noise-poisson', 0);

@@ -1563,7 +1563,7 @@ def _display_label(feature: SurfaceFeature, language: str,
         prefix = f"{number} "
         if english.startswith(prefix):
             english = english[len(prefix):]
-    return f"{chinese} {english}"
+    return f"{chinese}·{english}"
 
 
 def _size_score(radius_px: float, unit: float = 1.0) -> float:
@@ -2419,6 +2419,13 @@ def _catalogue_outline(name_en: str):
         return None, False
     kind = entry.get("kind")
     if kind in ("line", "centerline"):
+        # A mountain chain's IAU outline is a closed ring even when its label
+        # carries a centreline for typesetting (Montes Rook, Montes Cordillera
+        # wrap a whole basin).  Paint the ring; only fall back to the trace when
+        # there is no ring to paint.
+        ring = entry.get("ring") or []
+        if len(ring) >= 3:
+            return ring, True
         path = entry.get("path") or []
         return (path, False) if len(path) >= 2 else (None, False)
     if kind == "point":

@@ -130,8 +130,11 @@ jobs:
           files: out/windows-service/Tsukikage-windows-x64.zip
           overwrite_files: true
           body: |
-            Tsukikage 1.7.3 / 月面地图 1.1.3
+            Tsukikage 1.7.5 / 月面地图 1.1.5
 
-            - 修复了一些 bug
+            - 修改地貌轮廓 bug：修复 Montes Rook、Montes Cordillera 等山脉轮廓被转成折线的问题，并检查其他山脉的闭合轮廓。
+            - 山脉标注文字跟随修复后的闭合轮廓。
+            - 修复地图放大后，仍在视野内的大型地貌标注消失的问题。
+            - 修复光照模拟页面成像模拟/后期处理复位未分开，以及衍射环“自动”参数首次点击不显示当前值的问题。
 
             Windows 包需要 `kernels/` 目录完整才能运行；DEM/彩色底图请自行放入该目录。

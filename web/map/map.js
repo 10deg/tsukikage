@@ -104,13 +104,17 @@ function featureName(feature) {
   if (satelliteLetter(feature) && !state.satelliteFull) {
     return satelliteLetter(feature);
   }
-  let name = state.language === 'en'
-    ? (feature.name_en || feature.name_zh || feature.name || '')
-    : (feature.name_zh || feature.name_en || feature.name || '');
-  if (state.craterSuffix && state.language !== 'en' && craterish(feature)) {
-    name = `${name.replace(/坑\s*$/, '')}坑`;
+  const zh = String(feature.name_zh || '').trim();
+  const en = String(feature.name_en || feature.name || '').trim();
+  if (state.language === 'en') return en || zh;
+  let chinese = zh || en;
+  if (state.craterSuffix && craterish(feature)) {
+    chinese = `${chinese.replace(/坑\s*$/, '')}坑`;
   }
-  return name;
+  if (state.language === 'both') {
+    return en && en !== chinese ? `${chinese}·${en}` : chinese;
+  }
+  return chinese;
 }
 
 /** The full name a search result and the selection panel should show. */
@@ -119,9 +123,11 @@ function featureFullName(feature) {
   if (feature.class === 'lunar100') {
     return feature.name_en || feature.name || '';
   }
-  return state.language === 'en'
-    ? (feature.name_en || feature.name_zh || feature.name || '')
-    : (feature.name_zh || feature.name_en || feature.name || '');
+  const zh = String(feature.name_zh || '').trim();
+  const en = String(feature.name_en || feature.name || '').trim();
+  if (state.language === 'en') return en || zh;
+  if (state.language === 'both' && zh && en && zh !== en) return `${zh}·${en}`;
+  return zh || en;
 }
 
 /** A search result: Chinese name, with the original English in parentheses. */
@@ -133,7 +139,9 @@ function searchName(feature) {
   const zh = String(feature.name_zh || '').trim();
   const en = String(feature.name_en || '').trim();
   if (state.language === 'en') return en || zh || feature.name || '';
-  if (zh && en && zh !== en) return `${zh}（${en}）`;
+  if (zh && en && zh !== en) {
+    return state.language === 'both' ? `${zh}·${en}` : `${zh}（${en}）`;
+  }
   return zh || en || feature.name || '';
 }
 
@@ -1452,9 +1460,11 @@ function photoFeatureNames(entry) {
 }
 
 function photoFeatureLabel(feature) {
-  return state.language === 'en'
-    ? (feature.name_en || feature.name_zh || '')
-    : (feature.name_zh || feature.name_en || '');
+  const zh = String(feature.name_zh || '').trim();
+  const en = String(feature.name_en || '').trim();
+  if (state.language === 'en') return en || zh;
+  if (state.language === 'both' && zh && en && zh !== en) return `${zh}·${en}`;
+  return zh || en;
 }
 
 function photoHasFeature(entry, name) {
@@ -2709,6 +2719,9 @@ function render() {
       && (Math.abs(rect.width - state.width) > 0.5
           || Math.abs(rect.height - state.height) > 0.5)) {
     resizeCanvas();
+    // A resized stage is a new layout, even when the redraw was asked for by a
+    // selection; never reuse boxes measured against the old canvas.
+    selectionOnlyLayout = false;
     return;
   }
   ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
@@ -3757,16 +3770,31 @@ async function refreshFeatures() {
     south = bounds.south;
     north = bounds.north;
   } else {
-    const westPoint = screenToLonLat(0, 0);
-    const eastPoint = screenToLonLat(state.width, state.height);
-    west = westPoint ? westPoint.lon : -180;
-    east = eastPoint ? eastPoint.lon : 180;
-    north = westPoint ? westPoint.lat : 90;
-    south = eastPoint ? eastPoint.lat : -90;
-    // A vertical wrap makes the top corner colder than the bottom one.  The
-    // server's query is a rectangle, so ask for the whole meridian band and let
-    // the painter choose the visible copy.
-    if (north < south) { north = 90; south = -90; }
+    const world = worldSize();
+    // How much longitude one screen width holds.  At 全月 that is more than a
+    // full turn: the left and right edges both land near the dateline, and
+    // reading just those two corners gives west > east -- a 20-degree window
+    // around 180 instead of the whole map.  That was why every label crowded
+    // onto the two edges and the middle of the full Moon went unnamed.
+    const pxPerDeg = (world.w / 360) * state.scale;
+    const span = pxPerDeg > 0 ? state.width / pxPerDeg : 360;
+    if (span >= 359.999) {
+      west = -180;
+      east = 180;
+      north = 90;
+      south = -90;
+    } else {
+      const westPoint = screenToLonLat(0, 0);
+      const eastPoint = screenToLonLat(state.width, state.height);
+      west = westPoint ? westPoint.lon : -180;
+      east = eastPoint ? eastPoint.lon : 180;
+      north = westPoint ? westPoint.lat : 90;
+      south = eastPoint ? eastPoint.lat : -90;
+      // A vertical wrap makes the top corner colder than the bottom one.  The
+      // server's query is a rectangle, so ask for the whole meridian band and
+      // let the painter choose the visible copy.
+      if (north < south) { north = 90; south = -90; }
+    }
   }
   const max = densityIsMax();
   const query = new URLSearchParams({
@@ -3864,7 +3892,9 @@ function outlineOnScreen(feature, margin) {
  */
 function visibleOutlineAnchor(feature, margin) {
   const outline = feature && feature.outline;
-  const points = outline && (outline.path || outline.ring);
+  // The painted shape wins over the typesetting trace: a mountain's old
+  // centreline can be off-screen while its ring crosses the view.
+  const points = outline && (outline.ring || outline.path);
   if (!points || points.length < 2) return null;
   const step = Math.max(1, Math.floor(points.length / 96));
   const middleX = state.width / 2;
@@ -4029,9 +4059,16 @@ function resetLabelSettings() {
   render();
 }
 
+//: The caption boxes of the last full layout pass.  Selecting a feature is a
+//: style change, not a new map: reusing these boxes keeps every name where the
+//: reader last saw it instead of letting a bold glyph re-run the avoidance.
+let labelPlacements = null;
+let selectionOnlyLayout = false;
+
 function drawFeatures() {
   state.labelHits = [];
-  state.textTracks = {};
+  const reuse = selectionOnlyLayout && Array.isArray(labelPlacements);
+  selectionOnlyLayout = false;
   if (!state.labels) return;
   const classes = new Set(activeFeatureClasses());
   if (!classes.size) return;
@@ -4051,6 +4088,23 @@ function drawFeatures() {
   items.sort((left, right) => left.tier - right.tier
     || right.feature.diameter_km - left.feature.diameter_km);
   for (const item of items) drawFeatureMarker(item);
+  // A selection change repaints the same layout: the boxes that were reserved
+  // last frame are still what the reader sees, so no name jumps.  Every other
+  // reason to redraw falls through and lays the captions out afresh.
+  if (reuse) {
+    for (const placement of labelPlacements) {
+      paintFeatureLabel(placement);
+      const box = placement.box;
+      if (!box) continue;
+      state.labelHits.push({
+        feature: placement.feature,
+        left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      });
+    }
+    return;
+  }
+  state.textTracks = {};
+  labelPlacements = [];
   const occupied = [];
   // Higher tiers reserve their captions first.  Within a tier, larger features
   // go first and avoid only the captions already placed in that or a higher
@@ -4060,8 +4114,11 @@ function drawFeatures() {
     // The selected feature's name is part of the selection, so it is placed
     // even when the avoidance pass would have skipped it.
     const chosen = item.feature === state.selected;
-    const box = placeFeatureLabel(item, occupied, chosen);
-    if (!box) continue;
+    const placement = layoutFeatureLabel(item, occupied, chosen);
+    if (!placement) continue;
+    paintFeatureLabel(placement);
+    labelPlacements.push(placement);
+    const box = placement.box;
     state.labelHits.push({
       feature: item.feature,
       left: box.left, top: box.top, right: box.right, bottom: box.bottom,
@@ -4072,8 +4129,11 @@ function drawFeatures() {
   // Tier 0 overlays after everything else, with no collision test at all.
   for (const item of items) {
     if (item.tier !== 0) continue;
-    const box = placeFeatureLabel(item, [], true);
-    if (!box) continue;
+    const placement = layoutFeatureLabel(item, [], true);
+    if (!placement) continue;
+    paintFeatureLabel(placement);
+    labelPlacements.push(placement);
+    const box = placement.box;
     state.labelHits.push({
       feature: item.feature,
       left: box.left, top: box.top, right: box.right, bottom: box.bottom,
@@ -4156,12 +4216,20 @@ function featureRimSegments(feature) {
   return segments.length ? { segments, closed: segments.length === 1 } : null;
 }
 
-/** Project one catalogue path (or ring) into screen-space segments. */
-function projectOutlineSegments(outline) {
-  const points = outline.path || outline.ring;
+/** Project one catalogue path (or ring) into screen-space segments.
+ *
+ *  ``useRing`` asks for the painted outline.  A mountain chain carries both a
+ *  closed IAU ring (what it looks like) and an interior centreline (what its
+ *  name follows); without the flag the path wins, so typesetting keeps using
+ *  the trace while the painter gets the ring.
+ */
+function projectOutlineSegments(outline, useRing = false) {
+  const hasRing = !!(outline.ring && outline.ring.length >= 2);
+  const hasPath = !!(outline.path && outline.path.length >= 2);
+  const points = useRing && hasRing ? outline.ring : (outline.path || outline.ring);
   if (!points || points.length < 2) return null;
   const globe = isGlobeLike();
-  const closed = !!outline.ring;
+  const closed = useRing ? hasRing : (hasRing && !hasPath);
   const segments = [];
   let current = [];
   let previous = null;
@@ -4221,8 +4289,10 @@ function drawFeatureOutline(item) {
     return true;
   }
   // 显示线状地貌轮廓: the open paths (rilles, ridges, valleys) have their own
-  // switch; closed rings are area outlines.
-  if (!state.linearOutlines
+  // switch; closed rings are area outlines.  A mountain that carries an IAU
+  // ring is painted from that ring, so it is an area outline too.
+  const ringShaped = !!(outline.ring && outline.ring.length >= 2);
+  if (!state.linearOutlines && !ringShaped
       && (outline.kind === 'line' || outline.kind === 'centerline')) {
     return false;
   }
@@ -4241,7 +4311,10 @@ function drawFeatureOutline(item) {
     if (!rim) return false;
     segments = rim.segments;
   } else {
-    segments = projectOutlineSegments(outline);
+    // Paint the closed ring when the catalogue has one.  The centreline stays
+    // in ``path`` for the caption; drawing it as the outline turned an entire
+    // mountain ring into one straight-ish stroke.
+    segments = projectOutlineSegments(outline, true);
     if (!segments) return false;
   }
   strokeRim(segments, feature);
@@ -4298,9 +4371,19 @@ function textTrackKey(feature) {
     ? String(feature.name_en || '') : feature.id;
 }
 
-/** Set a caption along its outline path; returns the box it occupies. */
-function textAlongPath(item, text, fontPx, colour, highlight) {
-  const segments = projectOutlineSegments(item.feature.outline);
+/** Lay a caption along the feature's traced path, without painting it.
+ *
+ *  Layout and paint are separate so a selection can reuse the boxes the last
+ *  frame reserved: the selected name used to be set bold, which widened its
+ *  measured box and made the avoidance pass shuffle every neighbouring name.
+ *  Here the text is measured in the layout weight; the highlight is a paint-
+ *  time decision.
+ */
+function layoutTextAlongPath(item, text, fontPx) {
+  // Follow the painted outline, not a separate centreline: after the IAU ring
+  // replaced the old polyline, a caption still running along the centreline
+  // read as a leftover from the previous shape.
+  const segments = projectOutlineSegments(item.feature.outline, true);
   if (!segments) return null;
   let route = null;
   for (const segment of segments) {
@@ -4315,6 +4398,7 @@ function textAlongPath(item, text, fontPx, colour, highlight) {
   let points = smoothPathPoints(route.segment, 2);
   const chars = Array.from(String(text));
   const spacing = Math.max(0.8, fontPx * 0.12);
+  ctx.font = `${state.textBold ? '600 ' : ''}${fontPx}px "PingFang SC", system-ui, sans-serif`;
   const widths = chars.map((char) => ctx.measureText(char).width);
   const total = widths.reduce((sum, width) => sum + width, 0)
     + spacing * Math.max(0, chars.length - 1);
@@ -4404,7 +4488,11 @@ function textAlongPath(item, text, fontPx, colour, highlight) {
   const range = Math.max(1, length - total);
   let start = choice.start + shift * range;
   const first = points[0], last = points[points.length - 1];
-  const loop = !!item.feature.outline.ring
+  const outline = item.feature.outline || {};
+  // The ring is what the caption follows whenever there is one; a plain line
+  // feature has only its trace.  A closed ring loops at its seam.
+  const followsRing = !!(outline.ring && outline.ring.length >= 2);
+  const loop = followsRing
     || Math.hypot(last.x - first.x, last.y - first.y) < length * 0.18;
   if (loop) {
     start = ((start % range) + range) % range;
@@ -4436,7 +4524,7 @@ function textAlongPath(item, text, fontPx, colour, highlight) {
         guard += 1;
       }
       if (position + widths[index] / 2 > length) return null;
-      spots.push(spot);
+      spots.push({ ...spot, char: chars[index] });
       previous = spot;
       position += widths[index] + (index + 1 < chars.length ? spacing : 0);
     }
@@ -4445,14 +4533,37 @@ function textAlongPath(item, text, fontPx, colour, highlight) {
   const placed = layout(start);
   if (!placed) return null;
   const spots = placed.spots;
-  const boxes = [];
+  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+  for (const spot of spots) {
+    left = Math.min(left, spot.x);
+    right = Math.max(right, spot.x);
+    top = Math.min(top, spot.y - fontPx * 0.7);
+    bottom = Math.max(bottom, spot.y + fontPx * 0.7);
+  }
+  if (!(right > left)) return null;
+  return {
+    kind: 'along',
+    feature: item.feature,
+    text,
+    fontPx,
+    spots,
+    box: { left, right, top, bottom },
+  };
+}
+
+/** Paint a caption laid out by :func:`layoutTextAlongPath`. */
+function paintTextAlongPath(placement) {
+  const { feature, fontPx, spots } = placement;
+  const highlight = state.selected === feature;
+  const colour = labelTextColourFor(feature);
+  const bold = (state.textBold || highlight) ? '600 ' : '';
   ctx.save();
+  ctx.font = `${bold}${fontPx}px "PingFang SC", system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
   const strokeWidth = Number(state.textStrokeWidth) || 0;
-  chars.forEach((char, index) => {
-    const spot = spots[index];
+  spots.forEach((spot) => {
     let angle = spot.angle;
     if (angle > Math.PI / 2) angle -= Math.PI;
     else if (angle < -Math.PI / 2) angle += Math.PI;
@@ -4462,27 +4573,25 @@ function textAlongPath(item, text, fontPx, colour, highlight) {
     if (strokeWidth > 0) {
       ctx.lineWidth = Math.min(6, strokeWidth);
       ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
-      ctx.strokeText(char, 0, 0);
+      ctx.strokeText(spot.char, 0, 0);
     }
     ctx.fillStyle = highlight ? '#ffffff' : colour;
     if (highlight) {
       ctx.shadowColor = colour;
       ctx.shadowBlur = 8;
     }
-    ctx.fillText(char, 0, 0);
+    ctx.fillText(spot.char, 0, 0);
     ctx.restore();
-    boxes.push({ x: spot.x, y: spot.y });
   });
   ctx.restore();
-  if (!boxes.length) return null;
-  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
-  for (const box of boxes) {
-    left = Math.min(left, box.x);
-    right = Math.max(right, box.x);
-    top = Math.min(top, box.y - fontPx * 0.7);
-    bottom = Math.max(bottom, box.y + fontPx * 0.7);
-  }
-  return { left, right, top, bottom };
+}
+
+/** Draw a caption along the feature's path in one call (tests and ad-hoc use). */
+function textAlongPath(item, text, fontPx, colour, highlight) {
+  const placement = layoutTextAlongPath(item, text, fontPx);
+  if (!placement) return null;
+  paintTextAlongPath(placement);
+  return placement.box;
 }
 
 function drawFeatureMarker(item) {
@@ -4537,10 +4646,16 @@ function drawFeatureMarker(item) {
   ctx.restore();
 }
 
-function placeFeatureLabel(item, occupied, force = false) {
+/** Reserve a caption's place without painting it.
+ *
+ *  The box this returns is what the avoidance pass remembers for the frame.
+ *  Measuring in the layout weight (not the highlighted weight) is deliberate:
+ *  selecting a feature changes its colour and glow, not the space it claimed,
+ *  so the neighbours keep their places.
+ */
+function layoutFeatureLabel(item, occupied, force = false) {
   const { feature, radius } = item;
   const screen = item.anchor || item.screen;
-  const colour = labelTextColourFor(feature);
   const text = featureName(feature);
   if (!text) return null;
   const zoom = viewZoom();
@@ -4549,10 +4664,8 @@ function placeFeatureLabel(item, occupied, force = false) {
     || feature.diameter_km >= 45 || pointVisible;
   if (!visible) return null;
   const fontPx = labelFontFor(feature);
-  const highlight = state.selected === feature;
-  const bold = (state.textBold || highlight) ? '600 ' : '';
   ctx.save();
-  ctx.font = `${bold}${fontPx}px "PingFang SC", system-ui, sans-serif`;
+  ctx.font = `${state.textBold ? '600 ' : ''}${fontPx}px "PingFang SC", system-ui, sans-serif`;
   ctx.textBaseline = 'middle';
   const width = ctx.measureText(text).width;
   const height = fontPx * 1.35;
@@ -4560,7 +4673,7 @@ function placeFeatureLabel(item, occupied, force = false) {
   // When the path is too short for the name the ordinary horizontal caption
   // below still runs, so a cramped feature is never left unlabelled.
   if (textFollowFeature(feature)) {
-    const along = textAlongPath(item, text, fontPx, colour, highlight);
+    const along = layoutTextAlongPath(item, text, fontPx);
     if (along) {
       ctx.restore();
       return along;
@@ -4623,38 +4736,22 @@ function placeFeatureLabel(item, occupied, force = false) {
     const leaderLength = Math.hypot(nearX - startX, nearY - startY);
     // A close, inside-the-ring caption needs no line; a point marker or a
     // caption that had to step outside the ring still gets one.
-    if (leaderLength > 2.5 && (!ringDrawn || reach > radius + 2)) {
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(nearX, nearY);
-      ctx.strokeStyle = 'rgba(3, 5, 9, .78)';
-      ctx.lineWidth = Math.max(2.4, fontPx * 0.20);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(nearX, nearY);
-      ctx.strokeStyle = highlight ? '#ffffff' : colour;
-      ctx.lineWidth = Math.max(1, fontPx * 0.075);
-      ctx.stroke();
-      ctx.restore();
-    }
-    ctx.textAlign = attempt.align;
-    const strokeWidth = Number(state.textStrokeWidth) || 0;
-    if (strokeWidth > 0) {
-      ctx.lineWidth = Math.min(6, strokeWidth);
-      ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
-      ctx.strokeText(text, attempt.x, attempt.y);
-    }
-    ctx.fillStyle = highlight ? '#ffffff' : colour;
-    if (highlight) {
-      ctx.shadowColor = colour;
-      ctx.shadowBlur = 8;
-    }
-    ctx.fillText(text, attempt.x, attempt.y);
+    const leader = leaderLength > 2.5 && (!ringDrawn || reach > radius + 2)
+      ? { startX, startY, nearX, nearY } : null;
     ctx.restore();
-    return box;
+    return {
+      kind: 'box',
+      feature,
+      text,
+      fontPx,
+      width,
+      height,
+      box,
+      x: attempt.x,
+      y: attempt.y,
+      align: attempt.align,
+      leader,
+    };
   }
   // Last resort: every preferred spot was outside the frame -- a feature at
   // the edge with a name longer than the room beside it.  Clamp a centred
@@ -4673,37 +4770,24 @@ function placeFeatureLabel(item, occupied, force = false) {
     if (!collision) {
       const nearX = Math.min(Math.max(screen.x, box.left), box.right);
       const nearY = Math.min(Math.max(screen.y, box.top), box.bottom);
-      if (Math.hypot(nearX - screen.x, nearY - screen.y) > 2.5) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(screen.x, screen.y);
-        ctx.lineTo(nearX, nearY);
-        ctx.strokeStyle = 'rgba(3, 5, 9, .78)';
-        ctx.lineWidth = Math.max(2.4, fontPx * 0.20);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(screen.x, screen.y);
-        ctx.lineTo(nearX, nearY);
-        ctx.strokeStyle = highlight ? '#ffffff' : colour;
-        ctx.lineWidth = Math.max(1, fontPx * 0.075);
-        ctx.stroke();
-        ctx.restore();
-      }
-      const strokeWidth = Number(state.textStrokeWidth) || 0;
-      ctx.textAlign = 'center';
-      if (strokeWidth > 0) {
-        ctx.lineWidth = Math.min(6, strokeWidth);
-        ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
-        ctx.strokeText(text, left + width / 2, top + height / 2);
-      }
-      ctx.fillStyle = highlight ? '#ffffff' : colour;
-      if (highlight) {
-        ctx.shadowColor = colour;
-        ctx.shadowBlur = 8;
-      }
-      ctx.fillText(text, left + width / 2, top + height / 2);
+      const dx = nearX - screen.x;
+      const dy = nearY - screen.y;
+      const leader = Math.hypot(dx, dy) > 2.5
+        ? { startX: screen.x, startY: screen.y, nearX, nearY } : null;
       ctx.restore();
-      return box;
+      return {
+        kind: 'box',
+        feature,
+        text,
+        fontPx,
+        width,
+        height,
+        box,
+        x: left + width / 2,
+        y: top + height / 2,
+        align: 'center',
+        leader,
+      };
     }
   }
   if (force) {
@@ -4711,20 +4795,78 @@ function placeFeatureLabel(item, occupied, force = false) {
     // caption into the frame anyway, because the whole point is all of them.
     const left = Math.min(Math.max(2, screen.x - width / 2), state.width - width - 2);
     const top = Math.min(Math.max(2, screen.y - height / 2), state.height - height - 2);
-    ctx.textAlign = 'left';
-    const strokeWidth = Number(state.textStrokeWidth) || 0;
-    if (strokeWidth > 0) {
-      ctx.lineWidth = Math.min(6, strokeWidth);
-      ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
-      ctx.strokeText(text, left, top + height / 2);
-    }
-    ctx.fillStyle = colour;
-    ctx.fillText(text, left, top + height / 2);
     ctx.restore();
-    return { left, top, right: left + width, bottom: top + height };
+    return {
+      kind: 'force',
+      feature,
+      text,
+      fontPx,
+      width,
+      height,
+      box: { left, top, right: left + width, bottom: top + height },
+      x: left,
+      y: top + height / 2,
+      align: 'left',
+      leader: null,
+    };
   }
   ctx.restore();
   return null;
+}
+
+/** Paint one laid-out caption, with the current selection's highlight. */
+function paintFeatureLabel(placement) {
+  if (placement.kind === 'along') {
+    paintTextAlongPath(placement);
+    return;
+  }
+  const { feature, text, fontPx } = placement;
+  const highlight = state.selected === feature && placement.kind !== 'force';
+  const colour = labelTextColourFor(feature);
+  const bold = (state.textBold || highlight) ? '600 ' : '';
+  ctx.save();
+  ctx.font = `${bold}${fontPx}px "PingFang SC", system-ui, sans-serif`;
+  ctx.textBaseline = 'middle';
+  if (placement.leader) {
+    const { startX, startY, nearX, nearY } = placement.leader;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(nearX, nearY);
+    ctx.strokeStyle = 'rgba(3, 5, 9, .78)';
+    ctx.lineWidth = Math.max(2.4, fontPx * 0.20);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(startX, startY);
+    ctx.lineTo(nearX, nearY);
+    ctx.strokeStyle = highlight ? '#ffffff' : colour;
+    ctx.lineWidth = Math.max(1, fontPx * 0.075);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.textAlign = placement.align;
+  const strokeWidth = Number(state.textStrokeWidth) || 0;
+  if (strokeWidth > 0) {
+    ctx.lineWidth = Math.min(6, strokeWidth);
+    ctx.strokeStyle = state.textStroke || 'rgba(3, 5, 9, .92)';
+    ctx.strokeText(text, placement.x, placement.y);
+  }
+  ctx.fillStyle = highlight ? '#ffffff' : colour;
+  if (highlight) {
+    ctx.shadowColor = colour;
+    ctx.shadowBlur = 8;
+  }
+  ctx.fillText(text, placement.x, placement.y);
+  ctx.restore();
+}
+
+/** Lay out and paint one caption; returns the box the avoidance pass sees. */
+function placeFeatureLabel(item, occupied, force = false) {
+  const placement = layoutFeatureLabel(item, occupied, force);
+  if (!placement) return null;
+  paintFeatureLabel(placement);
+  return placement.box;
 }
 
 function featureAt(sx, sy) {
@@ -5550,6 +5692,9 @@ function selectFeature(feature) {
       panel.appendChild(note);
     }
   }
+  // The clicked feature's name is highlighted in the same boxes the last pass
+  // reserved: a selection must not re-run avoidance and move every neighbour.
+  selectionOnlyLayout = true;
   render();
 }
 
@@ -5711,6 +5856,8 @@ function updateLayerHint() {
 }
 
 function refreshLayerLanguage() {
+  // New names need a new layout, even though the selection itself is unchanged.
+  labelPlacements = null;
   for (const input of document.querySelectorAll('#label-classes input[data-layer]')) {
     const layer = (state.layers && state.layers.layers || [])
       .find((item) => item.id === input.dataset.layer);
@@ -6660,7 +6807,8 @@ function wire() {
     $('classes-toggle').setAttribute('aria-expanded', String(collapsed));
   });
   $('name-language').addEventListener('change', (event) => {
-    state.language = event.target.value === 'en' ? 'en' : 'zh';
+    const wanted = event.target.value;
+    state.language = wanted === 'en' || wanted === 'both' ? wanted : 'zh';
     refreshLayerLanguage();
   });
   // 标注外观: the same handful of choices the full-disk page exposes.  Every
