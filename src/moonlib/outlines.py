@@ -69,6 +69,10 @@ def _read(path: Path) -> Dict[str, Dict[str, Any]]:
             "radius_deg_lon": label.get("radius_deg_lon"),
             "rotation_deg": label.get("rotation_deg"),
             "path": label.get("path"),
+            #: True when the typesetting path itself is a closed loop (a big
+            #: mountain ring): the caption then runs round the whole shape
+            #: instead of choosing one west-to-east direction on it.
+            "path_closed": bool(label.get("path_closed")),
             #: A closed IAU ring, kept beside the older path for long mountain
             #: chains: the ring is what gets painted *and* what the name follows.
             #: ``None`` for the features whose only shape is a trace.

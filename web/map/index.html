@@ -44,6 +44,8 @@
             title="展开标注设置"></button>
   </div>
 
+  <button class="ghost mini" id="fit"
+          title="把视图中心与缩放复位到整个月面">视角复位</button>
   <button class="ghost mini" id="map-fullscreen"
           title="隐藏左右栏、顶栏和底栏，只留地图">全屏</button>
 
@@ -57,7 +59,6 @@
     <button id="zoom-out" title="缩小">−</button>
     <span id="zoom-label">1×</span>
     <button id="zoom-in" title="放大">+</button>
-    <button id="fit" title="显示整个月面">全月</button>
     <button id="export-map" title="把当前视图保存为 PNG">导出</button>
   </div>
 
@@ -106,6 +107,10 @@
           <input type="checkbox" id="label-crater-suffix" checked>
           <span>环形坑仅显示名字</span>
         </label>
+        <label class="check inline" title="主环形坑与卫星坑的字号差，单位 px；0 表示同样大">
+          字号强调
+          <input type="number" id="label-crater-emphasis" min="0" max="8" step="0.5" value="1.5">
+        </label>
         <label class="check inline" title="停用避让算法，允许标注有重叠">
           <input type="checkbox" id="label-overlap">
           <span>停用避让</span>
@@ -126,9 +131,9 @@
           <input type="checkbox" id="linear-outline-toggle" checked>
           <span>显示线状地貌轮廓</span>
         </label>
-        <label class="check inline" title="显示山脉的轮廓；取消后即使线状地貌轮廓打开，山脉也不画轮廓">
+        <label class="check inline" title="显示山脉与山脊的轮廓；取消后即使线状地貌轮廓打开，山脉和山脊也不画轮廓">
           <input type="checkbox" id="mountain-outline-toggle" checked>
-          <span>显示山脉轮廓</span>
+          <span>显示山脉/山脊轮廓</span>
         </label>
         <button class="ghost mini" id="manual-clear"
                 title="清空手动标记（Shift + 点击地图添加，拖动标记移动，双击改名）">清空手动标记</button>
@@ -234,11 +239,34 @@
           <input id="earthshine-on" type="checkbox" checked>
           <span>地照</span>
         </label>
+        <label class="switch-chip" data-on="true" title="关闭后只显示 DEM 高度产生的灰色底图">
+          <input id="surface-texture" type="checkbox" checked>
+          <span>表面纹理</span>
+        </label>
+        <label class="switch-chip" data-on="false" title="逐地貌局部低太阳角光影：关闭月面光照与地照，只强调地形">
+          <input id="low-sun-static" type="checkbox">
+          <span>低角度光照</span>
+        </label>
       </div>
       <label class="field" title="只调整底图亮度，不影响地貌标注与照片">
         <span>底图亮度</span>
         <input id="base-brightness" type="range" min="0.4" max="3" step="0.05" value="1"
                title="双击复位到 100%">
+      </label>
+      <label class="field" title="调整底图明暗对比">
+        <span>对比度</span>
+        <input id="map-contrast" type="range" min="0.1" max="10" step="0.1" value="1"
+               title="双击复位到 1.00">
+      </label>
+      <label class="field" id="low-sun-direction-row"
+             title="仅适用低角度光照的局部光源方向">
+        <span>光源方向（仅适用低角度光照）</span>
+        <select id="low-sun-direction" disabled>
+          <option value="E">东</option>
+          <option value="S">南</option>
+          <option value="W" selected>西</option>
+          <option value="N">北</option>
+        </select>
       </label>
       <label class="field" title="正数提亮阴影，负数让低色阶截断到黑">
         <span>阴影偏置</span>
@@ -255,6 +283,99 @@
                记录见 docs/12-地球视角封存.md。 -->
         </select>
       </label>
+    </section>
+
+    <section class="group overlay-panel" id="overlay-panel">
+      <h2>叠加层
+        <input type="checkbox" id="overlay-toggle" title="在底图上叠加高程上色与等高线">
+        <span class="en">Overlay</span>
+      </h2>
+      <div class="overlay-options" id="overlay-options" hidden>
+        <div class="overlay-level-row">
+          <label>等高线距 m
+            <input type="number" id="overlay-interval" min="10" max="1000" step="10" value="100">
+          </label>
+          <label>等高线精度
+            <select id="overlay-contour-scale">
+              <option value="0" selected>自动</option>
+              <option value="1">1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+              <option value="8">8×</option>
+            </select>
+          </label>
+        </div>
+        <div class="overlay-level-row">
+          <label class="overlay-palette-label">颜色方案
+            <select id="overlay-palette">
+            <option value="jet" selected>jet</option>
+            <option value="rainbow">rainbow</option>
+            <option value="viridis">viridis</option>
+            <option value="plasma">plasma</option>
+            <option value="inferno">inferno</option>
+            <option value="magma">magma</option>
+            <option value="cividis">cividis</option>
+            <option value="turbo">turbo</option>
+            <option value="terrain">terrain</option>
+            <option value="gist_earth">gist_earth</option>
+            <option value="ocean">ocean</option>
+            <option value="gist_rainbow">gist_rainbow</option>
+            <option value="coolwarm">coolwarm</option>
+            <option value="Spectral">Spectral</option>
+            <option value="hsv">hsv</option>
+              <option value="gray">gray</option>
+            </select>
+          </label>
+          <label>分级
+            <select id="overlay-scale">
+              <option value="linear" selected>线性</option>
+              <option value="log">对数</option>
+            </select>
+          </label>
+        </div>
+        <label class="overlay-wide">透明度
+          <input type="range" id="overlay-alpha" min="0" max="1" step="0.05" value="0.44">
+        </label>
+        <div class="overlay-line-row">
+          <label>线宽
+            <input type="number" id="overlay-line-width" min="0.2" max="5" step="0.2" value="0.6">
+          </label>
+          <label class="overlay-color-square" title="等高线颜色">
+            <input type="color" id="overlay-line-color" value="#000000">
+          </label>
+          <input class="overlay-line-alpha" type="range" id="overlay-line-alpha"
+                 min="0" max="1" step="0.05" value="0.86" title="等高线透明度">
+        </div>
+        <div class="overlay-slider-block">
+          <div class="overlay-slider-label">高度</div>
+          <div class="overlay-slider-track" id="overlay-height-track">
+            <button type="button" class="overlay-handle handle-min" id="overlay-handle-min"
+                    data-kind="min" aria-label="最低高程" title="拖动最低高程；双击匹配当前视野"></button>
+            <button type="button" class="overlay-handle handle-max" id="overlay-handle-max"
+                    data-kind="max" aria-label="最高高程" title="拖动最高高程；双击匹配当前视野"></button>
+          </div>
+          <div class="overlay-slider-ends">
+            <span>−10 km</span><span>11 km</span>
+          </div>
+        </div>
+        <div class="overlay-slider-actions">
+          <button type="button" class="ghost mini" id="overlay-reverse"
+                  aria-pressed="false" title="反转颜色方案">颜色反向</button>
+          <button type="button" class="ghost mini" id="overlay-lock-height"
+                  aria-pressed="false" title="停止随视野自动更新高度范围">锁定当前高度</button>
+        </div>
+        <div class="overlay-slider-block">
+          <div class="overlay-slider-label">颜色偏移</div>
+          <div class="overlay-slider-track color-track" id="overlay-color-track">
+            <div class="overlay-color-gradient" id="overlay-color-gradient"></div>
+            <button type="button" class="overlay-handle handle-offset" id="overlay-handle-offset"
+                    data-kind="offset" aria-label="颜色偏移" title="拖动颜色偏移；双击复位"></button>
+          </div>
+          <div class="overlay-slider-ends">
+            <span id="overlay-min-label">−8 km</span><span id="overlay-max-label">10 km</span>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="group geometry-panel">
@@ -402,15 +523,8 @@
         <div class="hint" id="data-download-status"></div>
         <div class="hint" id="data-rebuild-status"></div>
         <label class="field">星历
-          <select id="map-ephemeris-mode">
-            <option value="recent">DE440</option>
-            <option value="long">DE441</option>
-            <option value="custom">自定义</option>
-          </select>
-          <select id="map-ephemeris-file" hidden></select>
-          <button class="ghost mini" id="map-ephemeris-apply">切换</button>
+          <select id="map-ephemeris-choice"></select>
         </label>
-        <div class="hint" id="map-ephemeris-note"></div>
       </section>
     </div>
 
@@ -426,7 +540,7 @@
   <span id="status">正在连接本地地图服务…</span>
   <span id="source-label"></span>
   <span id="feature-count"></span>
-  <span class="map-version" id="map-version">1.1.5</span>
+  <span class="map-version" id="map-version">1.2.0</span>
 </footer>
 
 <div class="mask-backdrop" id="photo-mask-backdrop" hidden>

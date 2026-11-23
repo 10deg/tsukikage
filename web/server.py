@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, quote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,8 +58,9 @@ from moonlib.annotations import CLASS_LABELS, FEATURE_CLASSES, feature_class  # 
 from moonlib.annotations import (  # noqa: E402
     disk_frame, plan_annotations, region_frame,
 )
+from moonlib.clair_obscur import display_label, load_clair_obscur  # noqa: E402
 from moonlib.crescent import crescent_geometry  # noqa: E402
-from moonlib.events import event_metrics  # noqa: E402
+from moonlib.events import clair_obscur_events, event_metrics  # noqa: E402
 from moonlib.labelpaint import find_label_font, paint_annotation_plan  # noqa: E402
 from moonlib.models import MoonRenderSettings  # noqa: E402
 
@@ -69,6 +70,10 @@ STATIC = Path(__file__).resolve().parent / "static"
 #: the user can copy around, commit, or hand to someone else; the page lists it
 #: and loads one by name.
 DEFAULT_SETTINGS_DIR = Path(__file__).resolve().parent / "settings"
+#: The project-wide defaults the page applies before its first render.  It is
+#: deliberately at the repository root, not in the per-user settings directory:
+#: ``web/settings`` is the shelf of named files, this is the page's baseline.
+DEFAULT_CONF = ROOT / "default.conf"
 SETTINGS_SUFFIX = ".conf"
 #: A settings file is one page of JSON; anything larger is not one.
 SETTINGS_MAX_BYTES = 262_144
@@ -976,6 +981,65 @@ def _baked_dem_sources() -> Dict[str, float]:
     return found
 
 
+def _baked_pyramids() -> List[Dict[str, Any]]:
+    """Every baked whole-disk pyramid, finest first.
+
+    One entry per DEM that has a cache.  The resolution comes from the level-0
+    shape in the manifest rather than from the file name: a ``ldem_64`` cache
+    baked at dem_detail=1 is a 32 ppd pyramid, and the menu should say what the
+    picture is actually made of.  Two caches of the same product (a rebuilt one
+    plus an older detail) collapse to the finer entry; the older one is still on
+    disk but is not a second choice a reader needs.
+    """
+    root = moonlib.terrain.terrain_cache_root()
+    found: Dict[str, Dict[str, Any]] = {}
+    for manifest in sorted(root.glob("*/manifest.json")):
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            source = Path(payload["source"]["dem"]["path"]).expanduser().resolve()
+            detail = int(payload["request"].get("dem_detail", 0))
+            levels = (payload.get("dem") or {}).get("levels") or []
+            shape = (levels[0].get("shape") if levels else None) \
+                or (payload.get("dem") or {}).get("source_shape") or []
+            width = int(shape[1]) if len(shape) > 1 else 0
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            continue
+        if width <= 0 or not source.is_file():
+            continue
+        pixels_per_degree = width / 360.0
+        km_per_px = (2.0 * math.pi * 1737.4) / width
+        entry = {
+            "id": str(source),
+            "name": source.name,
+            "dem_detail": detail,
+            "pixels_per_degree": round(pixels_per_degree, 2),
+            "km_per_px": km_per_px,
+            "metres_per_px": km_per_px * 1000.0,
+            "cache": manifest.parent.name,
+            "baked": True,
+        }
+        previous = found.get(str(source))
+        if previous is None or km_per_px < previous["km_per_px"]:
+            found[str(source)] = entry
+    return sorted(found.values(), key=lambda item: item["km_per_px"])
+
+
+def _pyramid_source_file() -> Path:
+    """Where the chosen whole-disk pyramid is remembered between runs."""
+    return moonlib.cache_dir() / "pyramid_source.json"
+
+
+def _remembered_pyramid() -> Optional[Path]:
+    """The pyramid the reader picked last time, if its product is still here."""
+    try:
+        chosen = Path(str(json.loads(
+            _pyramid_source_file().read_text(encoding="utf-8"))["id"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return chosen if any(
+        item["id"] == str(chosen) for item in _baked_pyramids()) else None
+
+
 def _dem_source_file() -> Path:
     """Where the chosen product is remembered between runs."""
     return moonlib.cache_dir() / "dem_source.json"
@@ -1490,13 +1554,21 @@ class MoonService:
         #: library preference) the one close-up windows are cut from.  Starts at
         #: the product this machine already has a pyramid for, so dropping a
         #: finer raster into ``kernels/`` does not silently re-bake the world.
-        self._dem_source = _pyramid_dem_source()
+        self._dem_source = _remembered_pyramid() or _pyramid_dem_source()
         # The 数据源 menu chooses what *windows and the reported floor* are made
         # of; the pyramid above is a separate, slower decision.
         moonlib.set_preferred_dem(_remembered_source() or self._dem_source)
         self._views: Dict[Tuple[str, float, float], Any] = {}
         self._terrain_seconds = 0.0
         self.settings = SettingsStore(settings_dir or DEFAULT_SETTINGS_DIR)
+        # The editable Clair-Obscur table: built-in rows plus a local user
+        # table.  It is read on first use and only re-read on 刷新, so editing
+        # the file cannot change a forecast mid-session.
+        self._clair_user_path = Path(
+            os.environ.get("MOONLIB_CLAIR_USER_CSV")
+            or (self.settings.directory / "clair_obscur_user.csv")
+        )
+        self._clair_specs_cache = None
         # The last geometric render, kept as *linear radiance*.  Blur, sharpen,
         # tone and the level controls are all operations on this array, so they
         # must not force the ray march to run again: a slider drag would other-
@@ -1523,6 +1595,7 @@ class MoonService:
         # screen would otherwise draw names for a geometry nobody can see.
         self._linear_view: Any = None
         self._catalogue: Optional[Tuple[Any, ...]] = None
+        self._catalogue_stamp_cache: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._feature_index: Optional[Dict[str, Any]] = None
         # Background animations: the job table is small and guarded by its own
         # lock, because a thread writes into it while requests read from it.
@@ -1639,6 +1712,23 @@ class MoonService:
             {**entry, "available": False}
             for entry in online_products.catalogue()
         ]
+        pyramids = _baked_pyramids()
+        active_pyramid = str(self._dem_source) if self._dem_source else None
+        if active_pyramid and not any(
+                item["id"] == active_pyramid for item in pyramids):
+            # A product that is on disk but has no cache yet is the pyramid the
+            # first full-disk render will bake.  Keep it in the menu, marked,
+            # rather than showing an empty control on a fresh install.
+            for path, km in found:
+                if str(path) == active_pyramid:
+                    pyramids.insert(0, {
+                        "id": str(path), "name": path.name, "dem_detail": None,
+                        "pixels_per_degree": round(_KM_PER_DEGREE / km, 2),
+                        "km_per_px": float(km),
+                        "metres_per_px": float(km) * 1000.0,
+                        "cache": None, "baked": False,
+                    })
+                    break
         return {
             "sources": sources,
             "selected": str(chosen) if chosen is not None else None,
@@ -1646,6 +1736,8 @@ class MoonService:
             # product in use, which is what a render would actually have.
             "floor_km_per_px": float(active[0][1]) if active else None,
             "online": online,
+            "pyramids": pyramids,
+            "pyramid_selected": active_pyramid,
         }
 
     def set_data_source(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -1683,6 +1775,46 @@ class MoonService:
                 # What the full disk will keep drawing from: a statement about
                 # the picture on screen, which the source choice does not move.
                 "pyramid": Path(self._dem_source).name if self._dem_source else None}
+
+    def set_pyramid(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Switch the whole-disk picture to another baked pyramid.
+
+        The close-up source (数据源) is deliberately untouched: the two menus
+        answer different questions.  This one decides what the full disk is made
+        of; it only accepts a product that already has a cache, because choosing
+        an unbaked one would silently start an hour-long bake.
+        """
+        wanted = request.get("id")
+        candidate = Path(str(wanted)).expanduser().resolve() if wanted else None
+        available = {item["id"] for item in _baked_pyramids()}
+        if candidate is None or str(candidate) not in available:
+            raise moonlib.MoonlibError(
+                "金字塔不在已烘焙的列表里；先按当前数据源重建一次。"
+            )
+        self.reload_terrain()
+        with self._lock:
+            self._dem_source = candidate
+            self._terrain = None
+        self._remember_pyramid(candidate)
+        payload = self.data_sources()
+        return {
+            "selected": str(candidate),
+            "name": candidate.name,
+            "pyramids": payload["pyramids"],
+        }
+
+    def _remember_pyramid(self, chosen: Optional[Path]) -> None:
+        """Persist the 金字塔 choice so the next start opens the same product."""
+        try:
+            _pyramid_source_file().parent.mkdir(parents=True, exist_ok=True)
+            _pyramid_source_file().write_text(
+                json.dumps({"id": str(chosen) if chosen is not None else None,
+                            "name": chosen.name if chosen is not None else None},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:  # pragma: no cover - a read-only cache is not fatal
+            pass
 
     def _remember_source(self, chosen: Optional[Path]) -> None:
         """Persist the 数据源 choice so the next start opens the same product."""
@@ -1767,6 +1899,7 @@ class MoonService:
                 sources, albedo_detail=albedo_detail, progress=progress,
             )
             self._remember_source(source)
+            self._remember_pyramid(source)
             moonlib.set_preferred_dem(source)
             with self._lock:
                 self._dem_source = source
@@ -1791,11 +1924,32 @@ class MoonService:
                     "seconds": round(time.time() - started, 1),
                 })
 
+    @staticmethod
+    def _catalogue_stamp() -> Tuple[Tuple[str, int, int], ...]:
+        """Identity of the three editable catalogue files, for hot reloads."""
+        data = Path(moonlib.__file__).resolve().parent / "data"
+        stamp = []
+        for name in ("lunar_features.csv", "lunar_nomenclature.csv",
+                     "lunar100.csv"):
+            path = data / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            stamp.append((name, stat.st_mtime_ns, stat.st_size))
+        return tuple(stamp)
+
     def catalogue(self) -> Tuple[Any, ...]:
-        """Named landforms, read once: the gazetteer is 9 000 rows of CSV."""
+        """Named landforms, reloaded when a catalogue file changed.
+
+        The old cache was read once at service start; a corrected showpiece
+        latitude therefore stayed wrong until the whole server restarted.
+        """
         with self._lock:
-            if self._catalogue is None:
+            stamp = self._catalogue_stamp()
+            if self._catalogue is None or stamp != self._catalogue_stamp_cache:
                 self._catalogue = moonlib.annotation_catalogue()
+                self._catalogue_stamp_cache = stamp
             return self._catalogue
 
     def view(self, when_utc: str, site: moonlib.Observer,
@@ -2590,8 +2744,9 @@ class MoonService:
     def disk(self, request: Dict[str, Any], width: int, samples: int,
              shadow_steps: int,
              cancel: Optional[Callable[[], bool]] = None,
+             uncapped: bool = False,
              ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        if int(width) > MAX_DISK_PX:
+        if not uncapped and int(width) > MAX_DISK_PX:
             raise moonlib.MoonlibError(
                 f"整月面最大 {MAX_DISK_PX} px（收到 {int(width)}）——"
                 "再往上地形数据已经没有更多细节了。"
@@ -2613,6 +2768,7 @@ class MoonService:
         settings = MoonRenderSettings(
             width=int(width),
             height=int(width),
+            mirror=str(request.get("mirror") or "none"),
             samples_per_pixel=int(samples),
             shadow_steps=int(shadow_steps),
             band_workers=_parallel(request.get("parallel")),
@@ -3500,6 +3656,95 @@ class MoonService:
         }
         return image, info
 
+    def default_settings(self) -> Dict[str, Any]:
+        """The root ``default.conf``, as settings only.
+
+        A missing or malformed file is not fatal: the page has markup defaults
+        and must still open.  The error travels beside the empty settings so
+        the caller can say what happened without breaking startup.
+        """
+        path = DEFAULT_CONF
+        if not path.is_file():
+            return {"path": str(path), "settings": {}, "saved_utc": None}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            return {"path": str(path), "settings": {}, "saved_utc": None,
+                    "error": f"default.conf 读不出来：{error}"}
+        settings = payload.get("settings") if isinstance(payload, dict) else None
+        if not isinstance(settings, dict):
+            return {"path": str(path), "settings": {}, "saved_utc": None,
+                    "error": "default.conf 不是本页的设置文件。"}
+        return {
+            "path": str(path),
+            "settings": settings,
+            "saved_utc": payload.get("saved_utc"),
+        }
+
+    def save_default_settings(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Overwrite the root ``default.conf`` with the page's current values."""
+        settings = request.get("settings") if isinstance(request, dict) else None
+        if not isinstance(settings, dict):
+            raise SettingsError("默认设置内容必须是一个 JSON 对象。")
+        payload = {
+            "schema": "moonlib-web-settings/1",
+            "saved_utc": _utc_iso(time.time()),
+            "settings": settings,
+        }
+        try:
+            body = json.dumps(payload, ensure_ascii=False, indent=2,
+                              allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise SettingsError(f"默认设置无法序列化：{error}") from error
+        if len(body.encode("utf-8")) > SETTINGS_MAX_BYTES:
+            raise SettingsError("默认设置过大（上限 256 KB）。")
+        temporary = DEFAULT_CONF.with_suffix(".conf.part")
+        try:
+            temporary.write_text(body + "\n", encoding="utf-8")
+            temporary.replace(DEFAULT_CONF)
+        except OSError as error:
+            raise SettingsError(f"写不进 default.conf：{error}") from error
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {
+            "path": str(DEFAULT_CONF),
+            "bytes": DEFAULT_CONF.stat().st_size,
+            "saved_utc": payload["saved_utc"],
+        }
+
+    def _clair_specs(self):
+        if self._clair_specs_cache is None:
+            self._clair_specs_cache = load_clair_obscur(self._clair_user_path)
+        return self._clair_specs_cache
+
+    def clair_obscur_catalogue(self) -> Dict[str, Any]:
+        """The editable event list, sorted by its reference colongitude."""
+        specs = self._clair_specs()
+        return {
+            "count": len(specs),
+            "user_file": str(self._clair_user_path),
+            "user_file_exists": self._clair_user_path.is_file(),
+            "events": [
+                {
+                    "key": spec.key,
+                    "kind": f"clair:{spec.key}",
+                    "title": spec.title,
+                    "label": display_label(spec),
+                    "colongitude_deg": spec.sort_colongitude,
+                    "anchored": spec.anchored,
+                    "colongitude_only": spec.colongitude_only,
+                    "incomplete": spec.incomplete,
+                    "direction": spec.direction,
+                    "source": spec.source,
+                }
+                for spec in specs
+            ],
+        }
+
+    def refresh_clair_obscur(self) -> Dict[str, Any]:
+        self._clair_specs_cache = None
+        return self.clair_obscur_catalogue()
+
     def events(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Forecast the events of one kind inside one time range.
 
@@ -3516,17 +3761,99 @@ class MoonService:
         # The two old highest-moon names are accepted as aliases: a saved CSV
         # or a settings file from 1.4.1 should still work after the merge.
         known = set(moonlib.EVENT_KINDS) | {"highest_full", "highest_quarter"}
-        if kind not in known:
+        if kind.startswith("clair:"):
+            key = kind.split(":", 1)[1]
+            specs = self._clair_specs()
+            if not any(spec.key == key for spec in specs):
+                raise moonlib.MoonlibError(f"未知的 Clair-Obscur 事件 {key!r}。")
+            found = clair_obscur_events(
+                site, moonlib.as_time_range((start, end)),
+                specs=specs, keys={key},
+            )
+        elif kind in known:
+            found = moonlib.moon_events(site, start, end, kinds=[kind])
+        else:
             raise moonlib.MoonlibError(
                 f"未知的事件类型 {kind!r}；可选：{', '.join(moonlib.EVENT_KINDS)}。"
             )
-        found = moonlib.moon_events(site, start, end, kinds=[kind])
         return {
             "kind": kind,
             "start": start,
             "end": end,
             "observer": {"lat": site.lat, "lon": site.lon},
             "events": [event.to_dict() for event in found],
+        }
+
+    def birthday_moon(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Similar Moon phases around one instant, within a libration error.
+
+        The page supplies the same kind of instant the calculator does: local
+        time, latitude/longitude and a tolerance for the two libration angles.
+        Candidates are sampled once per lunation in a +/-50 year window, so a
+        search is hundreds -- not 18 000 -- ephemeris calls.  Results are in
+        chronological order, because the page's 下一个/上一个 walk time.
+        """
+        when = request.get("when") or {}
+        site = parse_observer(when)
+        local_at = str(when.get("at") or "")
+        if not local_at:
+            raise moonlib.MoonlibError("生日月亮需要日期时间。")
+        tz_hours = _tz_offset(request)
+        reference = moonlib.view_geometry(site, local_at)
+        try:
+            error = max(0.0, min(10.0, _f(request, "error", 0.5)))
+        except Exception:
+            error = 0.5
+        synodic = 29.530588853
+        candidates = []
+        for k in range(-618, 619):
+            if k == 0:
+                continue
+            candidate_time = reference.when_utc + timedelta(days=k * synodic)
+            try:
+                view = moonlib.view_geometry(site, candidate_time)
+            except Exception:
+                continue
+            if (abs(view.libration_lon_deg - reference.libration_lon_deg) > error
+                    or abs(view.libration_lat_deg - reference.libration_lat_deg) > error):
+                continue
+            score = (
+                abs(view.illuminated_fraction - reference.illuminated_fraction) * 60.0
+                + abs(view.phase_angle_deg - reference.phase_angle_deg) * 0.08
+                + abs(view.angular_diameter_deg - reference.angular_diameter_deg) * 8.0
+            )
+            candidates.append((view.when_utc, score, view))
+        candidates.sort(key=lambda item: item[0])
+        results = []
+        for when_utc, score, view in candidates:
+            local = when_utc.astimezone(
+                timezone(timedelta(hours=tz_hours)))
+            results.append({
+                "date": local.date().isoformat(),
+                "local_time": local.strftime("%Y-%m-%dT%H:%M"),
+                "when_utc": when_utc.isoformat(),
+                "score": round(float(score), 3),
+                "illumination_percent": round(view.illuminated_percent, 2),
+                "phase_angle_deg": round(view.phase_angle_deg, 2),
+                "libration_lon_deg": round(view.libration_lon_deg, 2),
+                "libration_lat_deg": round(view.libration_lat_deg, 2),
+                "diameter_arcmin": round(view.angular_diameter_deg * 60.0, 2),
+            })
+        local_ref = reference.when_utc.astimezone(
+            timezone(timedelta(hours=tz_hours)))
+        return {
+            "when_utc": reference.when_utc.isoformat(),
+            "local_time": local_ref.strftime("%Y-%m-%dT%H:%M"),
+            "libration_error_deg": error,
+            "reference": {
+                "local_time": local_ref.strftime("%Y-%m-%dT%H:%M"),
+                "illumination_percent": round(reference.illuminated_percent, 2),
+                "phase_angle_deg": round(reference.phase_angle_deg, 2),
+                "libration_lon_deg": round(reference.libration_lon_deg, 2),
+                "libration_lat_deg": round(reference.libration_lat_deg, 2),
+                "diameter_arcmin": round(reference.angular_diameter_deg * 60.0, 2),
+            },
+            "results": results,
         }
 
     def crescents(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -4233,6 +4560,9 @@ class MoonService:
             "max_labels": max(0, int(_f(request, "labels", DEFAULT_LABELS))),
             "min_radius_px": max(0.0, _f(request, "min_radius_px", DEFAULT_MIN_RADIUS_PX)),
             "font_px": max(6.0, _f(request, "font_px", DEFAULT_LABEL_FONT_PX)),
+            "crater_emphasis": max(
+                0.0, min(8.0, _f(request, "crater_emphasis", 1.5))
+            ),
             "only_illuminated": bool(request.get("only_illuminated", True)),
             "language": language,
             "classes": classes,
@@ -4731,6 +5061,9 @@ def _animation_annotations(value: Any) -> Dict[str, Any]:
             0.0, _f(value, "outline_min_radius_px", DEFAULT_OUTLINE_RADIUS_PX)
         ),
         "font_px": max(6.0, min(400.0, _f(value, "font_px", DEFAULT_LABEL_FONT_PX))),
+        "crater_emphasis": max(
+            0.0, min(8.0, _f(value, "crater_emphasis", 1.5))
+        ),
         "satellite": satellite,
         "satellites": bool(value.get("satellites", True)),
         "crater_suffix": bool(value.get("crater_suffix", False)),
@@ -4771,6 +5104,7 @@ class _AnimationLabelPainter:
             "min_radius_px": spec["min_radius_px"],
             "outline_min_radius_px": spec["outline_min_radius_px"],
             "font_px": spec["font_px"],
+            "crater_emphasis": spec.get("crater_emphasis", 1.5),
             "language": spec["language"],
             "classes": spec["classes"],
             "only_illuminated": False,
@@ -5055,7 +5389,7 @@ def _resize_gain(data: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
     """
     from PIL import Image
 
-    image = Image.fromarray(np.clip(data, 0.0, 1.0).astype(np.float32), mode="F")
+    image = Image.fromarray(np.clip(data, 0.0, 1.0).astype(np.float32))
     image = image.resize((int(shape[1]), int(shape[0])), Image.BILINEAR)
     return np.asarray(image, dtype=np.float32)
 
@@ -5127,6 +5461,18 @@ def _model_filename(
         f"moon-3d-{stamp}-{lat:.1f}_{lon:.1f}."
         f"{extension.lstrip('.')}"
     )
+
+
+def page_with_defaults(settings: Dict[str, Any]) -> str:
+    """The page with root default.conf injected before app.js runs."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    encoded = json.dumps(settings or {}, ensure_ascii=False).replace(
+        "<", "\\u003c")
+    injection = (
+        "<script>window.__MOON_DEFAULT_SETTINGS__ = "
+        f"{encoded};</script>\n</head>"
+    )
+    return html.replace("</head>", injection, 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5217,7 +5563,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            return self._file(STATIC / "index.html", "text/html; charset=utf-8")
+            # The defaults are injected before app.js runs: the first render
+            # already uses them, with no flash of the markup's old values.
+            defaults = self.service.default_settings().get("settings") or {}
+            html = page_with_defaults(defaults)
+            return self._send(200, html.encode("utf-8"),
+                              "text/html; charset=utf-8")
         if path.startswith("/static/"):
             name = Path(path).name
             suffix = Path(name).suffix.lower()
@@ -5262,6 +5613,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, png, "image/png")
         if path == "/api/settings":
             return self._json(200, self.service.settings.list())
+        if path == "/api/settings/default":
+            return self._json(200, self.service.default_settings())
+        if path == "/api/clair-obscur":
+            return self._json(200, self.service.clair_obscur_catalogue())
         match = re.fullmatch(r"/api/patch/(\d+)", path)
         if match:
             return self._json(200, self.service.patch_status(match.group(1)))
@@ -5301,6 +5656,7 @@ class Handler(BaseHTTPRequestHandler):
                     int(_f(preview, "samples", PREVIEW_SAMPLES)),
                     int(_f(preview, "shadow_steps", PREVIEW_SHADOW_STEPS)),
                     cancel=self._client_gone,
+                    uncapped=bool(request.get("uncapped")),
                 )
                 return self._json(200, disk_payload(image, geometry))
             if path == "/api/region":
@@ -5411,12 +5767,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.features())
             if path == "/api/crescents":
                 return self._json(200, self.service.crescents(request))
+            if path == "/api/birthday":
+                return self._json(200, self.service.birthday_moon(request))
             if path == "/api/events":
                 return self._json(200, self.service.events(request))
             if path == "/api/animation":
                 return self._json(200, self.service.animation(request))
             if path == "/api/source":
                 return self._json(200, self.service.set_data_source(request))
+            if path == "/api/pyramid":
+                return self._json(200, self.service.set_pyramid(request))
             if path == "/api/terrain/rebuild":
                 return self._json(200, self.service.start_terrain_rebuild(request))
             match = re.fullmatch(r"/api/patch/(\d+)/cancel", path)
@@ -5428,10 +5788,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.hdr_jpeg(request))
             if path == "/api/settings/save":
                 return self._json(200, self.service.settings_save(request))
+            if path == "/api/settings/default":
+                return self._json(200, self.service.save_default_settings(request))
             if path == "/api/settings/load":
                 return self._json(200, self.service.settings.read(request.get("name")))
             if path == "/api/settings/list":
                 return self._json(200, self.service.settings.list())
+            if path == "/api/clair-obscur/refresh":
+                return self._json(200, self.service.refresh_clair_obscur())
             return self._json(404, {"error": f"no route {path}"})
         except StaleRender as error:
             if self._client_gone(force=True):

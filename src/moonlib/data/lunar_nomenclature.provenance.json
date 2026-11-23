@@ -1,5 +1,5 @@
 {
-  "features": 10431,
+  "features": 10467,
   "translation_rows": 9057,
   "rules": {
     "exact": 9057
@@ -19,7 +19,7 @@
   ],
   "derived_names": [],
   "stale_rows": [],
-  "named": 10423,
+  "named": 10460,
   "coverage_percent": 99.9,
   "sources": {
     "features": "searchresults.csv",

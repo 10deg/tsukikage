@@ -79,6 +79,7 @@
         <input type="file" id="settings-pick" accept=".conf,.json" class="offscreen">
         <button class="ghost" id="settings-load" title="导入配置文件">导入</button>
         <button class="ghost" id="settings-save" title="导出配置文件">导出</button>
+        <button class="ghost" id="settings-default" title="把当前参数写入项目根目录 default.conf">存为默认</button>
       </div>
     </section>
 
@@ -169,6 +170,10 @@
             <button class="ghost mini viewpoint-toggle" id="viewpoint"
                     aria-pressed="false"
                     title="月背模式：把相机放在与真实地球关于月心对称的假想地球上（地心），从那一侧看月背。太阳照明仍按真实星历；地照来自同一颗假想地球，相位与真实地球互补。与观测地点无关；从月背看，月面东侧在画面左边。">月背模式 <span class="en">Far side</span></button>
+            <button class="ghost mini disk-mirror" id="disk-mirror-h"
+                    aria-pressed="false" title="水平镜像全月面预览及保存图像">水平镜像</button>
+            <button class="ghost mini disk-mirror" id="disk-mirror-v"
+                    aria-pressed="false" title="垂直镜像全月面预览及保存图像">垂直镜像</button>
           </div>
 
           <!-- ── 月面地貌标注：名字与几何标注都画在全月面上，控件就放在这张图
@@ -226,6 +231,10 @@
               <label class="check inline" title="打开时环形坑只写名字（哥白尼、哥白尼 A）；关闭后所有环形坑都带「坑」字（哥白尼坑、哥白尼 A坑），天平动目标中的环形坑同样处理">
                 <input type="checkbox" id="label-crater-suffix" checked>
                 <span>环形坑仅显示名字</span>
+              </label>
+              <label class="check inline" title="主环形坑与卫星坑的字号差，单位 px；0 表示同样大">
+                字号强调
+                <input type="number" id="label-crater-emphasis" min="0" max="8" step="0.5" value="1.5">
               </label>
               <label class="check inline" title="调整标注显示密度；数字是标签上限与最小可见半径，超过 100 后忽略避让">
                 密度
@@ -290,9 +299,9 @@
                 <input type="checkbox" id="label-linear-outline" checked>
                 <span>显示线状地貌轮廓</span>
               </label>
-              <label class="check inline" title="显示山脉的轮廓；取消后即使线状地貌轮廓打开，山脉也不画轮廓">
+              <label class="check inline" title="显示山脉与山脊的轮廓；取消后即使线状地貌轮廓打开，山脉和山脊也不画轮廓">
                 <input type="checkbox" id="label-mountain-outline" checked>
-                <span>显示山脉轮廓</span>
+                <span>显示山脉/山脊轮廓</span>
               </label>
               <label class="check inline" title="仅月海用官方直径的圆代替 IAU 轮廓，其余地貌保持轮廓路径">
                 <input type="checkbox" id="label-round-outline" checked>
@@ -377,11 +386,11 @@
                与「预览」相同的浮层格式。 -->
           <div class="disk-bottom-hud">
             <div class="selection-inputs disk-selection">
-              <label>中心经度 <span class="en">Lon</span>
-                <input type="number" id="sel-lon" step="0.001" placeholder="—">
-              </label>
               <label>中心纬度 <span class="en">Lat</span>
                 <input type="number" id="sel-lat" step="0.001" placeholder="—">
+              </label>
+              <label>中心经度 <span class="en">Lon</span>
+                <input type="number" id="sel-lon" step="0.001" placeholder="—">
               </label>
               <label>旋转角 <span class="en">Rot</span>
                 <span class="pick-row">
@@ -405,16 +414,18 @@
                 <option value="480">480</option>
                 <option value="600">600</option>
                 <option value="800">800</option>
-                <option value="1000" selected>1000</option>
-                <option value="1200">1200</option>
+                <option value="1000">1000</option>
+                <option value="1200" selected>1200</option>
                 <option value="1500">1500</option>
                 <option value="2000">2000</option>
                 <option value="3000">3000</option>
                 <option value="custom">自定义…</option>
               </select>
-              <input type="text" id="preview-px" inputmode="numeric" value="1000" size="5">
+              <input type="text" id="preview-px" inputmode="numeric" value="1200" size="5">
               <span>px</span>
             </label>
+            <button class="ghost mini" id="preview-default"
+                    title="把当前参数（含预览分辨率）写入 default.conf">设为默认</button>
             <!-- 每像素采样：n×n 条光线平均成一个像素。全月面预览以前写死 1，
                  于是只剩近景能开抗锯齿；边缘与明暗界线在这里一样糊。 -->
             <label class="check inline" title="每像素采样：n×n 条光线平均成一个像素，使月面边缘和明暗界线更干净，代价是 n² 倍渲染时间">
@@ -497,11 +508,11 @@
               <option value="1920">1920</option>
               <option value="2000">2000</option>
               <option value="2160">2160</option>
-              <option value="2400" selected>2400</option>
+              <option value="2400">2400</option>
               <option value="3840">3840</option>
               <option value="4000">4000</option>
               <option value="5000">5000</option>
-              <option value="native">原始分辨率</option>
+              <option value="native" selected>原始分辨率</option>
               <option value="custom">自定义…</option>
             </select>
             <input type="text" id="disk-px" inputmode="numeric" value="2400" size="6">
@@ -522,7 +533,7 @@
           </label>
           <label class="check inline" title="地照增益：1.0 是模拟的亮度值（地照亮度约为阳光的万一）。">
             地照增益
-            <input type="text" id="disk-earthshine-gain" inputmode="decimal" value="20" size="4">
+            <input type="text" id="disk-earthshine-gain" inputmode="decimal" value="1" size="4">
           </label>
           <label class="check inline">格式
             <select id="disk-format">
@@ -651,7 +662,7 @@
               <option value="800">800</option>
               <option value="900">900</option>
               <option value="1000">1000</option>
-              <option value="1200" selected>1200</option>
+              <option value="1200">1200</option>
               <option value="1400">1400</option>
               <option value="1500">1500</option>
               <option value="1600">1600</option>
@@ -663,7 +674,7 @@
               <option value="3840">3840</option>
               <option value="4000">4000</option>
               <option value="5000">5000</option>
-              <option value="native">原始分辨率</option>
+              <option value="native" selected>原始分辨率</option>
               <option value="custom">自定义…</option>
             </select>
             <input type="text" id="out-px" inputmode="numeric" value="1200" size="6">
@@ -684,7 +695,7 @@
           </label>
           <label class="check inline" title="地照增益：1.0 是模拟的亮度值（地照亮度约为阳光的万一）">
             地照增益
-            <input type="text" id="region-earthshine-gain" inputmode="decimal" value="20" size="4">
+            <input type="text" id="region-earthshine-gain" inputmode="decimal" value="1" size="4">
           </label>
           <label class="check inline">格式
             <select id="save-format">
@@ -710,7 +721,7 @@
       <button class="gold" id="refresh" title="重新渲染全月面">更新月面 <span class="en">Refresh</span></button>
       <button class="primary" id="generate" title="重新生成高分辨率模拟">生成模拟 <span class="en">Generate</span></button>
       <label class="check inline" title="设置完参数后自动刷新重新模拟（部分设置始终关闭）">
-        <input type="checkbox" id="auto-refresh" checked>
+        <input type="checkbox" id="auto-refresh">
         <span>自动刷新</span>
       </label>
       <a class="app-version" id="app-version" href="https://github.com/10deg/tsukikage"
@@ -724,163 +735,167 @@
     <div class="panes">
 
       <div class="pane pane-a">
-        <section class="group">
-          <h2>模拟设置 <span class="en">Simulation</span>
+        <section class="group" id="sim-panel">
+          <div class="pane-head">
+            <span class="tabs" id="sim-tabs">
+              <button class="tab" data-sim="settings" aria-pressed="true">模拟设置</button>
+              <button class="tab" data-sim="data" aria-pressed="false">数据源设置</button>
+            </span>
             <button class="ghost icon reset" id="output-reset"
             title="把模拟设置里的每一项恢复为默认值"></button>
-          </h2>
-          <div class="grid2">
-            <label title="同步当前全月面预览图的物理分辨率">物理分辨率 <span class="en">km per px</span>
-              <span class="pick-row">
-                <select id="out-kmpx-preset">
-                  <option value="disk" selected>同步全月面</option>
-                  <option value="0.03">0.03 km/px · 30 m</option>
-                  <option value="0.06">0.06 km/px · 60 m</option>
-                  <option value="0.118">0.118 km/px · 数据源上限</option>
-                  <option value="0.25">0.25 km/px · 250 m</option>
-                  <option value="0.5">0.5 km/px</option>
-                  <option value="1">1 km/px</option>
-                  <option value="2">2 km/px</option>
-                  <option value="3">3 km/px</option>
-                  <option value="5">5 km/px</option>
-                  <option value="8">8 km/px</option>
-                  <option value="12">12 km/px</option>
-                  <option value="20">20 km/px</option>
-                  <option value="custom">自定义…</option>
-                </select>
-                <input type="number" id="out-kmpx" step="0.01" min="0" hidden>
-              </span>
-            </label>
-            <!-- 每像素采样: how many rays are averaged into one output pixel.
-                 It used to live in 高级设置, but it is the quality/cost knob for
-                 exactly the frame 物理分辨率 describes, so it belongs beside it. -->
-            <label title="每像素采样：n×n 条光线平均成一个像素，使月面边缘和明暗界线更干净，代价是 n² 倍渲染时间">
-              每像素采样 <span class="en">Samples/px</span>
-              <select id="out-samples">
-                <option value="1" selected>1</option>
-                <option value="2">2</option>
-                <option value="3">3</option>
-              </select>
-            </label>
           </div>
-          <div class="grid2">
-            <label title="lambert 快而平；lommel_seeliger 边缘更亮、最贴近目视；lunar_lambert 折中（默认）；hapke 含冲效应、最真实">光度模型
-              <select id="photometric-model">
-                <option value="lambert">Lambert</option>
-                <option value="lommel_seeliger">Lommel–Seeliger</option>
-                <option value="lunar_lambert" selected>Lunar-Lambert</option>
-                <option value="hapke">Hapke</option>
-              </select>
-            </label>
-            <label title="地照增益：1.0 是模拟的亮度值（地照亮度约为阳光的万一）。">地照增益
-              <input type="number" id="earthshine-gain" value="20" step="0.1" min="0" max="100">
-            </label>
-          </div>
-          <!-- 地照的两个星等不再写在这里：它们描述的是画出来的那一帧，
-               所以跟在全月面窗口下面的信息行里（#disk-info）。 -->
-          <!-- 其余光线选项一律收进「高级设置」：默认只看光度模型与地照增益 -->
-          <details class="fold" id="light-advanced">
-            <summary>高级设置 <span class="en">Advanced</span></summary>
-            <!-- 数据源: which global DEM the frames are drawn from.  It decides
-                 the finest 物理分辨率 the page can offer, so it sits above the
-                 knobs that describe *how* to draw -- "out of what" comes first. -->
-            <label class="wide-field" title="选择高分辨率模拟采用的高程（DEM）数据">
-              数据源 <span class="en">Data source</span>
-              <select id="data-source"></select>
-            </label>
-            <p class="hint" id="data-source-note"></p>
-            <!-- 星历: DE440 / DE441 / kernels 目录里的一个自定义 .bsp。切换会
-                 重载内核池，已经缓存的视图与报告由服务端丢弃。 -->
-            <label class="wide-field" title="选择星历表；切换后自动重载内核，无需重启服务">
-              星历 <span class="en">Ephemeris</span>
-              <span class="pick-row">
-                <select id="ephemeris-mode">
-                  <option value="recent">DE440</option>
-                  <option value="long">DE441</option>
-                  <option value="custom">自定义</option>
-                </select>
-                <select id="ephemeris-file" hidden></select>
-                <button class="ghost mini" id="ephemeris-apply">切换</button>
-              </span>
-            </label>
-            <p class="hint" id="ephemeris-note"></p>
-            <!-- 区域高清补片: 只下当前选框这一小块。整月面的产品是几十 GB，
-                 而近景要的常常只是坑边几度——按选框去取，才可能拿到比本地
-                 更细或更好的数据。 -->
-            <label class="wide-field" title="按当前选框，从在线产品里下载这一块区域的高分辨率高程（DEM）数据用于模拟">
-              区域高清补片 <span class="en">Region patch</span>
-              <span class="pick-row">
-                <select id="patch-product"></select>
-                <button class="ghost mini" id="patch-download" title="按当前选框，从在线产品里下载这一块区域的高分辨率高程（DEM）数据用于模拟">下载</button>
-                <button class="ghost mini" id="patch-cancel" hidden
-                        title="终止正在进行的区域补片下载，并清理未完成的中间文件">终止</button>
-              </span>
-            </label>
-            <p class="hint" id="patch-note"></p>
-            <!-- 重新构建金字塔: 整月面一直画的是已经烘焙好的金字塔，换数据源
-                 只影响近景；要让整月面也改用更细的产品，就得重建一次。 -->
-            <label class="wide-field" title="清空已烘焙的金字塔，按当前数据源重新烘焙整月面金字塔；耗时较长">
-              金字塔 <span class="en">Pyramid</span>
-              <span class="pick-row">
-                <button class="ghost mini" id="terrain-rebuild" title="清空已烘焙的金字塔，按当前数据源重新烘焙整月面金字塔；耗时较长">重新构建金字塔</button>
-                <span class="hint" id="terrain-rebuild-note"></span>
-              </span>
-            </label>
+          <div id="sim-settings">
             <div class="grid2">
-              <label title="实测：整月面与终端线近景（含 0.021 km/px）下 1 与 4 的像素差均 ≤1 灰阶；默认 1 即可">日面采样
-                <input type="number" id="sun-samples" min="1" max="8" step="1" value="1">
+              <label title="同步当前全月面预览图的物理分辨率">物理分辨率 <span class="en">km per px</span>
+                <span class="pick-row">
+                  <select id="out-kmpx-preset">
+                    <option value="disk" selected>同步全月面</option>
+                    <option value="0.03">0.03 km/px · 30 m</option>
+                    <option value="0.06">0.06 km/px · 60 m</option>
+                    <option value="0.1">0.1 km/px · 100 m</option>
+                    <option value="0.118">0.118 km/px · 数据源上限</option>
+                    <option value="0.15">0.15 km/px · 150 m</option>
+                    <option value="0.2">0.2 km/px · 200 m</option>
+                    <option value="0.25">0.25 km/px · 250 m</option>
+                    <option value="0.5">0.5 km/px</option>
+                    <option value="1">1 km/px</option>
+                    <option value="2">2 km/px</option>
+                    <option value="3">3 km/px</option>
+                    <option value="5">5 km/px</option>
+                    <option value="8">8 km/px</option>
+                    <option value="12">12 km/px</option>
+                    <option value="20">20 km/px</option>
+                    <option value="custom">自定义…</option>
+                  </select>
+                  <input type="number" id="out-kmpx" step="0.01" min="0" hidden>
+                </span>
               </label>
-              <label title="模拟月壤的起伏，15–25° 是月壤的常见值；0 关闭（默认）">粗糙度
-                <input type="number" id="roughness" value="0" step="1" min="0" max="45">
-              </label>
-              <label title="模拟环境补光：阳光照亮周围的月面，再散射回阴影里。只在阴影带附近有收益。1.0 时平坦地面的补光约为阳光的 6%，0 关闭（默认）">环境补光
-                <input type="number" id="sky-ambient" value="0" step="0.1" min="0" max="20">
-              </label>
-              <label title="地球几何反照率，决定地照有多亮。留空用星历默认 0.367；文献值在 0.30–0.43 之间">地球反照率
-                <input type="number" id="earth-geometric-albedo" placeholder="0.367" step="0.01" max="1">
-              </label>
-              <label title="地球视面是 2° 的延展光源，采样数决定地照明暗界线有多软；13 点已足够">地照采样
-                <input type="number" id="earth-samples" value="13" step="1" min="1" max="64">
-              </label>
-              <label title="地照相对阳光的光谱权重（渲染时按均值归一化），0.87,0.96,1.17 略偏蓝，是地球散射光的常见表述">地照色调
-                <input type="text" id="earthshine-tint" placeholder="0.87,0.96,1.17" size="14">
-              </label>
-              <label class="keep-label" title="彩色纹理：用 LROC 反照率图着色。黑白地貌：不用纹理，只按 DEM、光照与阴影画单色浮雕；可在纹理数据有缺陷/分辨率不足时用于避免纹理的条块与色带"><span>表面</span>
-                <select id="surface-texture">
-                  <option value="texture" selected>彩色纹理</option>
-                  <option value="relief">无纹理</option>
-                </select>
-              </label>
-              <label class="keep-label" title="对用于光照的高程层做 3×3 中值平滑：轻 = 一遍，强 = 两遍。可压低 LOLA 轨道条带/插值格，但也会软化只有几个像素大的小坑与山脊；默认关闭"><span>去条纹</span>
-                <select id="terrain-denoise">
-                  <option value="0" selected>关</option>
-                  <option value="1">轻</option>
-                  <option value="2">强</option>
-                </select>
-              </label>
-              <!-- 并行数: how much of the machine one render may take.  It is the
-                   same kind of number as 每像素采样 (a quality/cost trade), but
-                   that one now sits beside 物理分辨率, where the frame it
-                   describes is chosen.  The render is band-parallel, so this is
-                   a real ceiling, not a priority hint; blank means "let the
-                   library use every core". -->
-              <label title="渲染按横带分给多个线程；默认用本机的全部核心（自动识别的最大值），调小可以给主机留出余量。">
-                并行数 <span class="en">CPU workers</span>
-                <input type="number" id="parallel" min="1" max="64" step="1"
-                       placeholder="自动">
-              </label>
-              <label title="阴影边缘的细分步数：越大越接近真实边缘，也越耗费性能。只决定阴影**边缘**切得多细，不改变地形自身的纹理。">
-                阴影精度 <span class="en">Shadow steps</span>
-                <select id="shadow-steps">
-                  <option value="auto" selected>自动</option>
-                  <option value="128">128</option>
-                  <option value="256">256</option>
-                  <option value="512">512</option>
-                  <option value="1024">1024</option>
+              <!-- 每像素采样: how many rays are averaged into one output pixel.
+                   It used to live in 高级设置, but it is the quality/cost knob for
+                   exactly the frame 物理分辨率 describes, so it belongs beside it. -->
+              <label title="每像素采样：n×n 条光线平均成一个像素，使月面边缘和明暗界线更干净，代价是 n² 倍渲染时间">
+                每像素采样 <span class="en">Samples/px</span>
+                <select id="out-samples">
+                  <option value="1" selected>1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
                 </select>
               </label>
             </div>
-          </details>
+            <div class="grid2">
+              <label title="lambert 快而平；lommel_seeliger 边缘更亮、最贴近目视；lunar_lambert 折中（默认）；hapke 含冲效应、最真实">光度模型
+                <select id="photometric-model">
+                  <option value="lambert">Lambert</option>
+                  <option value="lommel_seeliger">Lommel–Seeliger</option>
+                  <option value="lunar_lambert" selected>Lunar-Lambert</option>
+                  <option value="hapke">Hapke</option>
+                </select>
+              </label>
+              <label title="地照增益：1.0 是模拟的亮度值（地照亮度约为阳光的万一）。">地照增益
+                <input type="number" id="earthshine-gain" value="1" step="0.1" min="0" max="100">
+              </label>
+            </div>
+            <!-- 地照的两个星等不再写在这里：它们描述的是画出来的那一帧，
+                 所以跟在全月面窗口下面的信息行里（#disk-info）。 -->
+            <!-- 其余光线选项一律收进「高级设置」：默认只看光度模型与地照增益 -->
+            <details class="fold" id="light-advanced">
+              <summary>高级设置 <span class="en">Advanced</span></summary>
+              <div class="grid2">
+                <label title="实测：整月面与终端线近景（含 0.021 km/px）下 1 与 4 的像素差均 ≤1 灰阶；默认 1 即可">日面采样
+                  <input type="number" id="sun-samples" min="1" max="8" step="1" value="1">
+                </label>
+                <label title="模拟月壤的起伏，15–25° 是月壤的常见值；0 关闭（默认）">粗糙度
+                  <input type="number" id="roughness" value="0" step="1" min="0" max="45">
+                </label>
+                <label title="模拟环境补光：阳光照亮周围的月面，再散射回阴影里。只在阴影带附近有收益。1.0 时平坦地面的补光约为阳光的 6%，0 关闭（默认）">环境补光
+                  <input type="number" id="sky-ambient" value="0" step="0.1" min="0" max="20">
+                </label>
+                <label title="地球几何反照率，决定地照有多亮。留空用星历默认 0.367；文献值在 0.30–0.43 之间">地球反照率
+                  <input type="number" id="earth-geometric-albedo" placeholder="0.367" step="0.01" max="1">
+                </label>
+                <label title="地球视面是 2° 的延展光源，采样数决定地照明暗界线有多软；13 点已足够">地照采样
+                  <input type="number" id="earth-samples" value="13" step="1" min="1" max="64">
+                </label>
+                <label title="地照相对阳光的光谱权重（渲染时按均值归一化），0.87,0.96,1.17 略偏蓝，是地球散射光的常见表述">地照色调
+                  <input type="text" id="earthshine-tint" placeholder="0.87,0.96,1.17" size="14">
+                </label>
+                <label class="keep-label" title="彩色纹理：用 LROC 反照率图着色。黑白地貌：不用纹理，只按 DEM、光照与阴影画单色浮雕；可在纹理数据有缺陷/分辨率不足时用于避免纹理的条块与色带"><span>表面</span>
+                  <select id="surface-texture">
+                    <option value="texture" selected>彩色纹理</option>
+                    <option value="relief">无纹理</option>
+                  </select>
+                </label>
+                <label class="keep-label" title="对用于光照的高程层做 3×3 中值平滑：轻 = 一遍，强 = 两遍。可压低 LOLA 轨道条带/插值格，但也会软化只有几个像素大的小坑与山脊；默认关闭"><span>去条纹</span>
+                  <select id="terrain-denoise">
+                    <option value="0" selected>关</option>
+                    <option value="1">轻</option>
+                    <option value="2">强</option>
+                  </select>
+                </label>
+                <!-- 并行数: how much of the machine one render may take.  It is the
+                     same kind of number as 每像素采样 (a quality/cost trade), but
+                     that one now sits beside 物理分辨率, where the frame it
+                     describes is chosen.  The render is band-parallel, so this is
+                     a real ceiling, not a priority hint; blank means "let the
+                     library use every core". -->
+                <label title="渲染按横带分给多个线程；默认用本机的全部核心（自动识别的最大值），调小可以给主机留出余量。">
+                  并行数 <span class="en">CPU workers</span>
+                  <input type="number" id="parallel" min="1" max="64" step="1"
+                         placeholder="自动">
+                </label>
+                <label title="阴影边缘的细分步数：越大越接近真实边缘，也越耗费性能。只决定阴影**边缘**切得多细，不改变地形自身的纹理。">
+                  阴影精度 <span class="en">Shadow steps</span>
+                  <select id="shadow-steps">
+                    <option value="auto" selected>自动</option>
+                    <option value="128">128</option>
+                    <option value="256">256</option>
+                    <option value="512">512</option>
+                    <option value="1024">1024</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+          </div>
+          <div id="sim-data" hidden>
+            <div class="grid2 source-grid">
+              <label title="选择高分辨率模拟采用的高程（DEM）数据">数据源 <span class="en">Data source</span>
+                <select id="data-source"></select>
+              </label>
+              <label title="自动读取 kernels 目录下可用的星历文件；切换后重载内核，无需重启服务">星历 <span class="en">Ephemeris</span>
+                <span class="pick-row">
+                  <select id="ephemeris-mode">
+                    <option value="">读取中…</option>
+                  </select>
+                </span>
+              </label>
+            </div>
+            <div class="grid2 source-grid">
+              <div class="source-field" title="按当前选框，从在线产品里下载这一块区域的高分辨率高程（DEM）数据用于模拟">
+                <div class="source-head">
+                  <label for="patch-product">区域高清补片 <span class="en">Region patch</span></label>
+                  <span class="source-buttons">
+                    <button class="ghost mini" id="patch-download" title="按当前选框，从在线产品里下载这一块区域的高分辨率高程（DEM）数据用于模拟">下载</button>
+                    <button class="ghost mini" id="patch-cancel" hidden
+                            title="终止正在进行的区域补片下载，并清理未完成的中间文件">终止</button>
+                  </span>
+                </div>
+                <select id="patch-product"></select>
+              </div>
+              <div class="source-field" title="选择整月面使用的已烘焙金字塔；下拉里是不同分辨率的缓存">
+                <div class="source-head">
+                  <label for="pyramid-select">金字塔 <span class="en">Pyramid</span></label>
+                  <button class="ghost mini" id="terrain-rebuild" title="按当前数据源重新烘焙整月面金字塔；耗时较长">重新构建</button>
+                </div>
+                <select id="pyramid-select"></select>
+              </div>
+            </div>
+            <!-- Progress and provenance stay available to scripts and screen
+                 readers, but the tab itself shows only the four controls. -->
+            <p class="hint" id="data-source-note" hidden></p>
+            <p class="hint" id="ephemeris-note" hidden></p>
+            <p class="hint" id="patch-note" hidden></p>
+            <p class="hint" id="terrain-rebuild-note" hidden></p>
+          </div>
         </section>
 
         <!-- 望远镜与相机合成一栏，用标签页分开：两套参数描述的是同一台仪器。
@@ -922,6 +937,10 @@
           </div>
 
           <div class="train-pane" id="train-camera" hidden>
+            <label class="check">
+              <input type="checkbox" id="sel-locked">
+              <span>锁定选框大小 <span class="en">lock box size</span></span>
+            </label>
             <div class="grid2">
               <label>长边 px <span class="en">Width</span>
                 <input type="number" id="sensor-w" value="3008" step="1">
@@ -939,10 +958,6 @@
                 </select>
               </label>
             </div>
-            <label class="check">
-              <input type="checkbox" id="sel-locked">
-              <span>锁定选框大小 <span class="en">lock box size</span></span>
-            </label>
           </div>
 
           <!-- 目镜：在后期成片上盖一层"从目镜里看"的效果。它不改渲染，只在
@@ -1063,27 +1078,12 @@
                   >
             <output id="sharpen-strength-out">1.00</output>
           </div>
+          <button class="outline compact wide" id="disk-generate-full"
+                  title="按当前全月面设置生成一张完整月面">使用当前设置生成全月面</button>
           </div>
 
           <div class="train-pane" id="proc-post" hidden>
-          <!-- 对比度与亮度放在饱和度上方：它们决定整帧的明暗关系，颜色是下一步。 -->
-          <div class="slider-row wide">
-            <span class="slider-label">对比度</span>
-            <input type="range" id="contrast" min="0" max="2" step="0.01" value="1">
-            <output id="contrast-out">1.00</output>
-          </div>
-          <div class="slider-row wide">
-            <span class="slider-label">亮度</span>
-            <input type="range" id="brightness" min="-0.5" max="0.5" step="0.01" value="0">
-            <output id="brightness-out">0.00</output>
-          </div>
-          <!-- 饱和度就是饱和度：旁边那个"彩色"开关说的是相机，它已经在相机的
-               那一页里了，放在这里读起来像饱和度的第二个开关。 -->
-          <div class="slider-row wide">
-            <span class="slider-label" title="饱和度：0 是完全黑白，1 是原始色彩">饱和度</span>
-            <input type="range" id="saturation" min="0" max="3" step="0.01" value="1">
-            <output id="saturation-out">1.00</output>
-          </div>
+          <!-- 顺序固定为：增益、偏置、伽马、亮度、对比度、饱和度、噪声、旋转。 -->
           <div class="slider-row wide">
             <span class="slider-label">增益</span>
             <input type="range" id="gain" min="0" max="3" step="0.01" value="1">
@@ -1099,7 +1099,21 @@
             <input type="range" id="gamma" min="0.2" max="3" step="0.02" value="1">
             <output id="gamma-out">1.00</output>
           </div>
-
+          <div class="slider-row wide">
+            <span class="slider-label">亮度</span>
+            <input type="range" id="brightness" min="-0.5" max="0.5" step="0.01" value="0">
+            <output id="brightness-out">0.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label">对比度</span>
+            <input type="range" id="contrast" min="0" max="2" step="0.01" value="1">
+            <output id="contrast-out">1.00</output>
+          </div>
+          <div class="slider-row wide">
+            <span class="slider-label" title="饱和度：0 是完全黑白，1 是原始色彩">饱和度</span>
+            <input type="range" id="saturation" min="0" max="3" step="0.01" value="1">
+            <output id="saturation-out">1.00</output>
+          </div>
           <div class="slider-row wide">
             <span class="slider-label">泊松噪声</span>
             <input type="range" id="noise-poisson" min="0" max="1" step="0.01" value="0">
@@ -1110,8 +1124,6 @@
             <input type="range" id="noise-gaussian" min="0" max="1" step="0.01" value="0">
             <output id="noise-gaussian-out">关</output>
           </div>
-          <!-- 旋转与镜像都是"整帧的方向"，所以它们跟在噪声后面、挨着动作那一行：
-               前面那一串改的是明暗与细节，这两个改的是这张图朝哪边。 -->
           <div class="slider-row wide">
             <span class="slider-label">旋转</span>
             <input type="range" id="image-rotation" min="-180" max="180" step="0.5" value="0">
@@ -1119,6 +1131,7 @@
                    min="-180" max="180" step="0.5" value="0.0">
             <span class="unit">°</span>
           </div>
+
           </div>
 
           <!-- 3D模型：成像模拟 / 后期处理之后的第三种输出。不是第三张照片，
@@ -1256,7 +1269,8 @@
             <span class="mark-bar" id="event-kinds"></span>
             <div class="event-clair">
               <label for="event-clair">Clair-Obscur Effects</label>
-              <select id="event-clair" title="选择一种瞬变光影事件"></select>
+              <select id="event-clair" title="选择一种瞬变光影事件；按余经度排序"></select>
+              <button class="ghost mini" id="clair-refresh" title="重新读取内置 CSV 与用户 CSV">刷新</button>
             </div>
             <div class="event-actions">
               <button class="ghost mini" id="event-window-open" title="在更大的窗口中浏览表格">在新窗口查看表格</button>
@@ -1401,7 +1415,7 @@
                 <span>地照</span>
               </label>
               <label class="check inline" title="地照增益：1.0 是模拟的亮度值（地照亮度约为阳光的万一）">地照增益
-                <input type="text" id="anim-earthshine-gain" inputmode="decimal" value="20" size="4">
+                <input type="text" id="anim-earthshine-gain" inputmode="decimal" value="1" size="4">
               </label>
             </div>
             <!-- 地貌标注：与整月面/近景保存里的「地貌」是同一个意思，只是这里按
@@ -1925,6 +1939,8 @@
               role="tab" aria-selected="true" aria-pressed="true">月面点太阳高度</button>
       <button class="tab" id="experiment-tab-calc" data-experiment-tab="calc"
               role="tab" aria-selected="false" aria-pressed="false">计算器</button>
+      <button class="tab" id="experiment-tab-birthday" data-experiment-tab="birthday"
+              role="tab" aria-selected="false" aria-pressed="false">生日那天的月亮</button>
       <button class="tab" id="experiment-tab-naked" data-experiment-tab="naked"
               role="tab" aria-selected="false" aria-pressed="false">裸眼3D</button>
     </div>
@@ -2174,6 +2190,90 @@
         </div>
       </div>
     </section>
+    <section class="experiment-pane experiment-birthday" id="experiment-pane-birthday"
+             role="tabpanel" aria-labelledby="experiment-tab-birthday" hidden>
+      <div class="birthday-top">
+        <label>日期时间
+          <input type="datetime-local" id="birthday-when" step="60">
+        </label>
+        <label>纬度 °N
+          <input type="number" id="birthday-lat" value="30" step="0.0001">
+        </label>
+        <label>经度 °E
+          <input type="number" id="birthday-lon" value="120" step="0.0001">
+        </label>
+        <label class="calc-error" title="允许的天平动误差；越大越容易找到相近月面">
+          误差
+          <input type="number" id="birthday-error" value="0.5" min="0" max="10" step="0.1">
+          <span>°</span>
+        </label>
+        <button class="ghost calc-run" id="birthday-run">计算</button>
+      </div>
+      <div class="birthday-preview-controls">
+        <label>预览
+          <select id="birthday-preview-px">
+            <option value="480">480</option>
+            <option value="600">600</option>
+            <option value="800">800</option>
+            <option value="1000" selected>1000</option>
+            <option value="1200">1200</option>
+          </select>
+        </label>
+        <label>采样
+          <select id="birthday-samples">
+            <option value="1" selected>1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+          </select>
+        </label>
+        <label>平滑
+          <input type="number" id="birthday-smooth" value="0" min="0" max="4" step="0.1">
+        </label>
+        <label>地照增益
+          <input type="number" id="birthday-gain" value="20" min="0" max="100" step="0.1">
+        </label>
+        <label>格式
+          <select id="birthday-format">
+            <option value="png" selected>PNG</option>
+            <option value="jpg">JPG</option>
+          </select>
+        </label>
+      </div>
+      <div class="birthday-body" id="birthday-body">
+        <aside class="birthday-info" id="birthday-left-info"></aside>
+        <div class="birthday-splitter" id="birthday-splitter-left" title="拖动调整左栏宽度"></div>
+        <div class="birthday-center">
+          <div class="birthday-figures">
+            <figure class="birthday-preview">
+              <img id="birthday-left" alt="当前日期时间的月面">
+              <figcaption class="birthday-caption">
+                <span id="birthday-left-stamp">—</span>
+                <button class="ghost mini birthday-save" id="birthday-save-left"
+                        data-side="left">保存</button>
+              </figcaption>
+            </figure>
+            <div class="birthday-divider"></div>
+            <figure class="birthday-preview">
+              <img id="birthday-right" alt="下一次相似月面">
+              <figcaption class="birthday-caption">
+                <span id="birthday-right-stamp">—</span>
+                <button class="ghost mini birthday-save" id="birthday-save-right"
+                        data-side="right">保存</button>
+              </figcaption>
+            </figure>
+          </div>
+          <div class="birthday-nav">
+            <button class="ghost mini" id="birthday-prev" disabled>上一个</button>
+            <span class="birthday-counter" id="birthday-counter">—</span>
+            <button class="ghost mini" id="birthday-next" disabled>下一个</button>
+            <span class="birthday-status" id="birthday-status">—</span>
+          </div>
+        </div>
+        <div class="birthday-splitter" id="birthday-splitter-right" title="拖动调整右栏宽度"></div>
+        <aside class="birthday-info" id="birthday-right-info"></aside>
+      </div>
+    </section>
+
     <section class="experiment-pane experiment-naked" id="experiment-pane-naked"
              role="tabpanel" aria-labelledby="experiment-tab-naked" hidden>
     <div class="naked-eye-top">
@@ -2293,6 +2393,18 @@
       <!-- 列名是导出的实现细节，不是读者要读的内容：底部只留状态。 -->
       <span id="event-window-status">—</span>
     </footer>
+  </div>
+</div>
+
+<div class="confirm-backdrop" id="disk-generate-modal" hidden>
+  <div class="confirm-box" role="dialog" aria-modal="true"
+       aria-labelledby="disk-generate-title">
+    <h3 id="disk-generate-title">生成全月面</h3>
+    <p id="disk-generate-copy">—</p>
+    <div class="confirm-actions">
+      <button class="ghost" id="disk-generate-cancel">取消</button>
+      <button class="primary" id="disk-generate-confirm">继续</button>
+    </div>
   </div>
 </div>
 

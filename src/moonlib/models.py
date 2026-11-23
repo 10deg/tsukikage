@@ -1446,6 +1446,13 @@ class MoonRenderSettings:
     width: int = 1024
     height: int = 1024
     disk_fraction: float = 0.94
+    mirror: str = "none"
+    """Film-plane mirror: ``none``, ``horizontal`` or ``vertical``.
+
+    This is applied to the camera's right/up basis before ray generation, so
+    the image and its lighting are produced already mirrored rather than
+    flipped afterwards.
+    """
     """Fraction of the shorter image side covered by the lunar disk."""
     pyramid_level: Optional[int] = None
     """Terrain level to sample; ``None`` picks one from the pixel footprint."""
@@ -1621,6 +1628,11 @@ class MoonRenderSettings:
             self, "photometric_model", as_photometric_model(self.photometric_model)
         )
         object.__setattr__(self, "tone", as_tone_mapping(self.tone))
+        if self.mirror not in ("none", "horizontal", "vertical"):
+            raise MoonlibError(
+                "mirror must be 'none', 'horizontal' or 'vertical'; "
+                f"got {self.mirror!r}."
+            )
         if self.exposure_meter not in self._EXPOSURE_METERS:
             options = ", ".join(self._EXPOSURE_METERS)
             raise MoonlibError(

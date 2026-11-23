@@ -50,7 +50,7 @@ import numpy as np
 from .config import package_data_dir
 from .outlines import outline_for
 from .errors import MoonlibError, TargetDataError
-from .features import load_features
+from .features import load_features, load_priority_features
 from .instrument import ARCSEC_PER_RADIAN
 from .models import MoonRenderSettings, MoonView, SurfaceFeature
 from .moonview import _camera_basis, _rolled_basis, _target_vector
@@ -332,6 +332,9 @@ _LABEL_TIER2 = frozenset({
     "lacus", "sinus", "palus", "rima", "vallis", "mons", "dorsum",
     "rupes", "catena", "promontorium", "albedo",
 })
+#: The broad named tracts.  Once the density is above the default, these are
+#: selected by area before any crater/line feature can take a slot.
+_NAMED_REGION_GROUPS = frozenset({"mare", "lacus", "sinus", "palus"})
 #: A crater this size is a major landmark, not an ordinary background crater.
 _LARGE_CRATER_KM = 100.0
 #: A lettered satellite this size is promoted to the ordinary-crater tier.
@@ -398,6 +401,9 @@ _HIGHLIGHT_BONUS = 22.0
 #: does not outrank the showpiece list (which is the project's own selection)
 #: and it is not applied at all while the Lunar 100 class is off.
 _LUNAR100_BONUS = 18.0
+#: The hand-curated hidden priority list.  It is a class list rather than a
+#: separate page category, so it gets a ranking bonus instead of a switch.
+_PRIORITY_BONUS = 16.0
 
 #: Marker discs are drawn this size regardless of a feature's real extent, and
 #: the planner keeps labels off them; past a certain size a ray crater would
@@ -1306,6 +1312,19 @@ class Annotation:
     #: :attr:`outline`, which the planner already draws as a rim.
     outline_path: Optional[Tuple[Tuple[float, float], ...]] = None
     outline_closed: bool = False
+    #: The path the *name* follows when that is not the painted outline: a
+    #: mountain chain's interior centreline.  ``None`` means use
+    #: :attr:`outline_path`, which is also what a rille or ridge does.
+    text_path: Optional[Tuple[Tuple[float, float], ...]] = None
+    #: True when the name's path runs from its western end to its eastern end.
+    #: The page uses this instead of guessing from the projected tangent, so a
+    #: dragged caption keeps one reading direction.
+    text_forward: bool = True
+    text_closed: bool = False
+    #: Per-item type size in frame pixels.  Zero means "use the plan's size";
+    #: crater captions carry their own so a main crater and its lettered
+    #: satellite can differ by the reader's 字号强调 setting.
+    font_px: float = 0.0
 
     @property
     def labelled(self) -> bool:
@@ -1344,6 +1363,13 @@ class Annotation:
                 else [[x, y] for x, y in self.outline_path]
             ),
             "outline_closed": bool(self.outline_closed),
+            "text_path": (
+                None if self.text_path is None
+                else [[x, y] for x, y in self.text_path]
+            ),
+            "text_forward": bool(self.text_forward),
+            "text_closed": bool(self.text_closed),
+            "font_px": round(float(self.font_px), 2) if self.font_px else 0.0,
         }
 
 
@@ -1646,6 +1672,8 @@ def plan_annotations(
     kinds: Optional[Iterable[str]] = None,
     classes: Optional[Iterable[str]] = None,
     font_px: float = 13.0,
+    crater_emphasis: float = 1.5,
+    crater_reserve: int = 0,
     padding_px: Optional[float] = None,
     margin_px: Optional[float] = None,
     elevation_km: float = 0.0,
@@ -1694,6 +1722,16 @@ def plan_annotations(
     font_px
         Font size the layout assumes the page will draw with.  Returned in the
         plan so the two cannot disagree.
+    crater_emphasis
+        Difference in points between a main crater's caption and its lettered
+        satellite's.  Positive makes the parent larger; the pair is centred on
+        *font_px*.  Per-item sizes travel in the plan, so the painter and the
+        layout cannot disagree.
+    crater_reserve
+        Experimental: keep this many main (unlettered) crater captions even
+        when the ordinary budget would spend the slots on the broad maria.
+        Zero is the shipped default; the preview tool uses it to compare a
+        more map-like full-disk plan without changing the page.
     elevation_km
         Height above the reference sphere to place *every* feature at, used
         only when *terrain* is ``None``: it is the historical single scalar the
@@ -1816,6 +1854,7 @@ def plan_annotations(
         frozenset(related_crater_names(features, related))
         if related is not None else frozenset()
     )
+    priority_names = frozenset(load_priority_features())
     preferred_offsets: Dict[str, Tuple[float, float]] = {}
     if preferred:
         for name, offset in preferred.items():
@@ -1973,6 +2012,7 @@ def plan_annotations(
     candidates: List[Tuple[float, int, str]] = []
     groups: Dict[int, str] = {}
     weights: Dict[int, int] = {}
+    font_sizes: Dict[int, float] = {}
     unlit = too_small = in_frame = 0
     for index, feature in enumerate(features):
         if not inside[index]:
@@ -1981,6 +2021,18 @@ def plan_annotations(
         if allowed is not None and feature.kind not in allowed:
             continue
         group = feature_class(feature.kind, feature.diameter_km)
+        # Main craters and their lettered satellites are one family typeset at
+        # two sizes; the difference is the reader's 字号强调 setting.  Other
+        # classes keep the plan's base size.
+        item_font = float(font_px)
+        if group == "crater":
+            letter = _satellite_letter(feature.name_en)
+            item_font = max(
+                6.0,
+                float(font_px) + (-0.5 * float(crater_emphasis)
+                                  if letter else 0.5 * float(crater_emphasis)),
+            )
+        font_sizes[index] = item_font
         # The Lunar 100 rows are an independent list; they exist only while the
         # switch is on, and their duplicates of gazetteer names are deliberate.
         if group == "lunar100" and not lunar100_active:
@@ -2027,6 +2079,8 @@ def plan_annotations(
             + _KIND_BONUS.get(feature.kind, 0.0)
             + (_HIGHLIGHT_BONUS if _name_key(feature.name_en) in highlighted else 0.0)
             + (_LUNAR100_BONUS if group == "lunar100" else 0.0)
+            + (_PRIORITY_BONUS
+               if _name_key(feature.name_en) in priority_names else 0.0)
             + 6.0 * centrality
             + (0.0 if luminous else -8.0)
         )
@@ -2060,7 +2114,57 @@ def plan_annotations(
         forced_indices = {item[1] for item in forced_candidates}
         normal = [item for item in candidates if weights.get(item[1]) != 0]
         chosen = []
-        remaining = max_labels
+        # 月海 gets the top ordinary tier *and* a reserved share of the budget:
+        # the family round-robin alone could still leave Wet Sea or Sea of
+        # Nectar unnamed at the default density.  The quota grows with the
+        # label budget; at a generous budget every named sea is kept.  Lakes,
+        # bays and marshes stay at the high ordinary tier below it.
+        maria = [item for item in normal if groups.get(item[1]) == "mare"]
+        quota = len(maria) if max_labels >= len(maria) else max(
+            2, int(round(max_labels * 0.5)))
+        name_maria = maria[:quota]
+        chosen.extend(name_maria)
+        named_maria = {item[1] for item in name_maria}
+        normal = [item for item in normal if item[1] not in named_maria]
+        # Above the default 30 labels, the density slider is asking for more
+        # *area* first, not for a field of small craters.  Fill the remaining
+        # slots with named tracts in descending size, keep a few main-crater
+        # slots so the picture still has landmarks, and only then walk tiers.
+        if max_labels > 30:
+            keep_craters = min(6, max(3, int(round(max_labels * 0.10))))
+            region_budget = max(0, max_labels - keep_craters)
+            region_candidates = [
+                item for item in normal
+                if groups.get(item[1]) in _NAMED_REGION_GROUPS
+            ]
+            region_candidates.sort(key=lambda item: (
+                -float(features[item[1]].diameter_km), -item[0], item[1]))
+            extra = region_candidates[:max(0, region_budget - len(chosen))]
+            chosen.extend(extra)
+            chosen_ids = {item[1] for item in chosen}
+            normal = [item for item in normal if item[1] not in chosen_ids
+                      and groups.get(item[1]) not in _NAMED_REGION_GROUPS]
+        # Experimental 主坑保留位: take the best unlettered craters before the
+        # ordinary tier walk.  This is what makes a map-like full disk show
+        # Tycho/Copernicus instead of spending every slot on broad maria.
+        reserve = min(
+            max(0, int(crater_reserve)),
+            max(0, max_labels - len(chosen)),
+        )
+        if reserve:
+            reserved = []
+            for item in normal:
+                feature = features[item[1]]
+                if (groups.get(item[1]) != "crater"
+                        or _satellite_letter(feature.name_en) is not None):
+                    continue
+                reserved.append(item)
+                if len(reserved) >= reserve:
+                    break
+            chosen.extend(reserved)
+            reserved_ids = {item[1] for item in reserved}
+            normal = [item for item in normal if item[1] not in reserved_ids]
+        remaining = max(0, max_labels - len(chosen))
         over_budget = 0
         for tier in range(1, 6):
             bucket = [item for item in normal if weights.get(item[1]) == tier]
@@ -2100,6 +2204,13 @@ def plan_annotations(
             index for index, feature in enumerate(features)
             if any(name in feature.name_en for name in highlight)
         )
+    # The broad tracts are the first thing the density slider adds; give their
+    # captions the first claim on placement as well, or a crowded frame can
+    # still report them selected while every one is unplaced.
+    important_indices.update(
+        index for index, group in groups.items()
+        if group in _NAMED_REGION_GROUPS
+    )
     # The Lunar 100 entries are the reason the switch was turned on; give their
     # captions the first claim on the layout.
     important_indices.update(forced_indices)
@@ -2176,6 +2287,8 @@ def plan_annotations(
     for order, (_score, index, _family_name) in enumerate(chosen):
         if index in forced_indices:
             continue
+        item_font = float(font_sizes.get(index, font_px))
+        item_height = item_font * 1.25
         wanted.append({
             "key": index,
             "anchor": (float(x[index]), float(y[index])),
@@ -2183,15 +2296,26 @@ def plan_annotations(
             # the whole projected feature.  Using the apparent radius here put a
             # 26 px no-go circle around a two-pixel dot and pushed every name of
             # a large, unoutlined feature a line-height away from its marker.
-            "radius_px": marker_radius_px(float(radius[index]), font_px),
+            "radius_px": marker_radius_px(float(radius[index]), item_font),
             "width": estimate_text_width(
                 _display_label(features[index], language, satellite,
-                               crater_suffix), font_px)
+                               crater_suffix), item_font)
             + 2.0 * padding,
-            "height": label_height,
+            "height": item_height,
+            "font_px": item_font,
             "priority": order,
             "important": index in important_indices,
             "region": bool(region) and groups.get(index) in _REGION_CLASSES,
+            # A drawn crater rim is a shape: set the name inside it, centred,
+            # rather than hanging it off the right of the marker.  The bezel
+            # is a preference, not a hard rule -- a long name may be wider
+            # than a small crater, and centring it still reads as that
+            # crater's caption; if the centre is already taken the ordinary
+            # offsets and beside-the-marker slots follow.
+            "centred": bool(
+                groups.get(index) == "crater"
+                and float(radius[index]) >= outline_min_radius_px
+            ),
             "preferred": preferred_offsets.get(feature.name_en),
         })
     region_keys = {entry["key"] for entry in wanted if entry["region"]}
@@ -2218,10 +2342,10 @@ def plan_annotations(
         # the highest densities the alternative is names that never appear.
         placements = {}
         for entry in wanted:
-            if entry["region"]:
-                # 停用避让 keeps a region caption's own rule: its name belongs on
-                # the formation, so it is set across the anchor instead of
-                # taking the first free slot beside it.
+            if entry["region"] or entry.get("centred"):
+                # 停用避让 keeps a region/centred caption's own rule: its name
+                # belongs on the formation/inside the rim, not in the first
+                # free slot beside it.
                 placements[entry["key"]] = _centred_label(
                     entry["anchor"], float(entry["width"]), float(entry["height"]),
                     frame.width, frame.height)
@@ -2241,8 +2365,10 @@ def plan_annotations(
         if index in placements:
             continue
         text = _display_label(features[index], language, satellite, crater_suffix)
-        width = estimate_text_width(text, font_px) + 2.0 * padding
-        height = label_height
+        item_font = float(font_sizes.get(index, font_px))
+        item_height = item_font * 1.25
+        width = estimate_text_width(text, item_font) + 2.0 * padding
+        height = item_height
         box = None
         if region and groups.get(index) in _REGION_CLASSES:
             box = _centred_label((float(x[index]), float(y[index])),
@@ -2250,7 +2376,7 @@ def plan_annotations(
         if box is None:
             box = _place_label(
                 float(x[index]), float(y[index]),
-                marker_radius_px(float(radius[index]), font_px), width, height,
+                marker_radius_px(float(radius[index]), item_font), width, height,
                 frame.width, frame.height, obstacles or (), 0.0, unit=1.0,
             )
         if box is None:
@@ -2266,7 +2392,9 @@ def plan_annotations(
     for score, index, _family_name in chosen:
         feature = features[index]
         text = _display_label(feature, language, satellite, crater_suffix)
-        width = estimate_text_width(text, font_px) + 2.0 * padding
+        item_font = float(font_sizes.get(index, font_px))
+        item_height = item_font * 1.25
+        width = estimate_text_width(text, item_font) + 2.0 * padding
         marker = min(float(radius[index]), max_marker)
         rect = placements.get(index)
         placement = None if rect is None else (float(rect[0]), float(rect[1]))
@@ -2276,7 +2404,7 @@ def plan_annotations(
             leader = False
         else:
             label_x, label_y = placement
-            boxes.append((label_x, label_y, width, label_height))
+            boxes.append((label_x, label_y, width, item_height))
             # The line is a re-attachment, not decoration: it appears only when
             # the caption had to step away from its marker by more than the
             # threshold above.  A name set beside its dot -- and a region name
@@ -2327,7 +2455,8 @@ def plan_annotations(
                 label_x=label_x,
                 label_y=label_y,
                 label_w=width,
-                label_h=label_height,
+                label_h=item_height,
+                font_px=item_font,
                 leader=bool(leader),
                 outline=outline,
                 feature_class=groups.get(index, "other"),
@@ -2441,6 +2570,52 @@ def _catalogue_outline(name_en: str):
     return None, False
 
 
+def _west_to_east(points: Sequence[Tuple[float, float]]) -> bool:
+    """Does this ground path run from its western end to its eastern end?
+
+    Longitudes wrap at ±180°, so the comparison is on the signed short arc.
+    A closed ring whose first and last points coincide has no direction and
+    returns True; the page then chooses the upright window as before.
+    """
+    if len(points) < 2:
+        return True
+    delta = float(points[-1][0]) - float(points[0][0])
+    while delta > 180.0:
+        delta -= 360.0
+    while delta < -180.0:
+        delta += 360.0
+    return delta >= 0.0
+
+
+def _inset_ring(points: Sequence[Tuple[float, float]],
+                factor: float = 0.82) -> Tuple[Tuple[float, float], ...]:
+    """A closed ring pulled towards its centroid, for a caption in the middle.
+
+    The catalogue has one ring, not an inner and an outer edge; shrinking it
+    about the centre is the cheap stand-in for the circle between the two that
+    a chart would use.  Longitudes are unwrapped around the first point so a
+    ring crossing the antimeridian does not fold onto its seam.
+    """
+    if len(points) < 3:
+        return tuple(points)
+    reference = float(points[0][0])
+    unwrapped: List[Tuple[float, float]] = []
+    for lon, lat in points:
+        value = float(lon)
+        while value - reference > 180.0:
+            value -= 360.0
+        while value - reference < -180.0:
+            value += 360.0
+        unwrapped.append((value, float(lat)))
+    centre_lon = sum(point[0] for point in unwrapped) / len(unwrapped)
+    centre_lat = sum(point[1] for point in unwrapped) / len(unwrapped)
+    return tuple(
+        (centre_lon + (lon - centre_lon) * factor,
+         centre_lat + (lat - centre_lat) * factor)
+        for lon, lat in unwrapped
+    )
+
+
 def _attach_catalogue_outlines(
     frame: FrameProjection, items: Sequence[Annotation],
     *, terrain: Optional[MoonTerrain] = None,
@@ -2459,14 +2634,8 @@ def _attach_catalogue_outlines(
     """
     lifted: List[Annotation] = []
     level = _terrain_level(terrain, frame, terrain_level) if terrain is not None else None
-    for item in items:
-        if item.outline_path is not None:
-            lifted.append(item)
-            continue
-        points, closed = _catalogue_outline(item.name_en)
-        if not points:
-            lifted.append(item)
-            continue
+
+    def project(points: Sequence[Tuple[float, float]]):
         lat = np.array([point[1] for point in points], dtype=np.float64)
         lon = np.array([point[0] for point in points], dtype=np.float64)
         try:
@@ -2480,22 +2649,52 @@ def _attach_catalogue_outlines(
             else:
                 projected = frame.project(lat, lon)
         except Exception:
-            lifted.append(item)
-            continue
+            return None
         facing = np.asarray(projected["facing"], dtype=bool)
         if facing.size and not bool(facing.all()):
-            lifted.append(item)
-            continue
+            return None
         path = tuple(
             (float(x), float(y))
             for x, y in zip(projected["x"], projected["y"])
         )
-        if len(path) >= 2:
+        return path if len(path) >= 2 else None
+
+    for item in items:
+        entry = outline_for(item.name_en) or {}
+        points, closed = _catalogue_outline(item.name_en)
+        # The name follows the interior centreline when the catalogue has one;
+        # the ring is only the painted outline.  For a rille the same path is
+        # the trace, so this covers both.  A ring without a centreline keeps
+        # the ring as its text path (a closed caption).
+        path = None
+        if item.outline_path is None and points:
+            path = project(points)
+        text_ground = None
+        text_closed = False
+        if entry.get("kind") in ("line", "centerline"):
+            candidate = entry.get("path") or []
+            if len(candidate) >= 2:
+                text_ground = candidate
+                # A mountain ring's typesetting path is itself a closed loop
+                # (Montes Rook / Cordillera); the caption then runs round it.
+                text_closed = bool(entry.get("path_closed"))
+        if text_ground is None and points and closed:
+            text_ground = _inset_ring(points)
+            text_closed = True
+        text_path = project(text_ground) if text_ground else None
+        text_forward = _west_to_east(text_ground) if text_ground else True
+        if path is not None or text_path is not None:
             # The path rides alongside ``outline`` rather than replacing it:
             # the projected rim is still the reference circle for the classes
             # that have one, and callers pick the shape they want to paint.
-            lifted.append(replace(item, outline_path=path,
-                                  outline_closed=closed))
+            lifted.append(replace(
+                item,
+                outline_path=path if path is not None else item.outline_path,
+                outline_closed=closed,
+                text_path=text_path,
+                text_forward=text_forward,
+                text_closed=text_closed,
+            ))
         else:
             lifted.append(item)
     return lifted
@@ -2798,18 +2997,27 @@ def candidate_rects(
     outline: Optional[Sequence[Tuple[float, float]]] = None,
     reach: Sequence[float] = _LABEL_REACH,
     region: bool = False,
+    centred: bool = False,
 ) -> Iterator[Tuple[float, float, float, float]]:
     """Every place a caption for one feature may be tried, best guess first.
 
     A *region* caption -- a mare's name, say -- may be set across the middle of
     its own formation, so that centred box is tried before any of the positions
-    beside the feature.  A point feature's caption starts to its right; the
-    centred box is still only a candidate for regions, and if another caption is
-    already there, the ordinary positions follow.
+    beside the feature.  An outlined crater's caption gets the same first
+    choice inside its rim.  An ordinary point feature's caption starts to its
+    right; if another caption is already there, the ordinary positions follow.
     """
     ax, ay = float(anchor[0]), float(anchor[1])
     if region:
         yield (ax - 0.5 * width, ay - 0.5 * height, float(width), float(height))
+    elif centred:
+        # The middle first, then small shifts that still keep the caption
+        # inside the rim.  `arrange_labels` tests each against what is already
+        # there, so this is a preference, not a licence to overlap.
+        for dx, dy in ((0.0, 0.0), (0.0, -0.8 * height), (0.0, 0.8 * height),
+                       (-0.3 * width, 0.0), (0.3 * width, 0.0)):
+            yield (ax + dx - 0.5 * width, ay + dy - 0.5 * height,
+                   float(width), float(height))
     for reach in reach:
         for angle in _LABEL_ANGLES:
             radians = math.radians(angle)
@@ -2976,7 +3184,8 @@ def arrange_labels(
         reach = _LABEL_REACH_EXTENDED if extended else _LABEL_REACH
         for rect in candidate_rects(request["anchor"], request["width"], request["height"],
                                     request["radius_px"], gap, request.get("outline"), reach,
-                                    region=bool(request.get("region"))):
+                                    region=bool(request.get("region")),
+                                    centred=bool(request.get("centred"))):
             x, y, box_w, box_h = rect
             if x < gap or y < gap or x + box_w > width - gap or y + box_h > height - gap:
                 continue
@@ -3011,7 +3220,8 @@ def arrange_labels(
             # prefer any box wholly to the right; distance picks the closest.
             # Regions keep their centred/across-the-patch rule.
             anchor_x, _anchor_y = request["anchor"]
-            if not request.get("region") and rect[0] >= anchor_x - 0.5:
+            if (not request.get("region") and not request.get("centred")
+                    and rect[0] >= anchor_x - 0.5):
                 score -= 1.0e3
             previous = request.get("preferred")
             if previous is not None:

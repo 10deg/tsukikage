@@ -449,6 +449,55 @@ input:disabled, select:disabled { opacity: .45; }
    title, so it takes the title's place in the rhythm rather than floating. */
 .group > .tabs:first-child { margin-bottom: 5px; }
 
+/* 模拟设置: the tab strip is the title and 复位 belongs at the far right of
+   that same line, not floating over the first control. */
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.pane-head .tabs { flex: 1 1 auto; min-width: 0; }
+.pane-head > button.reset { margin-left: auto; flex: 0 0 auto; }
+
+/* 数据源设置: two parameter rows (数据源/星历, 补片/金字塔); the 下载 and
+   重新构建 actions sit at the right of the parameter-name line. */
+.source-grid { margin-top: 0; }
+.source-grid + .source-grid { margin-top: 8px; }
+/* 区域补片/金字塔: the action sits on the parameter-name line, at its right;
+   the menu still fills the cell underneath. */
+.pane .grid2 > .source-field { min-width: 0; }
+.source-field > .source-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.source-field > .source-head > label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-field > .source-head > .source-buttons {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.source-field > .source-head > button { flex: 0 0 auto; margin-left: auto; }
+.source-field > select {
+  width: 100%;
+  max-width: none;
+  margin-top: 2px;
+  /* These menus are siblings of the label, not children of it, so they would
+     otherwise inherit the page's 13 px body size while every other field menu
+     inherits the label's 11 px. */
+  font-size: 11px;
+}
+
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 9px; }
 /* Two field groups without a title between them (模拟设置's resolution block
    and its light block) still need a little air. */
@@ -1604,7 +1653,7 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
 /* 事件预报：瞬变光影事件收在一个固定行里，不再有展开三角。 */
 #proc-events .event-clair {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 6px;
   margin: 1px 0 6px;
@@ -1628,6 +1677,12 @@ button.icon.reset { font-size: 9px; line-height: 17px; }
   box-sizing: border-box;
   vertical-align: middle;
 }
+#proc-events .event-clair button {
+  height: 24px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 22px;
+}
 
 /* A folded-away block of advanced settings (高级设置). */
 details.fold { margin-top: 7px; }
@@ -1639,16 +1694,6 @@ details.fold > summary {
 }
 details.fold[open] > summary { color: var(--ink); }
 details.fold .grid2 { margin-top: 5px; }
-
-/* 数据源 sits above the advanced knobs and may be wider than a .grid2 cell:
-   the label is a sentence ("LOLA GDR 512 ppd · 59 m") and truncating it removes
-   the only part that made the choice possible. */
-details.fold > label.wide-field {
-  display: block;
-  margin: 6px 0 2px;
-}
-details.fold > label.wide-field > select { width: 100%; max-width: none; }
-details.fold > .hint { margin: 0 0 6px; }
 
 /* 单帧预览: the first frame at file size, as a picture in the pane.  It is a
    thumbnail of the *file*, so it is allowed to be small -- what it is for is
@@ -2792,7 +2837,7 @@ h2 .mini.curve-open:hover {
   white-space: nowrap;
 }
 .calc-top .calc-run { margin-left: auto; }
-#ephemeris-mode, #ephemeris-file { min-width: 0; }
+#ephemeris-mode { min-width: 0; }
 #ephemeris-apply, #map-ephemeris-apply {
   flex: 0 0 auto;
   min-width: 3.4em;
@@ -3173,4 +3218,240 @@ h2 .mini.curve-open:hover {
   background: var(--panel-2);
   color: var(--ink-dim);
   font-weight: 500;
+}
+
+/* 生成全月面的高性能确认框：只盖住视口，不改变参数面板的布局。 */
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(3, 5, 9, 0.62);
+}
+.confirm-backdrop[hidden] { display: none; }
+.confirm-box {
+  width: min(360px, calc(100vw - 32px));
+  padding: 15px 16px 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+.confirm-box h3 { margin: 0 0 8px; font-size: 13px; }
+.confirm-box p { margin: 0 0 14px; color: var(--ink-dim); font-size: 11px; line-height: 1.6; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 7px; }
+#disk-generate-full { width: 100%; margin-top: 4px; }
+
+/* 生日那天的月亮：双图基础框，布局由下面的计算器式三栏规则覆盖。 */
+.birthday-preview {
+  margin: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #05070b;
+}
+.birthday-preview img {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: calc(100% - 20px);
+  object-fit: contain;
+}
+.birthday-preview figcaption { color: var(--ink-dim); font-size: 10px; }
+.birthday-status { color: var(--ink-dim); font-size: 11px; }
+.birthday-counter { color: var(--muted); font-size: 10px; white-space: nowrap; }
+
+/* 生日那天的月亮：按计算器布局，左信息 / 中双图 / 右信息。 */
+.experiment-birthday { overflow: hidden; }
+.birthday-top,
+.birthday-preview-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.birthday-preview-controls { align-items: center; padding-top: 4px; padding-bottom: 4px; }
+.birthday-top label,
+.birthday-preview-controls label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+}
+.birthday-preview-controls input[type="number"] { width: 52px; }
+.birthday-body {
+  --birthday-left: 18%;
+  --birthday-right: 18%;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    var(--birthday-left) 5px minmax(0, 1fr) 5px var(--birthday-right);
+  padding: 6px 8px;
+  overflow: hidden;
+}
+.birthday-info {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 4px;
+}
+.birthday-info-title {
+  margin: 0 0 4px;
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+.birthday-splitter {
+  align-self: stretch;
+  width: 5px;
+  cursor: col-resize;
+  border-radius: 3px;
+  background: var(--line);
+}
+.birthday-splitter:hover { background: var(--accent); }
+.birthday-center {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.birthday-figures {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+}
+.birthday-divider {
+  align-self: stretch;
+  width: 1px;
+  background: var(--line);
+}
+.experiment-birthday .birthday-preview {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+.experiment-birthday .birthday-preview img {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+}
+.experiment-birthday .birthday-preview figcaption {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+.birthday-nav {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 24px;
+}
+.birthday-nav .birthday-status { margin-left: 4px; }
+@media (max-width: 760px) {
+  .birthday-body {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+  }
+  .birthday-splitter { display: none; }
+  .birthday-info { overflow: visible; }
+}
+
+/* 生日页读数：窄栏也不要把中文参数名挤成竖排。 */
+.birthday-info .readout {
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 7px;
+  font-size: 10.5px;
+}
+.birthday-info .readout dt,
+.birthday-info .readout dd {
+  white-space: nowrap;
+}
+.birthday-info .readout dd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.birthday-caption {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.birthday-caption .birthday-save { padding: 0 4px; font-size: 9px; }
+
+/* 全月面标题栏的两个镜像按钮：小，但保留文字，避免只靠图标猜方向。 */
+.disk-mirror { font-size: 10px; padding: 1px 5px; }
+.disk-mirror[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(122, 162, 247, 0.12);
+}
+
+/* 生日读数必须横排：info 栏再窄也不允许单字换行。 */
+.birthday-info .readout {
+  display: grid !important;
+  grid-template-columns: minmax(7em, max-content) minmax(0, 1fr) !important;
+  align-items: baseline;
+  gap: 2px 6px;
+  font-size: 10.5px;
+}
+.birthday-info .readout dt,
+.birthday-info .readout dd,
+.birthday-info .readout .zh,
+.birthday-info .readout .en {
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  writing-mode: horizontal-tb !important;
+}
+.birthday-top label,
+.birthday-preview-controls label { white-space: nowrap; }
+
+/* 生日读数用逐行 flex，而不是 dl 栅格：中文标签在任何窄栏都不会竖排。 */
+.birthday-readout { display: flex; flex-direction: column; gap: 2px; }
+.birthday-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: 10.5px;
+}
+.birthday-label {
+  flex: 0 0 7.4em;
+  min-width: 0;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  word-break: keep-all;
+  writing-mode: horizontal-tb;
+}
+.birthday-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }

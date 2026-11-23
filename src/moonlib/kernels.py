@@ -68,6 +68,7 @@ __all__ = [
     "describe",
     "body_radii_km",
     "available_ephemeris_files",
+    "ephemeris_choices",
     "ephemeris_state",
     "switch_ephemeris",
 ]
@@ -459,6 +460,36 @@ def available_ephemeris_files(kernel_dir: Optional[Path] = None) -> list:
     return choices
 
 
+def ephemeris_choices(kernel_dir: Optional[Path] = None) -> list:
+    """The ephemeris files the kernels directory can actually serve.
+
+    DE440 is the built-in short kernel; DE441 is offered only as a pair, never
+    as one half.  Every other ``.bsp`` is a real option in its own right -- the
+    page no longer has a separate "custom" mode, so the file name is the choice.
+    """
+    session = kernel_session()
+    directory = Path(kernel_dir or session.settings.kernel_dir).expanduser()
+    try:
+        present = {path.name for path in directory.glob("*.bsp")}
+    except OSError:  # pragma: no cover - unreadable directory
+        present = set()
+    choices: list = []
+    if "de440s.bsp" in present:
+        choices.append({
+            "id": "recent", "label": "DE440", "mode": "recent", "file": None,
+        })
+    if {"de441_part-1.bsp", "de441_part-2.bsp"} <= present:
+        choices.append({
+            "id": "long", "label": "DE441", "mode": "long", "file": None,
+        })
+    standard = {"de440s.bsp", "de441_part-1.bsp", "de441_part-2.bsp"}
+    for name in sorted(present - standard):
+        choices.append({
+            "id": f"file:{name}", "label": name, "mode": "custom", "file": name,
+        })
+    return choices
+
+
 def ephemeris_state() -> Dict[str, Any]:
     """What the page needs to draw the 星历 menu and say what is loaded."""
     session = kernel_session()
@@ -472,6 +503,12 @@ def ephemeris_state() -> Dict[str, Any]:
     file_name = Path(custom).name if custom else None
     if custom and not any(choice["name"] == file_name for choice in choices):
         choices.insert(0, {"name": file_name, "path": custom})
+    available = ephemeris_choices(settings.kernel_dir)
+    if file_name and not any(choice["file"] == file_name for choice in available):
+        available.insert(0, {
+            "id": f"file:{file_name}", "label": file_name,
+            "mode": "custom", "file": file_name,
+        })
     return {
         "mode": current,
         "label": label,
@@ -479,6 +516,7 @@ def ephemeris_state() -> Dict[str, Any]:
         "path": custom,
         "kernel_dir": str(settings.kernel_dir),
         "choices": choices,
+        "available": available,
         "loaded": list(loaded_kernels()),
     }
 

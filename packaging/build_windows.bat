@@ -7,7 +7,7 @@ rem repository root itself.
 pushd "%~dp0.." || exit /b 1
 set "OUT=out\windows-service"
 set "DIST=%OUT%\dist"
-set "KERNEL_NAMES=naif0012.tls de440s.bsp pck00010.tpc gm_de440.tpc moon_pa_de440_200625.bpc moon_de440_220930.tf earth_latest_high_prec.bpc"
+set "KERNEL_NAMES=naif0012.tls de440s.bsp pck00011.tpc gm_de440.tpc moon_pa_de440_200625.bpc moon_de440_220930.tf earth_latest_high_prec.bpc"
 
 set "PYTHON="
 where py >nul 2>nul

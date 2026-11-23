@@ -74,6 +74,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .clair_obscur import ClairObscurSpec, load_clair_obscur
 from .errors import MoonlibError
 from .frames import (az_el, direction_in_moon_frame, j2000_from_body_fixed,
                      observer_bf)
@@ -90,6 +91,7 @@ from . import spice
 __all__ = [
     "EVENT_KINDS",
     "MoonEvent",
+    "clair_obscur_events",
     "moon_events",
     "event_metrics",
 ]
@@ -211,6 +213,73 @@ class _ColongitudeWindow:
 
 #: The anchored rays the page can forecast.  All angles are degrees; west and
 #: south are negative, the same convention the catalogue uses.
+#: The 17 Clair-Obscur events added in 1.7.6.  Anchors and bands are the
+#: observer's own; the rising/setting side follows the side of the terminator
+#: named by the reported colongitude.  Buzz Saw is the one anchor that had to
+#: be corrected: the effect is the jagged shadow of Montes Jura on Sinus
+#: Iridum (35.9°W), not a point at 35.9°E -- the reported 210° colongitude
+#: itself puts it on the evening terminator there.
+NEW_ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
+    _AnchoredRay("aratus_ca_bright_dot", "Aratus CA's bright dot",
+                 11.23, 24.51, -0.8, 3.0, 0.5,
+                 colong_deg=169.0, colong_tolerance_deg=8.0, setting=True),
+    _AnchoredRay("buzz_saw", "Buzz Saw",
+                 -35.90, 43.80, 3.0, 10.0, 4.0,
+                 colong_deg=205.0, colong_tolerance_deg=8.0, setting=True),
+    _AnchoredRay("two_bright_stars", "Two bright stars",
+                 -9.62, 45.74, -3.2, -0.5, -2.0,
+                 colong_deg=7.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("babbage_a_illuminated_rim", "Babbage A's illuminated rim",
+                 -55.90, 58.83, -0.3, 0.9, 0.6,
+                 colong_deg=55.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("pythagoras_illuminated_central_peak",
+                 "Pythagoras's illuminated central peak",
+                 -61.82, 63.27, 1.2, 2.5, 1.8,
+                 colong_deg=65.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("copelands_star_tip_mountain",
+                 "Copeland's Star-Tip Mountain",
+                 -52.81, 27.48, -1.7, 0.5, -0.5,
+                 colong_deg=54.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("lambert_gamma", "Lambert Gamma",
+                 -18.44, 26.46, -1.8, 0.0, -0.5,
+                 colong_deg=17.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("dechens_flat_dish", "Dechen's flat dish",
+                 -67.43, 45.91, -1.0, 0.4, 0.0,
+                 colong_deg=68.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("two_stars_mons_ampere_huygens",
+                 "Two stars at Mons Ampère & Mons Huygens",
+                 -3.57, 18.61, 1.6, 4.0, 3.0,
+                 colong_deg=6.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("lavoisier_a_dish", "Lavoisier A's dish",
+                 -72.27, 36.74, -1.6, 2.2, 0.0,
+                 colong_deg=75.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("wallaces_three_shadow_spires",
+                 "Wallace's three shadow-spires",
+                 -8.74, 20.24, 1.6, 3.0, 2.2,
+                 colong_deg=12.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("wallaces_illuminated_ring",
+                 "Wallace's illuminated ring",
+                 -8.74, 20.24, -1.0, 1.2, 0.3,
+                 colong_deg=11.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("t_mayer_a_illuminated_ring",
+                 "T. Mayer A's illuminated ring",
+                 -28.54, 15.25, -2.8, 0.0, -1.8,
+                 colong_deg=29.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("aristillus_b_cut_in_half_rim",
+                 'Aristillus B\'s "cut in half" rim',
+                 -2.08, 34.68, -0.9, 0.87, -0.85,
+                 colong_deg=182.0, colong_tolerance_deg=8.0, setting=True),
+    _AnchoredRay("solemn_looking_face", "Solemn looking face",
+                 -6.62, 16.71, 1.0, 4.0, 3.0,
+                 colong_deg=8.5, colong_tolerance_deg=8.0),
+    _AnchoredRay("aristarchus_z", "Aristarchus's Z",
+                 -47.84, 23.31, 1.6, 15.0, 7.0,
+                 colong_deg=51.0, colong_tolerance_deg=8.0),
+    _AnchoredRay("pitatus_sunset_ray", "Pitatus Sunset Ray",
+                 -14.52, 29.59, 0.2, 1.2, 0.6,
+                 colong_deg=193.0, colong_tolerance_deg=8.0, setting=True),
+)
+
 ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
     _AnchoredRay("platos_hook", "Plato's Hook", -8.43, 50.75, 2.5, 7.0, 4.0),
     _AnchoredRay("hesiodus_sunrise_ray", "Hesiodus Sunrise Ray",
@@ -243,7 +312,7 @@ ANCHORED_RAYS: Tuple[_AnchoredRay, ...] = (
     _AnchoredRay("cauchys_interrupted_shadow", "Cauchy's interrupted shadow",
                  38.37, 9.55, 1.5, 9.0, 5.0,
                  colong_deg=325.0, colong_tolerance_deg=5.0),
-)
+) + NEW_ANCHORED_RAYS
 
 #: Events whose whole definition is a colongitude range.
 COLONGITUDE_WINDOWS: Tuple[_ColongitudeWindow, ...] = (
@@ -276,7 +345,7 @@ KIND_LABELS = {
     "xvl": "Lunar X/V/L",
     "jewelled_handle": "Jewelled handle",
     "eyes_of_clavius": "Eyes of Clavius",
-    "cheshire_moon": "Cheshire Moon（Wet Moon）",
+    "cheshire_moon": "Cheshire Moon",
     "platos_hook": "Plato's Hook",
     "hesiodus_sunrise_ray": "Hesiodus Sunrise Ray",
     "maginus_sunshine_ray": "Maginus Sunshine Ray",
@@ -289,6 +358,24 @@ KIND_LABELS = {
     "posidonius_illuminated_rim": "Posidonius' illuminated rim",
     "l_shaped_mountain": '"L"-shaped mountain',
     "cauchys_interrupted_shadow": "Cauchy's interrupted shadow",
+    "aratus_ca_bright_dot": "Aratus CA's bright dot",
+    "buzz_saw": "Buzz Saw",
+    "two_bright_stars": "Two bright stars",
+    "babbage_a_illuminated_rim": "Babbage A's illuminated rim",
+    "pythagoras_illuminated_central_peak": "Pythagoras's illuminated central peak",
+    "copelands_star_tip_mountain": "Copeland's Star-Tip Mountain",
+    "lambert_gamma": "Lambert Gamma",
+    "dechens_flat_dish": "Dechen's flat dish",
+    "two_stars_mons_ampere_huygens":
+        "Two stars at Mons Ampère & Mons Huygens",
+    "lavoisier_a_dish": "Lavoisier A's dish",
+    "wallaces_three_shadow_spires": "Wallace's three shadow-spires",
+    "wallaces_illuminated_ring": "Wallace's illuminated ring",
+    "t_mayer_a_illuminated_ring": "T. Mayer A's illuminated ring",
+    "aristillus_b_cut_in_half_rim": 'Aristillus B\'s "cut in half" rim',
+    "solemn_looking_face": "Solemn looking face",
+    "aristarchus_z": "Aristarchus's Z",
+    "pitatus_sunset_ray": "Pitatus Sunset Ray",
     "cassini_moon_maiden": "Cassini's Moon Maiden",
     "aries_hoofprint": "Aries' Hoofprint（Black lips）",
     "gruithuisens_lunar_city": "Gruithuisen's Lunar City",
@@ -317,6 +404,13 @@ EVENT_KINDS: Tuple[str, ...] = (
     "alexanders_beaded_rim", "zeno_steps", "oneills_bridge",
     "posidonius_illuminated_rim", "l_shaped_mountain",
     "cauchys_interrupted_shadow",
+    "aratus_ca_bright_dot", "buzz_saw", "two_bright_stars",
+    "babbage_a_illuminated_rim", "pythagoras_illuminated_central_peak",
+    "copelands_star_tip_mountain", "lambert_gamma", "dechens_flat_dish",
+    "two_stars_mons_ampere_huygens", "lavoisier_a_dish",
+    "wallaces_three_shadow_spires", "wallaces_illuminated_ring",
+    "t_mayer_a_illuminated_ring", "aristillus_b_cut_in_half_rim",
+    "solemn_looking_face", "aristarchus_z", "pitatus_sunset_ray",
     "cassini_moon_maiden", "aries_hoofprint", "gruithuisens_lunar_city",
     "annual_extremes", "libration_target",
 )
@@ -692,10 +786,16 @@ def _altitude_windows(altitude_fn, start: float, end: float,
             if finish > root + 60.0:
                 # The best moment is the crossing of its own target, which lies
                 # inside [minimum, maximum] by construction.
-                best = bisect_root(
-                    lambda et: altitude_fn(et) - best_target,
-                    root, finish, tol=1e-3,
-                )
+                try:
+                    best = bisect_root(
+                        lambda et: altitude_fn(et) - best_target,
+                        root, finish, tol=1e-3,
+                    )
+                except ValueError:
+                    # The band's peak fell short of the tabulated best height
+                    # (a high-latitude row can do this).  No best moment means
+                    # no honest event; skip it rather than reporting an edge.
+                    continue
                 windows.append((root, finish, best))
         previous = altitude
         moment = following
@@ -737,10 +837,16 @@ def _altitude_windows_setting(
                     root, limit, tol=1e-3,
                 )
             if finish > root + 60.0:
-                best = bisect_root(
-                    lambda et: altitude_fn(et) - best_target,
-                    root, finish, tol=1e-3,
-                )
+                try:
+                    best = bisect_root(
+                        lambda et: altitude_fn(et) - best_target,
+                        root, finish, tol=1e-3,
+                    )
+                except ValueError:
+                    # The band's peak fell short of the tabulated best height
+                    # (a high-latitude row can do this).  No best moment means
+                    # no honest event; skip it rather than reporting an edge.
+                    continue
                 windows.append((root, finish, best))
         previous = altitude
         moment = following
@@ -981,7 +1087,8 @@ def _colongitude_windows(start: float, end: float, low_deg: float,
 
 def _ray_event(observer: Observer, kind: str, title: str, root: float,
                finish: float, best: float,
-               metrics: Dict[str, Any]) -> MoonEvent:
+               metrics: Dict[str, Any],
+               *, detail: Optional[str] = None) -> MoonEvent:
     metrics = dict(metrics)
     metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
     moon_altitude = float(metrics["altitude_deg"])
@@ -991,7 +1098,9 @@ def _ray_event(observer: Observer, kind: str, title: str, root: float,
         when_utc=to_utc(best),
         altitude_deg=moon_altitude,
         title=title,
-        detail=f"持续 {minutes:.0f} min　{_altitude_text(moon_altitude)}",
+        # 高度 already has its own forecast column; repeating it in the note
+        # makes every ray row carry the same number twice.
+        detail=detail or f"持续 {minutes:.0f} min",
         observable=moon_altitude > 0.0,
         window_start_utc=to_utc(root),
         window_end_utc=to_utc(finish),
@@ -1047,6 +1156,215 @@ def _colongitude_event_list(observer: Observer, window) -> List[MoonEvent]:
     return events
 
 
+def _clair_altitude_windows(
+    spec: ClairObscurSpec, observer: Observer, start: float, end: float,
+    *, colong_at: str = "best",
+) -> List[Tuple[float, float, float]]:
+    """The spec's solar-altitude windows, with its colongitude gate."""
+    if (spec.lat is None or spec.lon is None
+            or spec.alt_start is None or spec.alt_end is None
+            or spec.alt_best is None):
+        return []
+    normal = _anchor_normal(spec.lon, spec.lat)
+
+    def altitude(et: float) -> float:
+        return _sun_altitude_at(normal, et)
+
+    low, high = sorted((float(spec.alt_start), float(spec.alt_end)))
+    scanner = (_altitude_windows_setting if spec.direction == "set"
+               else _altitude_windows)
+    # A few rows are shallow, slow bands where a day is enough to find the
+    # upper edge; the wider default is for the half-degree X/V and L bands.
+    limit_hours = 24.0 if spec.key in {
+        "jewelled_handle", "eyes_of_clavius",
+    } else 48.0
+    windows: List[Tuple[float, float, float]] = []
+    for root, finish, best in scanner(
+        altitude, start, end, low, high, float(spec.alt_best),
+        limit_hours=limit_hours,
+    ):
+        if spec.colong is not None:
+            tolerance = (float(spec.colong_tolerance)
+                         if spec.colong_tolerance is not None else 8.0)
+            # The old X/V scan gated on the window onset; anchored rays gate
+            # on their best moment.  Keep both conventions available.
+            moment = root if colong_at == "root" else best
+            offset = abs(wrap_angle(
+                _xvl_colongitude_deg(moment) - float(spec.colong),
+                period=360.0))
+            if offset > tolerance:
+                continue
+        windows.append((root, finish, best))
+    return windows
+
+
+def _clair_xvl_events(
+    observer: Observer, window: Any, spec: ClairObscurSpec,
+    specs: Dict[str, ClairObscurSpec],
+) -> List[MoonEvent]:
+    """X/V and L as one sunrise train, not two unrelated rows.
+
+    The CSV still supplies both rows and their thresholds.  This function owns
+    the relationship the table cannot express: L is only reported when it
+    belongs to an X/V train (the anchors are 33° apart in latitude, so their
+    onset can be slightly before or after), and an X/V row says whether L is in
+    the same window.  Selecting the L menu row shows only those paired Ls;
+    selecting X/V keeps the old one-row-per-train presentation.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    xv_spec = specs.get("lunar_x_v")
+    if xv_spec is None:
+        return []
+    l_spec = specs.get("lunar_l")
+    xv_windows = _clair_altitude_windows(
+        xv_spec, observer, start, end, colong_at="root")
+    l_windows = (_clair_altitude_windows(l_spec, observer, start, end)
+                 if l_spec is not None else [])
+    paired: Dict[float, Tuple[float, float, float]] = {}
+    used: set = set()
+    for xv_root, xv_finish, _xv_best in xv_windows:
+        for position, (l_root, l_finish, l_best) in enumerate(l_windows):
+            if position in used:
+                continue
+            # Same sunrise train: allow L's onset to precede X/V slightly,
+            # but not a whole lunation away.
+            if not (xv_root - 6.0 * 3600.0 <= l_root
+                    <= xv_finish + 30.0 * 3600.0):
+                continue
+            used.add(position)
+            paired[xv_root] = (l_root, l_finish, l_best)
+            break
+
+    events: List[MoonEvent] = []
+    if spec.key == "lunar_l":
+        for xv_root, xv_finish, _xv_best in xv_windows:
+            pair = paired.get(xv_root)
+            if pair is None:
+                continue
+            l_root, l_finish, l_best = pair
+            metrics = event_metrics(observer, l_best)
+            metrics["clair_key"] = spec.key
+            metrics["clair_title"] = spec.title
+            metrics["colongitude_deg"] = _xvl_colongitude_deg(l_best)
+            metrics["xv_best_utc"] = to_utc(_xv_best).isoformat()
+            metrics["xv_start_utc"] = to_utc(xv_root).isoformat()
+            metrics["xv_end_utc"] = to_utc(xv_finish).isoformat()
+            events.append(_ray_event(
+                observer, f"clair:{spec.key}", spec.title,
+                l_root, l_finish, l_best, metrics,
+                # Duration and altitude already have columns in this table;
+                # the note only adds the X/V pairing.
+                detail="与 X/V 同组",
+            ))
+        return events
+
+    for xv_root, xv_finish, xv_best in xv_windows:
+        pair = paired.get(xv_root)
+        overlap = 0.0
+        if pair is not None:
+            l_root, l_finish, l_best = pair
+            overlap = max(0.0, min(xv_finish, l_finish)
+                          - max(xv_root, l_root))
+        metrics = event_metrics(observer, xv_best)
+        metrics["clair_key"] = spec.key
+        metrics["clair_title"] = spec.title
+        metrics["colongitude_deg"] = _xvl_colongitude_deg(xv_best)
+        if pair is not None:
+            metrics["l_best_utc"] = to_utc(l_best).isoformat()
+            metrics["l_start_utc"] = to_utc(l_root).isoformat()
+            metrics["l_end_utc"] = to_utc(l_finish).isoformat()
+            metrics["l_overlap"] = overlap > 0.0
+        else:
+            metrics["l_best_utc"] = None
+            metrics["l_start_utc"] = None
+            metrics["l_end_utc"] = None
+            metrics["l_overlap"] = False
+        title = "Lunar X/V/L" if overlap > 0.0 else xv_spec.title
+        note = (f"L {to_utc(l_best).strftime('%H:%M')} UTC"
+                if pair is not None else "L不同时出现")
+        events.append(_ray_event(
+            observer, f"clair:{spec.key}", title, xv_root, xv_finish, xv_best,
+            metrics,
+            # Duration and altitude are table columns; the note only carries
+            # the L pairing that the columns cannot express.
+            detail=note,
+        ))
+    return events
+
+
+#: CSV rows whose behaviour needs more than the generic altitude/colongitude
+#: scan.  The table stays the source of the numbers; these functions own the
+#: relationships (X/V ↔ L) that a flat column set cannot express.
+_CLAIR_SPECIAL = {
+    "lunar_x_v": _clair_xvl_events,
+    "lunar_l": _clair_xvl_events,
+}
+
+
+def clair_obscur_events(
+    observer: Observer,
+    window: Any,
+    *,
+    specs: Optional[Sequence[ClairObscurSpec]] = None,
+    keys: Optional[Iterable[str]] = None,
+) -> List[MoonEvent]:
+    """Forecast the editable Clair-Obscur table.
+
+    Anchored rows use the same solar-altitude scan as the old hard-coded rays;
+    colongitude-only rows use the table's window directly.  The returned
+    ``kind`` is ``clair:<key>`` so the page can request one row and the
+    catalogue can be refreshed without renaming a lunar event.
+    """
+    start = float(window.start_et)
+    end = float(window.end_et)
+    wanted = {str(key) for key in keys} if keys is not None else None
+    all_specs = tuple(specs if specs is not None else load_clair_obscur())
+    by_key = {spec.key: spec for spec in all_specs}
+    events: List[MoonEvent] = []
+    for spec in all_specs:
+        if spec.incomplete:
+            continue
+        if wanted is not None and spec.key not in wanted:
+            continue
+        handler = _CLAIR_SPECIAL.get(spec.key)
+        if handler is not None:
+            events.extend(handler(observer, window, spec, by_key))
+            continue
+        kind = f"clair:{spec.key}"
+        if spec.anchored:
+            for root, finish, best in _clair_altitude_windows(
+                spec, observer, start, end,
+            ):
+                metrics = event_metrics(observer, best)
+                metrics["clair_key"] = spec.key
+                metrics["clair_title"] = spec.title
+                metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
+                # The event table already has an altitude column; keep the
+                # duration here and do not repeat the height in the note.
+                minutes = (finish - root) / 60.0
+                events.append(_ray_event(
+                    observer, kind, spec.title, root, finish, best, metrics,
+                    detail=f"持续 {minutes:.0f} min",
+                ))
+        else:
+            for root, finish, best in _colongitude_windows(
+                start, end, float(spec.colong_start), float(spec.colong_end),
+                float(spec.colong_best),
+            ):
+                metrics = event_metrics(observer, best)
+                metrics["clair_key"] = spec.key
+                metrics["clair_title"] = spec.title
+                metrics["colongitude_deg"] = _xvl_colongitude_deg(best)
+                minutes = (finish - root) / 60.0
+                events.append(_ray_event(
+                    observer, kind, spec.title, root, finish, best, metrics,
+                    detail=f"持续 {minutes:.0f} min",
+                ))
+    events.sort(key=lambda event: event.when_utc)
+    return events
+
+
 def _cheshire_moon_events(observer: Observer, window) -> List[MoonEvent]:
     """Moonrises and moonsets with the ecliptic nearly upright.
 
@@ -1097,7 +1415,7 @@ def _cheshire_moon_events(observer: Observer, window) -> List[MoonEvent]:
             kind="cheshire_moon",
             when_utc=to_utc(root),
             altitude_deg=altitude,
-            title="Cheshire Moon（Wet Moon）",
+            title="Cheshire Moon",
             # The sidebar has no event-name column for this kind, so the detail
             # line carries the facts a reader needs there; the table shows the
             # same fields as columns.  No altitude note.
@@ -1246,24 +1564,27 @@ def _daylight_fraction(observer: Observer, start_et: float, end_et: float) -> fl
 
 
 def _with_daylight(observer: Observer, event: MoonEvent) -> MoonEvent:
-    """Mark whether the Sun is up for most (or all) of the event.
+    """Mark whether the Sun is above the horizon at the event's own instant.
 
     ``白昼`` is a property of every forecast row, not a prose note: the page
     gives it a column of its own.  The event itself can still be seen in
     daylight (a lunar eclipse near the horizon, a full moon at noon), but the
     reader deserves to know that the sky, not the Moon, is the limiting factor.
-    The threshold is the one asked for: the whole event or more than half of it.
-    ``daylight_fraction`` is kept for callers that want the number, not the flag.
+
+    The flag is the Sun altitude at ``when_utc`` -- the best moment the row is
+    about -- not the fraction of a window.  A long X/V window can straddle
+    sunrise while its best moment is still in darkness, and the old fraction
+    called that daylight.  ``daylight_fraction`` stays as a descriptive metric
+    for callers that want it; it no longer decides the flag.
     """
+    when = to_et(event.when_utc)
     start = to_et(event.window_start_utc or event.when_utc)
     end = to_et(event.window_end_utc or event.when_utc)
-    fraction = _daylight_fraction(observer, start, end)
     metrics = dict(event.metrics or {})
-    metrics["daylight_fraction"] = fraction
-    metrics["daylight"] = bool(fraction > 0.5)
-    if metrics["daylight"]:
-        metrics["sun_altitude_deg"] = _sun_altitude(
-            to_et(event.when_utc), observer)
+    metrics["daylight_fraction"] = _daylight_fraction(observer, start, end)
+    sun_altitude = _sun_altitude(when, observer)
+    metrics["sun_altitude_deg"] = sun_altitude
+    metrics["daylight"] = bool(sun_altitude > 0.0)
     return replace(event, metrics=metrics)
 
 

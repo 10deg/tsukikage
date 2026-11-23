@@ -2335,6 +2335,10 @@ def render_moon(
 
     eclipse = eclipse_state(view.et)
     forward, right, up = _camera_basis(view)
+    if options.mirror == "horizontal":
+        right = -right
+    elif options.mirror == "vertical":
+        up = -up
     origin = float(view.distance_km) * np.asarray(
         view.observer_direction, dtype=np.float64
     )

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import csv
 import math
+import re
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,7 +36,12 @@ from .terrain import MOON_REFERENCE_RADIUS_KM, MoonTerrain
 
 __all__ = [
     "FEATURE_FILE",
+    "NOMENCLATURE_META_FILE",
+    "PRIORITY_FEATURES_FILE",
+    "display_note",
     "load_features",
+    "load_nomenclature_meta",
+    "load_priority_features",
     "feature_names",
     "find_feature",
     "estimate_diameter_km",
@@ -44,9 +51,126 @@ __all__ = [
 #: Catalogue of showpiece landforms shipped with the package.
 FEATURE_FILE = "lunar_features.csv"
 
+#: Companion tables: the IAU status/origin metadata and the hidden
+#: high-priority list.  Both are keyed by the English feature name and are
+#: optional: a checkout without them still runs.
+NOMENCLATURE_META_FILE = "lunar_nomenclature_meta.csv"
+PRIORITY_FEATURES_FILE = "priority_features.csv"
+
+_META_LOCK = threading.RLock()
+_META_CACHE: Optional[Tuple[float, Dict[str, Dict[str, str]]]] = None
+_PRIORITY_LOCK = threading.RLock()
+_PRIORITY_CACHE: Optional[Tuple[float, Dict[str, Dict[str, str]]]] = None
+
 
 def _catalogue_path() -> Path:
     return package_data_dir() / FEATURE_FILE
+
+
+#: Fragments that belong to the build record, not to the Moon.  The atlas merge
+#: appends "（原表无尺寸）" to a nominal diameter and "待译名（Virtual Moon
+#: Atlas / …）" to a name it could not translate; neither says anything a reader
+#: of the map can use, and the former reads as an apology in the middle of a
+#: caption.  They are dropped here, at the one place every catalogue row enters
+#: the library, so the simulator and the map cannot disagree about them.
+_NOTE_BACKEND = re.compile(
+    r"（(?:原表无尺寸|Virtual Moon Atlas[^）]*)）"
+)
+_NOTE_ONLY_BACKEND = re.compile(r"^待译名(?:（[^）]*）)?$")
+
+
+def display_note(note: Optional[str]) -> str:
+    """A catalogue note with its build-time bookkeeping removed."""
+    parts = [part.strip() for part in str(note or "").split("·")]
+    kept: List[str] = []
+    for part in parts:
+        part = _NOTE_BACKEND.sub("", part).strip()
+        if not part or _NOTE_ONLY_BACKEND.match(part):
+            continue
+        if part.startswith("标称直径"):
+            continue
+        kept.append(part)
+    return " · ".join(kept)
+
+
+def _normal_name(name: Any) -> str:
+    return " ".join(str(name or "").split()).casefold()
+
+
+def load_nomenclature_meta(path: Optional[Any] = None) -> Dict[str, Dict[str, str]]:
+    """Read the per-feature IAU metadata table, keyed by English name.
+
+    The table is generated from the official gazetteer export and kept beside
+    the catalogue.  It is deliberately separate from ``lunar_nomenclature.csv``:
+    the seven catalogue columns are a contract several tools share, while the
+    metadata is presentational and may be refreshed independently.
+    """
+    global _META_CACHE
+    source = Path(path) if path is not None else package_data_dir() / NOMENCLATURE_META_FILE
+    if not source.is_file():
+        return {}
+    try:
+        stamp = source.stat().st_mtime
+    except OSError:
+        return {}
+    with _META_LOCK:
+        if _META_CACHE is not None and _META_CACHE[0] == stamp:
+            return _META_CACHE[1]
+        table: Dict[str, Dict[str, str]] = {}
+        try:
+            with source.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    key = _normal_name(row.get("English Name"))
+                    if not key:
+                        continue
+                    table[key] = {
+                        field: str(row.get(field) or "").strip()
+                        for field in (
+                            "Feature ID", "Approval Status", "Approval Date",
+                            "Continent", "Ethnicity", "Origin", "Reference",
+                            "Updated", "Satellite Features",
+                        )
+                    }
+        except (OSError, ValueError):
+            table = {}
+        _META_CACHE = (stamp, table)
+        return table
+
+
+def load_priority_features(path: Optional[Any] = None) -> Dict[str, Dict[str, str]]:
+    """Read the hidden high-priority list, keyed by English name.
+
+    The file is meant to be edited by hand: one row per feature, with the
+    ``Priority`` field currently ``highest``.  It is a *class list*, not a
+    separate page category; consumers merge it into their own ordering without
+    adding a switch to the interface.
+    """
+    global _PRIORITY_CACHE
+    source = Path(path) if path is not None else package_data_dir() / PRIORITY_FEATURES_FILE
+    if not source.is_file():
+        return {}
+    try:
+        stamp = source.stat().st_mtime
+    except OSError:
+        return {}
+    with _PRIORITY_LOCK:
+        if _PRIORITY_CACHE is not None and _PRIORITY_CACHE[0] == stamp:
+            return _PRIORITY_CACHE[1]
+        table: Dict[str, Dict[str, str]] = {}
+        try:
+            with source.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    key = _normal_name(row.get("English Name"))
+                    if not key:
+                        continue
+                    table[key] = {
+                        field: str(row.get(field) or "").strip()
+                        for field in ("名称", "Priority", "Source", "Note")
+                    }
+        except (OSError, ValueError):
+            table = {}
+        _PRIORITY_CACHE = (stamp, table)
+        return table
 
 
 def load_features(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
@@ -100,7 +224,7 @@ def load_features(path: Optional[Any] = None) -> Tuple[SurfaceFeature, ...]:
                         lon_deg=((lon + 180.0) % 360.0) - 180.0,
                         diameter_km=diameter,
                         kind=(row.get("Type") or "Crater").strip(),
-                        note=(row.get("Note") or "").strip(),
+                        note=display_note(row.get("Note")),
                     )
                 )
     except OSError as exc:  # pragma: no cover - racing deletion

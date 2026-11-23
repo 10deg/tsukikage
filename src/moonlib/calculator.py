@@ -55,6 +55,15 @@ _SYNODIC_DAYS = 29.530588853
 _YEAR_DAYS = 365.25
 _MAX_SPAN_DAYS = 10.0 * _YEAR_DAYS
 _FALLBACK_DAYS = _YEAR_DAYS
+#: "下一次" (and its mirror 上一次) may need many years for a rare repetition:
+#: a particular age/illumination/libration match can skip a whole year, and
+#: the old one-year window then answered "none" for a condition that does
+#: recur.  Fifty years covers a half-saros of lunations while staying inside
+#: the DE440s span for any contemporary date.  Altitude is the exception: the
+#: next highest Moon is always inside the adjacent lunation, so it keeps the
+#: short window instead of scanning half a century for an answer it already
+#: has.
+_DIRECTION_SEARCH_DAYS = 50.0 * _YEAR_DAYS
 # previous/next altitude answers stay inside the adjacent lunation; the
 # same colongitude occurs once there, and the adjacent cycle is enough.
 _ALTITUDE_DIRECTION_DAYS = 35.0
@@ -563,7 +572,7 @@ def search_conditions(
 
     if direction in ("previous", "next"):
         window_days = (_ALTITUDE_DIRECTION_DAYS if target == "altitude"
-                       else _FALLBACK_DAYS)
+                       else _DIRECTION_SEARCH_DAYS)
         if direction == "previous":
             search_start = reference_et - (window_days * 86400.0)
             search_end = reference_et
@@ -584,35 +593,58 @@ def search_conditions(
     # the reference, the one highest/lowest in the observer's sky".  It is a
     # terminator-constrained altitude query, not a free global altitude extreme.
     altitude_query = target == "altitude"
-    candidates = _collect_candidates(
-        observer=site, start=search_start, end=search_end,
-        target="shadow" if altitude_query else target,
-        mode="same" if altitude_query else mode,
-        reference=reference,
-        error=None if altitude_query else error,
-    )
-    # The reference instant itself is the question, not an answer.
-    candidates = [et for et in candidates if abs(et - reference_et) > 60.0]
-    candidates.sort()
 
-    if altitude_query:
+    def candidates_in(start: float, end: float) -> List[float]:
+        found = _collect_candidates(
+            observer=site, start=start, end=end,
+            target="shadow" if altitude_query else target,
+            mode="same" if altitude_query else mode,
+            reference=reference,
+            error=None if altitude_query else error,
+        )
+        # The reference instant itself is the question, not an answer.
+        return sorted(et for et in found if abs(et - reference_et) > 60.0)
+
+    def choose(candidates: Sequence[float]) -> List[float]:
+        if altitude_query:
+            if direction == "previous":
+                candidates = [et for et in candidates if et < reference_et]
+            elif direction == "next":
+                candidates = [et for et in candidates if et > reference_et]
+            if not candidates:
+                return []
+            pick = max if mode == "highest" else min
+            return [pick(candidates,
+                         key=lambda et: _row(site, et)["altitude_deg"])]
         if direction == "previous":
             candidates = [et for et in candidates if et < reference_et]
-        elif direction == "next":
+            return list(candidates[-1:]) if candidates else []
+        if direction == "next":
             candidates = [et for et in candidates if et > reference_et]
-        if candidates:
-            pick = max if mode == "highest" else min
-            selected = [pick(candidates, key=lambda et: _row(site, et)["altitude_deg"])]
+            return list(candidates[:1])
+        return list(candidates)
+
+    # A "下一次" answer is usually in the next month; scanning the full
+    # fifty-year horizon before looking at the first year made every ordinary
+    # query pay for the rare one.  Search the adjacent year first, then the
+    # remaining decades only when that year held no match.  The result is the
+    # same nearest instant, and the picture of the search window still names
+    # the full horizon.
+    attempts = [(search_start, search_end)]
+    if direction in ("previous", "next") and not altitude_query:
+        if direction == "previous":
+            near = max(search_start, reference_et - _FALLBACK_DAYS * 86400.0)
+            attempts = [(near, search_end), (search_start, near)]
         else:
-            selected = []
-    elif direction == "previous":
-        candidates = [et for et in candidates if et < reference_et]
-        selected = candidates[-1:] if candidates else []
-    elif direction == "next":
-        candidates = [et for et in candidates if et > reference_et]
-        selected = candidates[:1]
-    else:
-        selected = candidates
+            near = min(search_end, reference_et + _FALLBACK_DAYS * 86400.0)
+            attempts = [(search_start, near), (near, search_end)]
+    selected: List[float] = []
+    for attempt_start, attempt_end in attempts:
+        if attempt_end <= attempt_start:
+            continue
+        selected = choose(candidates_in(attempt_start, attempt_end))
+        if selected:
+            break
 
     fallback = False
     outside = False

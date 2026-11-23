@@ -51,7 +51,7 @@ at the grade, so a target in lunar night counted as visible.  Here
 * :func:`sweep` evaluates the sub-Earth and sub-solar direction arrays **once**
   for the whole time grid with vectorised ``spkpos`` calls, one horizontal
   geometry scan for the grid, and then a pure-Python assembly loop, so a 90-day
-  sweep at 30-minute steps over the full 53-target catalogue costs well under a
+  sweep at 30-minute steps over the full 51-target catalogue costs well under a
   second of SPICE work;
 * the grade/margin/incidence rules are shared between the scalar
   :func:`target_visibility` and the sweep, so a one-off evaluation and a sweep

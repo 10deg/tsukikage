@@ -316,7 +316,20 @@ button.caret[aria-expanded="true"]::before {
   white-space: nowrap;
 }
 .cls-chip:hover { border-color: #3a475c; color: var(--muted); }
-.cls-chip[data-on="true"] { color: var(--text); border-color: #3a475c; background: #16202e; }
+/* 关闭: grey text and grey border.  开启: bright text, grey border.  强调:
+   bright text, bright border -- the class is on and its features are painted
+   above everything else. */
+.cls-chip[data-on="true"] {
+  color: var(--text);
+  border-color: #3a475c;
+  background: #16202e;
+}
+.cls-chip[data-state="emphasis"] {
+  color: #ffffff;
+  border-color: var(--accent);
+  background: #1b2636;
+  box-shadow: 0 0 0 1px rgba(122, 162, 247, .35);
+}
 .cls-chip i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .cls-chip input { display: none; }
 .cls-chip small { color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -1041,3 +1054,192 @@ body.map-fullscreen .map-stage { grid-column: 1; }
   .layer-panel, .info-panel, .map-splitter { display: none; }
   .brand { min-width: 0; }
 }
+
+/* 叠加层设置：直接展开，双端高程滑条 + 彩色偏移带。 */
+/* 叠加层：独立一栏，标题与“显示设置”同字号；滑块和色带一体。 */
+.overlay-panel { padding-top: 4px; }
+.overlay-panel h2 {
+  justify-content: flex-start;
+  padding-bottom: 0;
+  margin-bottom: 5px;
+}
+.overlay-panel h2 input[type="checkbox"] { margin-left: 2px; }
+.overlay-panel .overlay-options { border-top: 0; padding-top: 0; }
+.overlay-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-size: 10.5px;
+}
+.overlay-options label { font-size: 10.5px; }
+.overlay-options[hidden] { display: none; }
+.overlay-level-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.overlay-level-row label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.overlay-level-row input[type="number"] { width: 54px; }
+.overlay-wide {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+}
+.overlay-wide > label,
+.overlay-wide > span { font-size: 10.5px; }
+.overlay-line-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.overlay-line-row .overlay-line-alpha {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.overlay-line-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.overlay-line-row input[type="number"] { width: 48px; }
+.overlay-color-square input[type="color"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+.overlay-slider-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.overlay-slider-label {
+  font-size: 10.5px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.overlay-slider-track {
+  position: relative;
+  height: 20px;
+  margin: 0 7px;
+}
+.overlay-slider-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #273140;
+}
+.overlay-color-gradient {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: linear-gradient(90deg, #00007f, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000, #7f0000);
+}
+.overlay-handle {
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 20px;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid #dfe8f5;
+  border-radius: 4px;
+  background: #7aa2f7;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 2;
+}
+.overlay-handle.handle-min { background: #7aa2f7; }
+.overlay-handle.handle-max { background: #e0af68; }
+.overlay-handle:hover { filter: brightness(1.2); }
+.overlay-handle.handle-offset {
+  width: 8px;
+  height: 20px;
+  border: 2px solid #ffffff;
+  border-radius: 4px;
+  background: #f0c060;
+  z-index: 3;
+}
+.overlay-slider-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 10px;
+  padding: 0 7px;
+}
+.overlay-line-row label { white-space: nowrap; }
+.overlay-panel[data-disabled="true"] .overlay-options { display: none; }
+
+/* 叠加层两轨之间的动作按钮 */
+.overlay-slider-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  margin: 2px 0;
+}
+.overlay-slider-actions button {
+  font-size: 10px;
+  white-space: nowrap;
+}
+.overlay-slider-actions button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(122, 162, 247, .12);
+}
+.overlay-palette-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.overlay-palette-label select { min-width: 0; width: 100%; }
+.overlay-level-row > label { white-space: nowrap; }
+.overlay-level-row select { min-width: 68px; }
+
+/* 左栏叠加层：窄栏时允许等高线精度/分级换行，不互相覆盖。 */
+.overlay-level-row {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.overlay-level-row > label {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.overlay-palette-label {
+  flex: 1 1 132px;
+}
+.overlay-level-row select {
+  max-width: 100%;
+}
+.overlay-level-row .overlay-palette-label select { width: 100%; }
+/* 右栏资料折叠头 */
+.selection-info h2 {
+  margin: 10px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+.selection-info h2 .caret { margin-left: auto; flex: 0 0 auto; }
+.facts[hidden] { display: none; }

@@ -40,6 +40,8 @@ const state = {
   selection: null,     // {lon, lat, radiusFraction, rotationDeg}
   selectionHidden: false,  // the box is put away; the picture is not cropped
   occultationTrack: false, // 显示掩星: draw the planet's path when an event is live
+  clairRows: [],            // editable Clair-Obscur rows from /api/clair-obscur
+  timeMode: 'now',          // when:'now' in default.conf, until the field is edited
   occultationEvents: [],   // occultations from the last 月掩行星 forecast
   planetTrack: null,       // last /api/planet-track payload, for the live event
   occultationSeq: 0,       // guards a stale track reply
@@ -149,6 +151,16 @@ const state = {
   experimentSort: { key: 'time', dir: 1 }, // table sort: column and direction
   experimentSelected: null, // row clicked in the table, marked on the chart
   experimentStepOpen: false,
+  birthdaySeq: 0,
+  birthdayBusy: false,
+  birthdayResults: [],
+  birthdayIndex: -1,
+  birthdayLeftSplit: 20,
+  birthdayRightSplit: 20,
+  birthdaySplitDrag: null,
+  diskMirror: 'none',
+  diskGenerateBusy: false,
+  diskGenerateAbort: null,
   nakedEyeOpen: false,
   nakedEyeInfo: null,       // {time, sites, items} for the two stations
   nakedEyeInfoSeq: 0,
@@ -294,12 +306,20 @@ function stageFrame() {
   };
 }
 
+/** Apply the full-disk display mirror to a point in preview pixels. */
+function mirrorDiskPoint(ix, iy) {
+  if (state.diskMirror === 'horizontal') return { x: DISK.width - ix, y: iy };
+  if (state.diskMirror === 'vertical') return { x: ix, y: DISK.height - iy };
+  return { x: ix, y: iy };
+}
+
 /** Image pixels (on the preview) -> overlay device pixels. */
 function imageToOverlay(ix, iy) {
   const f = stageFrame();
   const { zoom, panX, panY } = diskTransform();
-  const bx = ix * f.stageW / Math.max(1, DISK.width);
-  const by = iy * f.stageH / Math.max(1, DISK.height);
+  const shown = mirrorDiskPoint(ix, iy);
+  const bx = shown.x * f.stageW / Math.max(1, DISK.width);
+  const by = shown.y * f.stageH / Math.max(1, DISK.height);
   const cssX = (bx - f.stageW / 2) * zoom + f.stageW / 2 + panX + f.offsetX;
   const cssY = (by - f.stageH / 2) * zoom + f.stageH / 2 + panY + f.offsetY;
   const scale = OVERLAY.width / f.bodyW;
@@ -485,6 +505,24 @@ function setMirrorMode(mode) {
     const button = $(id);
     if (button) button.setAttribute('aria-pressed', String(wanted === value));
   }
+}
+
+/** Which way the full-disk preview is mirrored.  Mutually exclusive. */
+function diskMirrorMode() {
+  return state.diskMirror === 'horizontal' || state.diskMirror === 'vertical'
+    ? state.diskMirror : 'none';
+}
+
+function setDiskMirrorMode(mode) {
+  state.diskMirror = mode === 'horizontal' || mode === 'vertical' ? mode : 'none';
+  for (const [id, value] of [['disk-mirror-h', 'horizontal'],
+                             ['disk-mirror-v', 'vertical']]) {
+    const button = $(id);
+    if (button) button.setAttribute('aria-pressed', String(state.diskMirror === value));
+  }
+  // The preview is now a server-side mirrored render, so ask for a fresh one.
+  if (typeof refreshDisk === 'function') refreshDisk();
+  else drawDisk();
 }
 
 function orientation() {
@@ -766,7 +804,7 @@ const PROC_FIELDS = [
 const LABEL_FIELDS = [
   'label-density', 'label-font', 'label-language', 'label-colour', 'label-shadow',
   'label-lock', 'label-overlap', 'label-region', 'label-satellites',
-  'label-crater-suffix',
+  'label-crater-suffix', 'label-crater-emphasis',
   'text-bold', 'text-color', 'text-stroke', 'text-stroke-width',
   'marker-stroke', 'marker-stroke-width',
   'outline-style', 'outline-width', 'outline-color',
@@ -957,6 +995,7 @@ function setWhenField(value) {
 /** 同步设备时间: the instant now, in the time zone the field beside it names. */
 function syncDeviceTime() {
   setWhenField(wallClockNow());
+  state.timeMode = 'now';
   const offset = Number($('tz').value) || 0;
   setStatus(`已同步设备时间：${$('when').value}（UTC${offset >= 0 ? '+' : ''}${offset}）`);
 }
@@ -2404,6 +2443,8 @@ function drawDisk() {
     // caught by it -- and the canvas a save is composed from is not this one.
     const smooth = diskSmoothPx();
     ctx.filter = smooth > 0 ? `blur(${smooth}px)` : 'none';
+    // The render itself was mirrored from the camera basis; do not flip the
+    // preview again here.
     ctx.drawImage(state.diskImage, 0, 0, DISK.width, DISK.height);
     ctx.filter = 'none';
   }
@@ -3776,8 +3817,8 @@ function drawSelection() {
   // the picture is magnified.
   const px = dpr;
   const centre = imageToOverlay(box.centre.x, box.centre.y);
-  const halfW = imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x;
-  const halfH = imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y;
+  const halfW = Math.abs(imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x);
+  const halfH = Math.abs(imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y);
   const corrected = selectionCorrected();
   const ellipse = selectionEllipse();
   const boundary = ellipse
@@ -4152,7 +4193,10 @@ function labelScreenFontPx(viewName) {
   // default short side.  The close-up panes keep the old scale.
   const factor = viewName === 'disk' ? 0.01785 : 0.021;
   const floor = viewName === 'disk' ? 9 : 10;
-  return Math.max(floor, Math.min(28, Math.round(short * factor)));
+  // 1.7.6: the fitted size comes down two points.  The layout is in these
+  // units, so every caption shrinks together and the avoidance pass sees the
+  // smaller boxes it is actually drawing.
+  return Math.max(floor, Math.min(28, Math.round(short * factor) - 2));
 }
 
 /** The same size in the frame's pixels, which is what the server lays out in. */
@@ -4389,8 +4433,11 @@ function smoothOutlinePath(points, passes = 2) {
  * stops a rille traced from east to west from carrying its name backwards.
  */
 function paintTextAlongPath(ctx, item, fontPx, colour, strokeWidth, strokeColor, viewName) {
-  if (!item.outline_path || item.outline_path.length < 2) return false;
-  let points = smoothOutlinePath(item.outline_path, 2);
+  // 山脉名称跟轮廓内部的中线，而不是外圈；月溪/山脊仍沿自己的轨迹。
+  const textSource = (item.text_path && item.text_path.length >= 2)
+    ? item.text_path : item.outline_path;
+  if (!textSource || textSource.length < 2) return false;
+  let points = smoothOutlinePath(textSource, 2);
   const chars = Array.from(String(item.label || ''));
   if (!chars.length) return false;
   const spacing = Math.max(0.8, fontPx * 0.12);
@@ -4468,12 +4515,25 @@ function paintTextAlongPath(ctx, item, fontPx, colour, strokeWidth, strokeColor,
 
   const forward = measurePath(points);
   const backward = measurePath(points.slice().reverse());
-  const forwardChoice = bestWindow(forward);
-  const backwardChoice = bestWindow(backward);
-  const chosen = backwardChoice && (!forwardChoice
-    || backwardChoice.score > forwardChoice.score + 1e-6)
-    ? backward : forward;
-  const choice = chosen === forward ? forwardChoice : backwardChoice;
+  // 线状地貌按轮廓两端的坐标定一个阅读方向：从西端点到东端点。若画面
+  // 东西翻转（望远镜视），再翻回来让整段字保持从左到右；闭合轮廓没有
+  // 端点，仍挑最平直的一段。无论哪种，整段只用一个朝向，不再逐字翻转。
+  let chosen;
+  let choice;
+  if (item.text_closed) {
+    const forwardChoice = bestWindow(forward);
+    const backwardChoice = bestWindow(backward);
+    chosen = backwardChoice && (!forwardChoice
+      || backwardChoice.score > forwardChoice.score + 1e-6)
+      ? backward : forward;
+    choice = chosen === forward ? forwardChoice : backwardChoice;
+  } else {
+    chosen = item.text_forward === false ? backward : forward;
+    if (chosen.path[0][0] > chosen.path[chosen.path.length - 1][0]) {
+      chosen = chosen === forward ? backward : forward;
+    }
+    choice = bestWindow(chosen);
+  }
   if (!choice) return false;
   points = chosen.path;
   const cumulative = chosen.cumulative;
@@ -4489,7 +4549,7 @@ function paintTextAlongPath(ctx, item, fontPx, colour, strokeWidth, strokeColor,
   let start = choice.start + shift * range;
   const firstPoint = points[0];
   const lastPoint = points[points.length - 1];
-  const loop = !!item.outline_closed
+  const loop = !!item.outline_closed || !!item.text_closed
     || Math.hypot(lastPoint[0] - firstPoint[0],
                   lastPoint[1] - firstPoint[1]) < length * 0.18;
   if (loop) start = ((start % range) + range) % range;
@@ -4537,9 +4597,10 @@ function paintTextAlongPath(ctx, item, fontPx, colour, strokeWidth, strokeColor,
   ctx.textBaseline = 'middle';
   chars.forEach((char, index) => {
     const spot = spots[index];
-    let angle = spot.angle;
-    if (angle > Math.PI / 2) angle -= Math.PI;
-    else if (angle < -Math.PI / 2) angle += Math.PI;
+    // One orientation for the whole run: no per-character ±180° flip.  A
+    // caption dragged past a bend therefore cannot turn upside down glyph by
+    // glyph; it keeps the direction the western/eastern endpoints chose.
+    const angle = spot.angle;
     ctx.save();
     ctx.translate(spot.x, spot.y);
     ctx.rotate(angle);
@@ -4683,7 +4744,8 @@ function paintLabels(ctx, plan, style) {
       // 显示线状地貌轮廓: open paths are the rilles and ridges; closed rings
       // are area outlines and stay under the 轮廓 switch alone.
       if (ink.linearOutlines === false && !item.outline_closed) continue;
-      if (ink.mountainOutlines === false && item.class === 'mons') continue;
+      if (ink.mountainOutlines === false
+          && (item.class === 'mons' || item.class === 'dorsum')) continue;
       if (!item.outline_path || item.outline_path.length < 2) continue;
       if (isSatelliteMember(item)) continue;
       ctx.globalAlpha = alphaFor(item);
@@ -4696,7 +4758,8 @@ function paintLabels(ctx, plan, style) {
       // 显示线状地貌轮廓: open paths are the rilles and ridges; closed rings
       // are area outlines and stay under the 轮廓 switch alone.
       if (ink.linearOutlines === false && !item.outline_closed) continue;
-      if (ink.mountainOutlines === false && item.class === 'mons') continue;
+      if (ink.mountainOutlines === false
+          && (item.class === 'mons' || item.class === 'dorsum')) continue;
       if (!item.outline_path || item.outline_path.length < 2) continue;
       if (isSatelliteMember(item)) continue;
       ctx.globalAlpha = alphaFor(item);
@@ -4752,8 +4815,13 @@ function paintLabels(ctx, plan, style) {
     // the parent reads first without a second legend.  The plan box stays
     // where it was laid out; only the glyphs move within it.
     const satellite = item.class === 'crater' && isSatelliteCraterName(item.name_en);
-    const itemFont = fontPx + (item.class === 'mare' ? 2 : 0)
-      + (item.class === 'crater' ? (satellite ? -0.5 : 1) : 0);
+    // The plan now carries a per-item size for crater captions (字号强调).
+    // A mare keeps the extra two points the page has always given it; other
+    // classes use the plan's base size.
+    const itemFont = (Number(item.font_px) > 0 ? Number(item.font_px) : fontPx)
+      + (item.class === 'mare' ? 2 : 0);
+    const itemStroke = ink.strokeWidth === undefined
+      ? itemFont * 0.10 : ink.strokeWidth;
     let textColour = colour;
     if (!item.highlight && !item.manual && !ink.uniform
         && item.class === 'crater' && !satellite) {
@@ -4776,7 +4844,7 @@ function paintLabels(ctx, plan, style) {
     // laid out is still what reserves space in the avoidance pass.
     if (ink.textFollow && TEXT_FOLLOW_CLASSES.has(item.class)
         && item.outline_path && item.outline_path.length >= 2
-        && paintTextAlongPath(ctx, item, itemFont, textColour, strokeWidth, strokeColor, ink.textView)) {
+        && paintTextAlongPath(ctx, item, itemFont, textColour, itemStroke, strokeColor, ink.textView)) {
       continue;
     }
     if (item.leader) {
@@ -4795,15 +4863,15 @@ function paintLabels(ctx, plan, style) {
         // A hairline: the leader only has to say "this name belongs to that
         // dot".  At the old width it read as a stroke in its own right, and
         // the shadow under it doubled that.
-        ctx.lineWidth = Math.max(screenPx(0.8), fontPx * 0.032);
+        ctx.lineWidth = Math.max(screenPx(0.8), itemFont * 0.032);
         ctx.shadowColor = 'rgba(12, 14, 20, .7)';
-        ctx.shadowBlur = Math.max(screenPx(1.0), fontPx * 0.08);
+        ctx.shadowBlur = Math.max(screenPx(1.0), itemFont * 0.08);
         ctx.stroke();
         ctx.restore();
       }
     }
-    if (strokeWidth > 0) {
-      ctx.lineWidth = strokeWidth * (itemFont / fontPx);
+    if (itemStroke > 0) {
+      ctx.lineWidth = itemStroke;
       ctx.strokeStyle = strokeColor;
       ctx.strokeText(item.label, left + 3, midY);
     }
@@ -5645,6 +5713,13 @@ function mirroredPlan(plan, mode) {
       label_y: item.label_y === null ? null
         : (mode === 'vertical' ? h - (item.label_y + item.label_h) : item.label_y),
       outline: item.outline ? item.outline.map(([ox, oy]) => flip(ox, oy)) : null,
+      // The painted rim and the along-path caption are separate from the
+      // anchor: leave them untouched and a mirrored save keeps the rille's
+      // outline and its text on the old side of the picture.
+      outline_path: item.outline_path
+        ? item.outline_path.map(([ox, oy]) => flip(ox, oy)) : null,
+      text_path: item.text_path
+        ? item.text_path.map(([ox, oy]) => flip(ox, oy)) : null,
     };
   });
   return { ...plan, items };
@@ -5675,9 +5750,15 @@ function frameOrientation() {
 function planFor(viewName) {
   const plan = applyLabelEdits(state.labels[viewName === 'disk' ? 'disk' : 'region'],
                               viewName);
-  // Only 后期处理 carries the orientation; 高分辨率模拟 is the frame itself.
-  if (!plan || viewName !== 'proc') return plan;
-  return mirroredPlan(plan, frameOrientation().mirror);
+  if (!plan) return plan;
+  // One orientation for the whole page: the full disk's mirror also applies
+  // to the two close-ups and their names.
+  if (viewName === 'disk' || viewName === 'raw') {
+    return mirroredPlan(plan, state.diskMirror);
+  }
+  if (viewName !== 'proc') return plan;
+  const proc = mirroredPlan(plan, frameOrientation().mirror);
+  return mirroredPlan(proc, state.diskMirror);
 }
 
 /** The close-ups' own 地貌 switch: the checkbox in the save row.
@@ -7507,7 +7588,7 @@ function overlayUp() {
  * removes is in the render, and the names must not be caught by it.
  */
 function composeImage(source, width, height, plan, style, orientation, marks, lens,
-                      smooth = 0) {
+                      smooth = 0, imageMirror = 'none') {
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(width));
   canvas.height = Math.max(1, Math.round(height));
@@ -7520,8 +7601,22 @@ function composeImage(source, width, height, plan, style, orientation, marks, le
   const scale = canvas.width / Math.max(1, picture.width);
   ctx.imageSmoothingEnabled = scale < 1;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(picture, 0, 0, picture.width, picture.height, 0, 0,
-    canvas.width, canvas.height);
+  if (imageMirror === 'horizontal' || imageMirror === 'vertical') {
+    ctx.save();
+    if (imageMirror === 'horizontal') {
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+    } else {
+      ctx.translate(0, canvas.height);
+      ctx.scale(1, -1);
+    }
+    ctx.drawImage(picture, 0, 0, picture.width, picture.height, 0, 0,
+      canvas.width, canvas.height);
+    ctx.restore();
+  } else {
+    ctx.drawImage(picture, 0, 0, picture.width, picture.height, 0, 0,
+      canvas.width, canvas.height);
+  }
   const hasPlan = plan && plan.items && plan.items.length;
   // *lens* is the eyepiece: applied last, over the picture and over the names,
   // because it is the glass the reader is looking through.  The full disk has
@@ -7678,9 +7773,15 @@ function savedImageBlob(target, callback) {
     marks: wantMarks,
     occultation: wantOccultation,
   } : null;
+  // planFor() already carries both the close-up's own mirror and the page-wide
+  // full-disk mirror.  Keep the processing rotation here, but do not mirror the
+  // plan a second time; only the pixels still need the page-wide flip.
+  const exportOrientation = target === 'proc'
+    ? { rotation: frameOrientation().rotation, mirror: 'none' } : null;
+  const exportMirror = target === 'raw' || target === 'proc'
+    ? state.diskMirror : 'none';
   const canvas = composeImage(source, wanted.width, wanted.height, plan,
-    style, target === 'proc' ? frameOrientation() : null,
-    marks, target === 'proc');
+    style, exportOrientation, marks, target === 'proc', 0, exportMirror);
   callback(canvasBlob(canvas, format), format);
 }
 
@@ -7696,6 +7797,90 @@ function diskComponent() {
   return box && !box.checked ? 'sunlit' : 'image';
 }
 
+/** The full disk at the current physical resolution, without a file cap.
+ *
+ * The save row's 原始分辨率 means "hand over the preview".  This button means
+ * "use the physical scale the simulation is set to", so a 0.118 km/px setting
+ * produces a ~31k px frame rather than the preview's 1200.  That is deliberate:
+ * the confirmation dialog is the guard, not a hidden pixel ceiling.
+ */
+function diskGenerateWidth() {
+  // Read the physical resolution the reader has chosen.  It is deliberately
+  // not capped: 0.118 km/px over the lunar disk is ~31k px, and a finer patch
+  // may ask for more.  "同步全月面" naturally resolves to the preview scale.
+  const kmpx = num('out-kmpx') || LIMITS.terrain_km_per_px || 0.118;
+  const distance = (state.geometry && state.geometry.distance_km) || 384400;
+  const angular = (state.geometry && state.geometry.angular_diameter_deg) || 0.52;
+  const fraction = (state.geometry && state.geometry.disk_radius_fraction)
+    ? Math.max(0.05, Math.min(1, 2 * state.geometry.disk_radius_fraction))
+    : 0.94;
+  const diskDiameterPx = angular * 3600 * distance
+    / Math.max(1e-9, kmpx * 206264.806);
+  return Math.max(64, Math.round(diskDiameterPx / fraction));
+}
+
+function setFullDiskGenerateBusy(busy) {
+  state.diskGenerateBusy = busy;
+  const button = $('disk-generate-full');
+  if (!button) return;
+  button.textContent = busy ? '终止' : '使用当前设置生成全月面';
+  button.title = busy ? '终止生成并清理临时文件' : '按当前全月面设置生成一张完整月面';
+}
+
+/** Generate the whole disk at its native scale and save it directly.
+ *
+ * This deliberately does not touch the full-disk preview: it is a file
+ * export, and replacing the preview with a 30k-pixel frame would freeze the
+ * page for no reason.  While it runs the same button becomes 终止.
+ */
+async function generateFullDisk() {
+  if (state.diskGenerateBusy) {
+    if (state.diskGenerateAbort) state.diskGenerateAbort.abort();
+    setStatus('正在终止全月面生成…', 'busy');
+    return;
+  }
+  const width = diskGenerateWidth();
+  const controller = new AbortController();
+  state.diskGenerateAbort = controller;
+  setFullDiskGenerateBusy(true);
+  try {
+    await saveDisk({ width, uncapped: true, signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      setStatus('已终止全月面生成');
+    }
+  } finally {
+    if (state.diskGenerateAbort === controller) {
+      state.diskGenerateAbort = null;
+      setFullDiskGenerateBusy(false);
+    }
+    // A cancelled native-scale render must not leave a huge cached export.
+    if (controller.signal.aborted) {
+      state.diskExport = null;
+      state.diskHdr = null;
+    }
+  }
+}
+
+function openDiskGenerateConfirm() {
+  const modal = $('disk-generate-modal');
+  const copy = $('disk-generate-copy');
+  if (!modal) return;
+  const width = diskGenerateWidth();
+  if (copy) {
+    copy.textContent = `将以 ${width} × ${width} px 生成完整月面。`
+      + '这会按当前设置重新渲染，可能占用较多 CPU 与内存。';
+  }
+  modal.hidden = false;
+  const confirm = $('disk-generate-confirm');
+  if (confirm && confirm.focus) confirm.focus();
+}
+
+function closeDiskGenerateConfirm() {
+  const modal = $('disk-generate-modal');
+  if (modal) modal.hidden = true;
+}
+
 /** 保存图像: render the disk at *its own* resolution, then save it.
  *
  * The full disk used to leave through the close-up's save pane, which meant its
@@ -7704,7 +7889,7 @@ function diskComponent() {
  * cached: pressing save twice on the same instant and size costs one render, not
  * two.  Nothing else on the page is touched -- the preview keeps its own, much
  * smaller, size. */
-async function saveDisk() {
+async function saveDisk(options = {}) {
   const when = whenPayload();
   const light = lightPayload();
   const compute = computePayload();
@@ -7713,15 +7898,23 @@ async function saveDisk() {
   // 原始分辨率 hands over the preview itself.  HDR and the 地照 split need a
   // fresh render (the preview carries neither gain map nor separated light),
   // so those two fall back to the ordinary path.
-  const native = nativeSaveWanted('disk-preset')
+  const requestedWidth = Number(options.width);
+  const uncapped = !!options.uncapped;
+  const native = !Number.isFinite(requestedWidth)
+    && nativeSaveWanted('disk-preset')
     && !!state.diskImage && !hdr && component === 'image';
-  const width = native ? state.diskImage.width : diskPixels();
-  if (!native) $('disk-px').value = String(width);
+  const width = Number.isFinite(requestedWidth) && requestedWidth >= 1
+    ? Math.round(requestedWidth)
+    : (native ? state.diskImage.width : diskPixels());
+  if (!native && !Number.isFinite(requestedWidth)) {
+    $('disk-px').value = String(width);
+  }
   // The cache key is every input the render depends on -- the moment, the size,
   // the light and the compute budget.  Keying only on the moment used to mean
   // that switching the Earth off and pressing save handed back the *old*
   // preview's bytes, because "nothing had changed".
-  const key = JSON.stringify([width, when, light, compute, component, hdr]);
+  const key = JSON.stringify([width, when, light, compute, component, hdr,
+    uncapped, state.diskMirror]);
   let source = native
     ? {
       key: 'native',
@@ -7738,12 +7931,14 @@ async function saveDisk() {
     try {
       const payload = await post('/api/disk', {
         when,
+        mirror: state.diskMirror,
         ...light,
         ...compute,
         component,
         ...(hdr ? { hdr } : {}),
+        ...(uncapped ? { uncapped: true } : {}),
         preview: { width, samples: 1, shadow_steps: 64 },
-      });
+      }, options.signal);
       finishRenderProgress(progress, width * width, 1, `${width}×${width} px`);
       source = {
         key, url: payload.image, image: await loadImage(payload.image),
@@ -7791,7 +7986,7 @@ async function saveDisk() {
   let centred = null;
   let shift = null;
   if ($('disk-centre-lit').checked && !annotate && !wantMarks
-      && !wantOccultation) {
+      && !wantOccultation && state.diskMirror === 'none') {
     const fraction = source.geometry && source.geometry.disk_radius_fraction;
     const centre = litCentre(source.image, fraction);
     if (centre) {
@@ -7814,7 +8009,8 @@ async function saveDisk() {
     return;
   }
   if (!centred && !annotate && !wantMarks && !wantOccultation && !hdr
-      && !smooth && format.type === 'image/png' && source.url) {
+      && !smooth && state.diskMirror === 'none'
+      && format.type === 'image/png' && source.url) {
     // Nothing to draw on it: the render *is* the file, at full resolution and
     // without passing through a canvas that a 10 000 px picture may not fit in.
     downloadUrl(source.url, name);
@@ -7848,6 +8044,7 @@ async function saveDisk() {
       plan = fitPlanToFrame(plan, width, width);
       plan = withManualPlan(plan, 'disk', { ...style, fontPx: exportFont },
                             width, width);
+      plan = mirroredPlan(plan, state.diskMirror);
     }
     const canvas = centred || composeImage(source.image, width, width, plan,
       style, null,
@@ -7855,7 +8052,7 @@ async function saveDisk() {
         fontPx: plan ? plan.font_px : exportFont,
         marks: wantMarks,
         occultation: wantOccultation,
-      } : null, false, smooth);
+      } : null, false, smooth, 'none');
     if (hdr) {
       // The gain map comes from the render that made this frame.  If it is not
       // here, say *that* rather than posting a request the server can only
@@ -8091,8 +8288,20 @@ function magnifierView(availW, availH) {
   // mismatch used to shift the window onto a different part of the Moon; the
   // ratio costs one division and removes the class of bug.
   const ratio = source && DISK.width ? source.width / DISK.width : 1;
-  const centreX = box ? box.centre.x * ratio : (source ? source.width / 2 : 0);
-  const centreY = box ? box.centre.y * ratio : (source ? source.height / 2 : 0);
+  let centreX = box ? box.centre.x * ratio : (source ? source.width / 2 : 0);
+  let centreY = box ? box.centre.y * ratio : (source ? source.height / 2 : 0);
+  // The preview bitmap is already mirrored by the renderer.  The selection is
+  // stored in the unmirrored sky frame, so its centre has to be mirrored into
+  // the bitmap's coordinates before the crop is taken.  A mirror also reverses
+  // the apparent roll of the box.
+  let rotation = box ? box.rotation : 0;
+  if (source && state.diskMirror === 'horizontal') {
+    centreX = (source.width - 1) - centreX;
+    rotation = -rotation;
+  } else if (source && state.diskMirror === 'vertical') {
+    centreY = (source.height - 1) - centreY;
+    rotation = -rotation;
+  }
   let halfW = box ? box.halfW * ratio : Math.max(1, (source ? source.width : availW) / 2);
   let halfH = box ? box.halfH * ratio : Math.max(1, (source ? source.height : availH) / 2);
   // A corrected rectangle's *selection* is the irregular preimage of the ground
@@ -10245,6 +10454,7 @@ function syncSkyTimeToMain() {
   const zone = Number.isFinite(offset) ? offset : 0;
   $('when').value = local;
   $('tz').value = (zone >= 0 ? '+' : '') + String(zone);
+  state.timeMode = 'manual';
   autoRefresh();
   setStatus(`主界面时间已同步为 ${local.replace('T', ' ')}（UTC`
     + `${zone >= 0 ? '+' : ''}${zone}）`);
@@ -13726,6 +13936,7 @@ function syncExperimentTimeToMain() {
   const offset = Number($('tz').value) || 0;
   $('when').value = new Date(stamp + offset * 3600000)
     .toISOString().slice(0, 16);
+  state.timeMode = 'manual';
   autoRefresh();
   setStatus(`主界面时间已同步为 ${experimentLocalText(row)}（选中行）`);
 }
@@ -14101,10 +14312,10 @@ function autoRefreshExperiment() {
 
 /** Switch the window between its tabs. */
 function setExperimentTab(tab) {
-  const next = ['sun', 'calc', 'naked'].includes(tab) ? tab : 'sun';
+  const next = ['sun', 'calc', 'birthday', 'naked'].includes(tab) ? tab : 'sun';
   state.experimentTab = next;
   state.nakedEyeOpen = next === 'naked';
-  for (const name of ['sun', 'calc', 'naked']) {
+  for (const name of ['sun', 'calc', 'birthday', 'naked']) {
     const button = $('experiment-tab-' + name);
     if (!button) continue;
     const on = name === next;
@@ -14112,18 +14323,285 @@ function setExperimentTab(tab) {
     button.setAttribute('aria-pressed', String(on));
     button.classList.toggle('active', on);
   }
-  for (const name of ['sun', 'calc', 'naked']) {
+  for (const name of ['sun', 'calc', 'birthday', 'naked']) {
     const pane = $('experiment-pane-' + name);
     if (pane) pane.hidden = name !== next;
   }
   if ($('experiment-reset-view')) $('experiment-reset-view').hidden = next !== 'sun';
   if ($('experiment-badge')) {
     $('experiment-badge').textContent = next === 'sun' ? '月面点'
-      : next === 'calc' ? '计算器' : '裸眼3D';
+      : next === 'calc' ? '计算器'
+        : next === 'birthday' ? '生日月亮' : '裸眼3D';
   }
   if (next === 'calc') initCalculatorFields();
+  if (next === 'birthday') {
+    resizeExperimentForBirthday();
+    initBirthdayPane();
+  }
   if (next === 'naked') initNakedEyePane();
   if (next === 'sun') autoRefreshExperiment();
+}
+
+/** The birthday tab's date, in the page's local wall clock. */
+const BIRTHDAY_INFO_ROWS = [
+  ['mi-phase-name', '月相', 'Phase'],
+  ['mi-illum', '照亮比例', 'Illumination'],
+  ['mi-phase', '相位角', 'Phase angle'],
+  ['mi-age', '月龄', 'Age'],
+  ['mi-lib', '天平动', 'Libration'],
+  ['mi-subsolar', '日下点', 'Sub-solar'],
+  ['mi-colong', '余经度', 'Colongitude'],
+  ['mi-dist-geo', '地心距', 'Geocentric distance'],
+  ['mi-dist-topo', '站心距', 'Topocentric distance'],
+  ['mi-diam', '视直径', 'Angular size'],
+  ['mi-rad', '视半径', 'Angular radius'],
+  ['mi-alt', '高度', 'Altitude'],
+  ['mi-az', '方位角', 'Azimuth'],
+  ['mi-ra', '赤经', 'Right ascension'],
+  ['mi-dec', '赤纬', 'Declination'],
+  ['mi-elong', '与太阳距角', 'Elongation'],
+  ['mi-sunalt', '太阳高度', 'Sun altitude'],
+  ['mi-earth', '地照', 'Earthshine'],
+  ['mi-vel', '速度', 'Velocity'],
+  ['mi-light', '光行时', 'Light time'],
+  ['mi-rise', '月出', 'Moonrise'],
+  ['mi-transit', '中天', 'Transit'],
+  ['mi-transit-alt', '中天高度', 'Transit alt'],
+  ['mi-set', '月落', 'Moonset'],
+  ['mi-nextrise', '下次月出', 'Next rise'],
+];
+
+function buildBirthdayInfo(host, prefix) {
+  if (!host) return;
+  host.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'birthday-info-title';
+  title.textContent = prefix === 'birthday-left-' ? '本次月面' : '相似月面';
+  const readout = document.createElement('div');
+  readout.className = 'birthday-readout';
+  for (const [suffix, zh, en] of BIRTHDAY_INFO_ROWS) {
+    const row = document.createElement('div');
+    row.className = 'birthday-row';
+    const label = document.createElement('span');
+    label.className = 'birthday-label';
+    label.textContent = zh;
+    label.title = en;
+    const value = document.createElement('span');
+    value.className = 'birthday-value';
+    value.id = prefix + suffix;
+    value.textContent = '—';
+    row.append(label, value);
+    readout.appendChild(row);
+  }
+  host.append(title, readout);
+}
+
+function birthdayWhen(dateTime) {
+  return {
+    at: dateTime,
+    tz_offset_hours: Number($('tz').value) || 0,
+    observer: {
+      lat: Number($('birthday-lat').value) || 0,
+      lon: Number($('birthday-lon').value) || 0,
+    },
+  };
+}
+
+function birthdayPreviewWidth() {
+  return clampPx(Number($('birthday-preview-px').value) || 1000, 64, 2000);
+}
+
+function birthdaySmooth() {
+  return Math.max(0, Math.min(4, Number($('birthday-smooth').value) || 0));
+}
+
+async function birthdayPreview(dateTime, target) {
+  if (!dateTime || !target) return;
+  const payload = await post('/api/disk', {
+    when: birthdayWhen(dateTime),
+    earthshine: {
+      on: true,
+      gain: Math.max(0, Number($('birthday-gain').value) || 0),
+      earth_samples: 13,
+    },
+    component: 'image',
+    preview: {
+      width: birthdayPreviewWidth(),
+      samples: Math.max(1, Math.min(3, Number($('birthday-samples').value) || 1)),
+      shadow_steps: 64,
+    },
+  });
+  target.src = payload.image;
+  const blur = birthdaySmooth();
+  target.style.filter = blur > 0 ? `blur(${blur}px)` : '';
+}
+
+async function birthdayInfo(dateTime, prefix) {
+  const payload = await post('/api/moon-report', { when: birthdayWhen(dateTime) });
+  fillMoonInfo(payload.geometry, prefix);
+}
+
+function birthdayStamp(dateTime, target) {
+  if (target) target.textContent = String(dateTime || '—').replace('T', ' ');
+}
+
+async function birthdayShow(index) {
+  const results = state.birthdayResults || [];
+  if (!results.length) return;
+  const at = Math.max(0, Math.min(results.length - 1, Number(index)));
+  state.birthdayIndex = at;
+  const result = results[at];
+  const seq = ++state.birthdaySeq;
+  if ($('birthday-status')) $('birthday-status').textContent = '正在渲染相似月面…';
+  try {
+    await birthdayPreview(result.local_time, $('birthday-right'));
+    await birthdayInfo(result.local_time, 'birthday-right-');
+    if (seq !== state.birthdaySeq) return;
+    birthdayStamp(result.local_time, $('birthday-right-stamp'));
+    if ($('birthday-counter')) {
+      $('birthday-counter').textContent = `${at + 1} / ${results.length}`;
+    }
+    if ($('birthday-status')) {
+      $('birthday-status').textContent = `相似度 ${result.score}`;
+    }
+    if ($('birthday-prev')) $('birthday-prev').disabled = at <= 0;
+    if ($('birthday-next')) $('birthday-next').disabled = at >= results.length - 1;
+  } catch (error) {
+    if ($('birthday-status')) {
+      $('birthday-status').textContent = '相似月相渲染失败：' + String(error.message || error);
+    }
+  }
+}
+
+async function birthdayRun() {
+  const when = $('birthday-when').value;
+  const button = $('birthday-run');
+  if (!when || state.birthdayBusy) return;
+  state.birthdayBusy = true;
+  if (button) { button.disabled = true; button.textContent = '计算中…'; }
+  if ($('birthday-status')) $('birthday-status').textContent = '正在计算相似月面…';
+  try {
+    const reference = await post('/api/moon-report', { when: birthdayWhen(when) });
+    const referenceTime = reference.geometry.when_utc;
+    const payload = await post('/api/birthday', {
+      when: birthdayWhen(when),
+      error: Math.max(0, Number($('birthday-error').value) || 0),
+    });
+    await birthdayPreview(when, $('birthday-left'));
+    fillMoonInfo(reference.geometry, 'birthday-left-');
+    birthdayStamp(when, $('birthday-left-stamp'));
+    state.birthdayResults = payload.results || [];
+    state.birthdayIndex = -1;
+    if (!state.birthdayResults.length) {
+      if ($('birthday-status')) {
+        $('birthday-status').textContent = '误差范围内没有相似月面';
+      }
+      return;
+    }
+    const next = state.birthdayResults.findIndex(
+      (row) => String(row.when_utc) > String(referenceTime));
+    await birthdayShow(next >= 0 ? next : 0);
+  } catch (error) {
+    if ($('birthday-status')) {
+      $('birthday-status').textContent = '计算失败：' + String(error.message || error);
+    }
+  } finally {
+    state.birthdayBusy = false;
+    if (button) { button.disabled = false; button.textContent = '计算'; }
+  }
+}
+
+function birthdaySave(side = 'right') {
+  const left = side === 'left';
+  const image = $(left ? 'birthday-left' : 'birthday-right');
+  if (!image || !image.src) return;
+  const format = $('birthday-format').value === 'jpg' ? 'jpeg' : 'png';
+  const canvas = document.createElement('canvas');
+  const source = new Image();
+  source.onload = () => {
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const ctx = canvas.getContext('2d');
+    const blur = birthdaySmooth();
+    if (blur > 0 && ctx.filter !== undefined) ctx.filter = `blur(${blur}px)`;
+    ctx.drawImage(source, 0, 0);
+    const stamp = $(left ? 'birthday-left-stamp' : 'birthday-right-stamp')
+      .textContent.slice(0, 10);
+    downloadUrl(canvas.toDataURL(`image/${format}`, 0.92),
+      `birthday-${left ? 'left' : 'right'}-${stamp}.${format === 'jpeg' ? 'jpg' : 'png'}`);
+  };
+  source.src = image.src;
+}
+
+function applyBirthdaySplit(side, percent) {
+  const value = Math.max(12, Math.min(42, Number(percent) || 20));
+  if (side === 'left') state.birthdayLeftSplit = value;
+  else state.birthdayRightSplit = value;
+  const body = $('birthday-body');
+  if (body && body.style && body.style.setProperty) {
+    body.style.setProperty(side === 'left' ? '--birthday-left' : '--birthday-right',
+      `${value}%`);
+  }
+}
+
+function birthdaySplitStart(side, event) {
+  const body = $('birthday-body');
+  if (!body) return;
+  if (event.preventDefault) event.preventDefault();
+  state.birthdaySplitDrag = {
+    side,
+    startX: event.clientX || 0,
+    startPercent: side === 'left' ? state.birthdayLeftSplit : state.birthdayRightSplit,
+    width: Math.max(240, body.clientWidth || 900),
+  };
+}
+
+function birthdaySplitMove(event) {
+  const drag = state.birthdaySplitDrag;
+  if (!drag) return;
+  const dx = (event.clientX || 0) - drag.startX;
+  // The right splitter is the right column's left edge: dragging right must
+  // make that column narrower, not wider.
+  const delta = drag.side === 'right' ? -dx : dx;
+  applyBirthdaySplit(drag.side, drag.startPercent + delta / drag.width * 100);
+  if (event.preventDefault) event.preventDefault();
+}
+
+/** Make the window wide enough for two square previews on entry.
+ *
+ * The idle window is sized for the sun chart and can be narrow; two square
+ * previews plus two readable readout columns need a wider layout.  This runs
+ * only when the tab is opened, so a size the reader chose later is kept.
+ */
+function resizeExperimentForBirthday() {
+  const box = experimentWindowBox();
+  const maxWidth = Math.min(1180, Math.max(320, box.viewportWidth - 16));
+  const maxHeight = Math.min(760, Math.max(280, box.viewportHeight - 16));
+  const width = Math.min(maxWidth, Math.max(900, maxWidth * 0.92));
+  const height = Math.min(maxHeight, Math.max(580, maxHeight * 0.92));
+  applyExperimentWindow({
+    left: Math.round((box.viewportWidth - width) / 2),
+    top: Math.round((box.viewportHeight - height) / 2),
+    width: Math.round(width),
+    height: Math.round(height),
+  });
+}
+
+function initBirthdayPane() {
+  const main = $('when').value || wallClockNow();
+  if ($('birthday-when') && !$('birthday-when').value) {
+    $('birthday-when').value = main.slice(0, 16);
+  }
+  if ($('birthday-lat') && !$('birthday-lat').value) $('birthday-lat').value = $('lat').value || '30';
+  if ($('birthday-lon') && !$('birthday-lon').value) $('birthday-lon').value = $('lon').value || '120';
+  if ($('birthday-left-info') && !$('birthday-left-info').children.length) {
+    buildBirthdayInfo($('birthday-left-info'), 'birthday-left-');
+  }
+  if ($('birthday-right-info') && !$('birthday-right-info').children.length) {
+    buildBirthdayInfo($('birthday-right-info'), 'birthday-right-');
+  }
+  applyBirthdaySplit('left', state.birthdayLeftSplit);
+  applyBirthdaySplit('right', state.birthdayRightSplit);
 }
 
 async function refreshExperiment() {
@@ -14604,6 +15082,7 @@ function syncCalculatorTimeToMain() {
   const offset = Number($('tz').value) || 0;
   $('when').value = new Date(stamp + offset * 3600 * 1000)
     .toISOString().slice(0, 16);
+  state.timeMode = 'manual';
   autoRefresh();
   setStatus(`主界面时间已同步为 ${calculatorLocalText(row.when_utc, offset)}（选中行）`);
 }
@@ -15798,6 +16277,7 @@ function labelRequestBase(viewName) {
     satellite: satelliteMode(),
     satellites: satellitesWanted(),
     crater_suffix: craterSuffixWanted(),
+    crater_emphasis: Number($('label-crater-emphasis').value) || 0,
     avoid_overlap: !(overlap && overlap.checked),
     focus: focusPayload()
       || (viewName === 'disk' ? viewFocusPayload() : null),
@@ -16186,7 +16666,10 @@ function diskPixelPoint(event) {
   const cssY = event.clientY - body.top - f.offsetY;
   const bx = (cssX - panX - f.stageW / 2) / zoom + f.stageW / 2;
   const by = (cssY - panY - f.stageH / 2) / zoom + f.stageH / 2;
-  return { x: bx * DISK.width / f.stageW, y: by * DISK.height / f.stageH };
+  // Selection geometry is stored in the unmirrored frame; undo the display
+  // mirror here so dragging and hit-testing still match the drawn box.
+  return mirrorDiskPoint(bx * DISK.width / f.stageW,
+                         by * DISK.height / f.stageH);
 }
 
 /** Pointer -> preview-image pixels, in the frame the selection maths uses.
@@ -16538,8 +17021,8 @@ function hitTest(p) {
   if (!box) return null;
   const dpr = window.devicePixelRatio || 1;
   const centre = imageToOverlay(box.centre.x, box.centre.y);
-  const halfW = imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x;
-  const halfH = imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y;
+  const halfW = Math.abs(imageToOverlay(box.halfW, 0).x - imageToOverlay(0, 0).x);
+  const halfH = Math.abs(imageToOverlay(0, box.halfH).y - imageToOverlay(0, 0).y);
   const here = imageToOverlay(p.x, p.y);
 
   const gap = HANDLE_GAP * dpr;
@@ -16798,6 +17281,7 @@ async function refreshDisk() {
     const payload = await post('/api/disk', {
       when,
       preempt: true,
+      mirror: state.diskMirror,
       ...lightPayload(),
       ...computePayload(),
       preview: {
@@ -16965,6 +17449,31 @@ function syncKmPxPresets() {
       syncOutputScale('kmpx');
     }
   }
+  // The limit row carries the measured floor (0.0592 under SLDEM, 0.1185
+  // under LOLA), so it has to move when the number changes.  Keep the two
+  // non-numeric rows at the ends and sort the resolutions numerically.
+  const rows = [...select.options];
+  const first = rows.filter((option) => option.value === 'disk');
+  const last = rows.filter((option) => option.value === 'custom');
+  const middle = rows.filter((option) => option.value !== 'disk'
+    && option.value !== 'custom').sort((left, right) => {
+    const a = Number(left.value), b = Number(right.value);
+    return (Number.isFinite(a) ? a : Infinity) - (Number.isFinite(b) ? b : Infinity);
+  });
+  // innerHTML, not textContent: both clear a real <select>, but only the
+  // former also clears the test harness's option list, and the sort has to be
+  // observable there as well as in a browser.  Build fresh <option> nodes so
+  // they are real children, not just values in the old option array.
+  const selectedValue = select.value;
+  select.innerHTML = '';
+  for (const option of [...first, ...middle, ...last]) {
+    const copy = document.createElement('option');
+    copy.value = option.value;
+    copy.textContent = option.textContent;
+    copy.disabled = !!option.disabled;
+    select.appendChild(copy);
+  }
+  select.value = selectedValue;
   // A preset that was legal under a patch (0.06 km/px) is not legal under the
   // 118 m global source.  Fall back to 同步全月面 rather than leaving a
   // disabled row selected, which reads as a control that stopped working.
@@ -17184,36 +17693,27 @@ function updateDataSourceNote() {
 
 /* ── 星历 ─────────────────────────────────────────────────────────────────
  *
- * Three choices, one menu: DE440, DE441, or a local .bsp already in kernels/.
- * The switch reloads the kernel pool in the server and drops its cached views;
- * the page then re-renders so the picture and every readout use the new one.
+ * One menu, filled from the kernels/ directory by the server.  A standard
+ * ephemeris is a mode; any other .bsp is a file choice.  There is no separate
+ * "custom" switch to reveal a second menu.
  */
-function syncEphemerisFileMenu() {
-  const mode = $('ephemeris-mode');
-  const file = $('ephemeris-file');
-  if (!mode || !file) return;
-  file.hidden = mode.value !== 'custom';
-}
-
 function paintEphemeris(payload) {
   if (!payload) return;
   state.ephemeris = payload;
-  const mode = $('ephemeris-mode');
-  const file = $('ephemeris-file');
+  const select = $('ephemeris-mode');
   const note = $('ephemeris-note');
-  if (!mode || !file) return;
-  mode.value = ['recent', 'long', 'custom'].includes(payload.mode)
-    ? payload.mode : 'recent';
-  file.innerHTML = '';
-  file.options.length = 0;
-  for (const choice of payload.choices || []) {
+  if (!select) return;
+  select.innerHTML = '';
+  for (const choice of payload.available || []) {
     const option = document.createElement('option');
-    option.value = choice.name;
-    option.textContent = choice.name;
-    file.appendChild(option);
+    option.value = choice.id;
+    option.textContent = choice.label;
+    select.appendChild(option);
   }
-  if (payload.file) file.value = payload.file;
-  syncEphemerisFileMenu();
+  const current = payload.mode === 'custom' && payload.file
+    ? `file:${payload.file}` : payload.mode;
+  const values = [...select.options].map((option) => option.value);
+  select.value = values.includes(current) ? current : (values[0] || '');
   if (note) {
     note.textContent = payload.label
       + (payload.file ? ` · ${payload.file}` : '');
@@ -17233,19 +17733,19 @@ async function loadEphemeris() {
   }
 }
 
+let ephemerisApplying = false;
+
 async function applyEphemeris() {
-  const mode = $('ephemeris-mode').value;
-  const file = $('ephemeris-file').value;
-  const button = $('ephemeris-apply');
-  if (mode === 'custom' && !file) {
-    setStatus('kernels 目录里没有可用的自定义 .bsp', 'error');
-    return;
-  }
-  if (button) { button.disabled = true; button.textContent = '重载中…'; }
+  if (ephemerisApplying) return;
+  const select = $('ephemeris-mode');
+  const choice = ((state.ephemeris && state.ephemeris.available) || [])
+    .find((entry) => entry.id === (select && select.value));
+  if (!choice) return;
+  ephemerisApplying = true;
   setStatus('正在切换星历并重载内核…', 'busy');
   try {
     const payload = await post('/api/ephemeris', {
-      mode, file: mode === 'custom' ? file : null,
+      mode: choice.mode, file: choice.file,
     });
     paintEphemeris(payload);
     setStatus(`星历已切换为 ${payload.label}${payload.file ? ' · ' + payload.file : ''}`);
@@ -17253,8 +17753,13 @@ async function applyEphemeris() {
   } catch (error) {
     setStatus('星历切换失败：' + String(error.message || error), 'error');
   } finally {
-    if (button) { button.disabled = false; button.textContent = '切换'; }
+    ephemerisApplying = false;
   }
+}
+
+/** Choosing an ephemeris is the whole action: there is no separate 切换. */
+function ephemerisChanged() {
+  applyEphemeris();
 }
 
 /* ── 重新构建金字塔 ───────────────────────────────────────────────────────
@@ -17272,10 +17777,10 @@ function paintTerrainRebuild(status) {
   if (!button || !note) return;
   const running = !!(status && status.running);
   const failed = !!(status && status.error);
+  const pct = Math.round((Number(status && status.fraction) || 0) * 100);
   button.disabled = running;
-  button.textContent = running ? '正在重建…' : '重新构建金字塔';
+  button.textContent = running ? `重建 ${pct}%` : '重新构建';
   if (running) {
-    const pct = Math.round((Number(status.fraction) || 0) * 100);
     note.textContent = `${pct}% ${status.message || ''}`.trim();
   } else if (failed) {
     note.textContent = status.error;
@@ -17373,18 +17878,9 @@ function renderDataSources(payload) {
     local.appendChild(option);
   }
   select.appendChild(local);
-  if (online.length) {
-    const group = document.createElement('optgroup');
-    group.label = '在线（需下载）';
-    for (const entry of online) {
-      const option = document.createElement('option');
-      option.value = `online:${entry.id}`;
-      option.textContent = `${entry.label} · ${dataSourceText(entry)}（按选框下载）`;
-      option.title = entry.note || '';
-      group.appendChild(option);
-    }
-    select.appendChild(group);
-  }
+  // 数据源 is local only.  Fetchable products live in 区域高清补片, where the
+  // download button is the action; mixing them here made "select a source"
+  // silently start a download and put the current product back afterwards.
   const patch = LIMITS.active_patch;
   if (patch) {
     const group = document.createElement('optgroup');
@@ -17401,6 +17897,7 @@ function renderDataSources(payload) {
   select.value = patch ? `region:${patch.name}` : selected;
   updateDataSourceNote();
   renderPatchProducts(online);
+  renderPyramids(payload);
   syncNakedEyeSources();
   buildNakedEyeResolutionOptions();
 }
@@ -17427,6 +17924,72 @@ function renderPatchProducts(online) {
   select.disabled = !online.length;
 }
 
+/** 金字塔: the baked whole-disk caches, finest first.
+ *
+ *  This menu answers "what is the full disk made of", which is a different
+ *  question from 数据源 ("what are close-ups made of").  Only caches that
+ *  already exist are offered; rebuilding is the button below.
+ */
+function renderPyramids(payload) {
+  const select = $('pyramid-select');
+  if (!select) return;
+  const pyramids = (payload && payload.pyramids) || [];
+  select.textContent = '';
+  if (!pyramids.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '（没有已烘焙的金字塔）';
+    option.disabled = true;
+    select.appendChild(option);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  for (const entry of pyramids) {
+    const option = document.createElement('option');
+    option.value = entry.id;
+    const metres = Number(entry.metres_per_px);
+    const scale = Number.isFinite(metres) && metres > 0
+      ? `${metres.toFixed(metres < 10 ? 1 : 0)} m/px` : '分辨率未知';
+    option.textContent = `${entry.name} · ${scale}` +
+      (entry.baked === false ? '（未烘焙）' : '');
+    option.title = entry.cache ? `缓存 ${entry.cache}` : '首次整月面渲染时烘焙';
+    // An unbaked product is still shown (it may be the current one) but cannot
+    // be chosen: switching to it would silently start an hour-long bake.
+    option.disabled = entry.baked === false;
+    select.appendChild(option);
+  }
+  const selected = (payload && payload.pyramid_selected) || '';
+  if (selected && [...select.options].some((option) => option.value === selected)) {
+    select.value = selected;
+  }
+}
+
+async function choosePyramid(value) {
+  const select = $('pyramid-select');
+  if (!select || !value) return;
+  select.disabled = true;
+  setStatus('切换金字塔…', 'busy');
+  try {
+    const payload = await post('/api/pyramid', { id: value });
+    const previous = LIMITS.data_sources || {};
+    LIMITS.data_sources = {
+      ...previous,
+      pyramids: payload.pyramids || previous.pyramids,
+      pyramid_selected: payload.selected || value,
+    };
+    renderPyramids(LIMITS.data_sources);
+    setStatus(`金字塔已切换为 ${payload.name}，重新渲染…`, 'busy');
+    await refreshDisk();
+    setStatus(`金字塔：${payload.name}`, 'ok');
+  } catch (error) {
+    setStatus('切换金字塔失败：' + String(error.message || error), 'error');
+    renderPyramids(LIMITS.data_sources);
+  } finally {
+    select.disabled = false;
+  }
+}
+
 /** 下载此区域: fetch a patch of the online product covering the selection.
  *
  *  The whole point is that the download follows the *selection*: a close-up of
@@ -17446,7 +18009,7 @@ async function downloadPatch() {
   const button = $('patch-download');
   const cancelButton = $('patch-cancel');
   const note = $('patch-note');
-  if (button) button.disabled = true;
+  if (button) { button.disabled = true; button.textContent = '下载 0%'; }
   if (cancelButton) {
     cancelButton.hidden = false;
     cancelButton.disabled = true;
@@ -17474,10 +18037,9 @@ async function downloadPatch() {
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 1500));
       state = await getJson(`/api/patch/${job.id}`);
-      if (note) {
-        const pct = Math.round((state.progress || 0) * 100);
-        note.textContent = `${state.message || ''}（${pct}%）`;
-      }
+      const pct = Math.round((state.progress || 0) * 100);
+      if (button) button.textContent = `下载 ${pct}%`;
+      if (note) note.textContent = `${state.message || ''}（${pct}%）`;
       if (state.state !== 'running' && state.state !== 'cancelling') break;
     }
     if (state.state === 'done') {
@@ -17532,7 +18094,7 @@ async function downloadPatch() {
     if (note) note.textContent = String(error.message || error);
     setStatus('区域补片下载失败：' + String(error.message || error), 'error');
   } finally {
-    if (button) button.disabled = false;
+    if (button) { button.disabled = false; button.textContent = '下载'; }
     if (cancelButton) {
       cancelButton.hidden = true;
       cancelButton.disabled = true;
@@ -17677,13 +18239,13 @@ const SETTING_FIELDS = [
   'manual-train', 'aperture', 'focal-ratio', 'focal-length', 'barlow',
   'back-focus', 'obstruction',
   'sensor-w', 'sensor-h', 'pixel-um', 'sensor-color',
-  'preview-px', 'disk-px', 'disk-format', 'disk-annotated', 'disk-earthshine',
+  'preview-px', 'disk-px', 'disk-preset', 'disk-format', 'disk-annotated', 'disk-earthshine',
   'disk-earthshine-gain',
   'photometric-model', 'sun-samples', 'sky-ambient', 'roughness',
   'data-source',
   'earthshine-gain', 'earth-geometric-albedo', 'earth-samples',
   'earthshine-tint',
-  'out-px', 'out-ref', 'out-kmpx', 'out-samples', 'surface-texture',
+  'out-px', 'out-preset', 'out-ref', 'out-kmpx', 'out-samples', 'surface-texture',
   'terrain-denoise', 'parallel',
   'sky-span', 'sky-label-step', 'sky-labels', 'sky-elongation', 'sky-closeup',
   'sky-moon-track', 'sky-sun-track', 'sky-planets', 'sky-phase-frame',
@@ -17696,7 +18258,8 @@ const SETTING_FIELDS = [
   'noise-poisson', 'noise-gaussian',
   'annotate', 'label-language', 'label-density', 'label-font',
   'label-shadow', 'label-colour', 'label-lock', 'label-satellites',
-  'label-crater-suffix', 'label-mountain-outline', 'label-overlap', 'label-region',
+  'label-crater-suffix', 'label-crater-emphasis',
+  'label-mountain-outline', 'label-overlap', 'label-region',
   'text-color', 'text-stroke', 'text-stroke-width', 'text-bold',
   'marker-stroke', 'marker-stroke-width',
   'outline-color', 'outline-width', 'outline-style',
@@ -17814,22 +18377,37 @@ function collectSettings() {
     aspect: Number.isFinite(Number(state.selection.aspect))
       ? Number(state.selection.aspect) : 1,
   } : null;
+  // 默认打开时间: a page that has not touched the instant keeps the sentinel,
+  // so 存为默认 still means "read the computer clock next time".
+  if (state.timeMode === 'now') values['when'] = 'now';
   return values;
 }
 
 /** Put a loaded file back into the controls, then rebuild every derived state. */
 function applySettings(values) {
   let applied = 0;
+  let whenNow = false;
   for (const id of SETTING_FIELDS) {
     if (values[id] === undefined) continue;
     const element = $(id);
     if (!element) continue;
     if (element.type === 'checkbox') element.checked = Boolean(values[id]);
-    else element.value = values[id];
+    else if (id === 'when' && values[id] === 'now') {
+      // Resolve after 时区 has been applied below; resolving here would read
+      // the old zone and put the wrong wall clock in the field.
+      whenNow = true;
+      state.timeMode = 'now';
+    } else {
+      element.value = values[id];
+      if (id === 'when') state.timeMode = 'manual';
+    }
     applied++;
     // Range inputs drive their <output> spans from an input listener; a value
     // written straight into the control would leave the number behind.
     if (element.type === 'range') element.dispatchEvent(new Event('input'));
+  }
+  if (whenNow) {
+    $('when').value = wallClockNow();
   }
   // A negative latitude/longitude is a southern/western site, and the caption
   // beside the field has to follow the stored number too.
@@ -18032,6 +18610,19 @@ async function askSaveFile(suggestedName, description) {
     // AbortError is the reader closing the dialog; anything else means the
     // browser would not open one, which is what the fallback is for.
     return error && error.name === 'AbortError' ? null : undefined;
+  }
+}
+
+async function saveDefaultSettings() {
+  try {
+    const payload = await post('/api/settings/default', {
+      settings: collectSettings(),
+    });
+    const size = `${(payload.bytes / 1024).toFixed(1)} KB`;
+    setStatus(`已写入 default.conf（${size}）`);
+  } catch (error) {
+    setStatus('写入 default.conf 失败：' + String(error.message || error),
+      'error');
   }
 }
 
@@ -18629,10 +19220,26 @@ async function acceptRender(payload) {
   if (state.labelsOn) await refreshLabels();
 }
 
+/** Draw a close-up frame with the full-disk display mirror applied. */
+function drawMirroredFrame(canvas, image) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!image) return;
+  ctx.save();
+  if (state.diskMirror === 'horizontal') {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  } else if (state.diskMirror === 'vertical') {
+    ctx.translate(0, canvas.height);
+    ctx.scale(1, -1);
+  }
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
 function drawResult() {
   const ctx = RESULT.getContext('2d');
-  ctx.clearRect(0, 0, RESULT.width, RESULT.height);
-  if (state.resultImage) ctx.drawImage(state.resultImage, 0, 0, RESULT.width, RESULT.height);
+  drawMirroredFrame(RESULT, state.resultImage);
   // 目镜 applied after the picture and *before* the labels: the names are on the
   // eyepiece's field, not painted over its barrel.
   if (state.resultImage && eyepieceSettings().on) {
@@ -18649,9 +19256,7 @@ function drawResult() {
 }
 
 function drawRaw() {
-  const ctx = RAW.getContext('2d');
-  ctx.clearRect(0, 0, RAW.width, RAW.height);
-  if (state.rawImage) ctx.drawImage(state.rawImage, 0, 0, RAW.width, RAW.height);
+  drawMirroredFrame(RAW, state.rawImage);
   drawViewLabels('raw');
 }
 
@@ -19546,15 +20151,33 @@ function syncRangeTime(fieldId, label, reload) {
   setStatus(`${label}已同步为 ${source}`);
 }
 
+/** Read the editable Clair-Obscur list; *force* re-reads the CSV files. */
+async function loadClairMenu(force = false) {
+  try {
+    const payload = force
+      ? await post('/api/clair-obscur/refresh', {})
+      : await getJson('/api/clair-obscur');
+    state.clairRows = payload.events || [];
+    if (String(state.eventKind || '').startsWith('clair:')
+        && !state.clairRows.some((entry) => entry.kind === state.eventKind)) {
+      state.eventKind = 'full_moon';
+    }
+    buildEventKinds();
+    if (force) setStatus(`已读取 ${state.clairRows.length} 条 Clair-Obscur 事件`);
+  } catch (error) {
+    setStatus('Clair-Obscur 列表读取失败：' + String(error.message || error),
+      'error');
+  }
+}
+
 /** The kind switches: one at a time, so they are radio buttons in pills. */
 function buildEventKinds() {
   const host = $('event-kinds');
   if (!host) return;
   host.innerHTML = '';
-  // The first eleven are the calendar-level categories and stay visible.  The
-  // transient Clair-Obscur effects live in one menu under them, ordered by
-  // their English name so a reader looking for "Plato's Hook" finds it in the
-  // same place every time.
+  // The calendar-level categories stay visible.  The transient Clair-Obscur
+  // effects come from the editable CSV, already sorted by reference
+  // colongitude (余经度); the menu shows that value with the event name.
   const fixed = [
     ['new_moon', '朔月'], ['first_quarter', '上弦月'],
     ['full_moon', '满月'], ['last_quarter', '下弦月'],
@@ -19569,42 +20192,15 @@ function buildEventKinds() {
     // does not care which of the two answered.
     ['crescent', '极低照明度'],
     ['libration_target', '极端天平动目标'],
+    // Cheshire is a limb-orientation event at moonrise/moonset, not a
+    // transient shadow: it sits with the limb targets.  The menu label is the
+    // short name; the old parenthetical stays as the hover title.
+    ['cheshire_moon', 'Cheshire Moon', 'Cheshire Moon（Wet Moon）'],
   ];
-  const more = [
-    // Lunar X/V/L is the reader's entry point to the folded group, so it is
-    // pinned first; the rest follow their English names.
-    ['xvl', 'Lunar X/V/L', 'Lunar X/V/L'],
-    ['jewelled_handle', 'Jewelled handle', 'Jewelled handle'],
-    ['eyes_of_clavius', 'Eyes of Clavius', 'Eyes of Clavius'],
-    ['cheshire_moon', 'Cheshire Moon（Wet Moon）', 'Cheshire Moon'],
-    ["platos_hook", "Plato's Hook", "Plato's Hook"],
-    ['hesiodus_sunrise_ray', 'Hesiodus Sunrise Ray', 'Hesiodus Sunrise Ray'],
-    ['maginus_sunshine_ray', 'Maginus Sunshine Ray', 'Maginus Sunshine Ray'],
-    ['rupes_recta', 'Rupes Recta / Straight Wall', 'Rupes Recta'],
-    ['curtiss_cross', 'Curtiss Cross', 'Curtiss Cross'],
-    ['barrow_ray', "Barrow's shaft of light", "Barrow's shaft of light"],
-    ['alexanders_beaded_rim', "Alexander's beaded rim", "Alexander's beaded rim"],
-    ['zeno_steps', 'Zeno steps', 'Zeno steps'],
-    ['oneills_bridge', "O'Neill's Bridge", "O'Neill's Bridge"],
-    ['posidonius_illuminated_rim', "Posidonius' illuminated rim",
-      "Posidonius' illuminated rim"],
-    ['l_shaped_mountain', '"L"-shaped mountain', '"L"-shaped mountain'],
-    ['cauchys_interrupted_shadow', "Cauchy's interrupted shadow",
-      "Cauchy's interrupted shadow"],
-    ["cassini_moon_maiden", "Cassini's Moon Maiden", "Cassini's Moon Maiden"],
-    ["aries_hoofprint", "Aries' Hoofprint（Black lips）", "Aries Hoofprint"],
-    ["gruithuisens_lunar_city", "Gruithuisen's Lunar City",
-      "Gruithuisen's Lunar City"],
-  ];
-  // Keep Lunar X/V/L pinned; sort only the remainder.  A quoted display name
-  // ("L"-shaped mountain) sorts under L rather than before A.
-  const firstMore = more.shift();
-  const sortKey = (entry) => String(entry[2]).replace(/^"|"$/g, '');
-  more.sort((left, right) => sortKey(left).localeCompare(sortKey(right), 'en',
-    { sensitivity: 'base' }));
-  more.unshift(firstMore);
-  const moreKeys = new Set(more.map((entry) => entry[0]));
-  const makeChip = (key, label) => {
+  const more = (state.clairRows || []).map((entry) => [
+    entry.kind, entry.label || entry.title, entry.title,
+  ]);
+  const makeChip = (key, label, title) => {
     const chip = document.createElement('label');
     chip.className = 'mark-chip';
     chip.id = 'event-chip-' + key;
@@ -19616,6 +20212,12 @@ function buildEventKinds() {
     box.value = key;
     const span = document.createElement('span');
     span.textContent = label;
+    // A chip's hover title is where the full published name lives when the
+    // visible label has to be short (Cheshire Moon).
+    if (title) {
+      chip.title = title;
+      span.title = title;
+    }
     chip.append(box, span);
     box.addEventListener('change', () => {
       state.eventKind = key;
@@ -19624,7 +20226,9 @@ function buildEventKinds() {
     });
     return chip;
   };
-  for (const [key, label] of fixed) host.appendChild(makeChip(key, label));
+  for (const [key, label, title] of fixed) {
+    host.appendChild(makeChip(key, label, title));
+  }
   const select = $('event-clair');
   if (select) {
     select.innerHTML = '';
@@ -19633,18 +20237,26 @@ function buildEventKinds() {
     blank.value = '';
     blank.textContent = '—';
     select.appendChild(blank);
-    for (const [key, label] of more) {
+    for (const [key, label, title] of more) {
       const option = document.createElement('option');
       option.value = key;
       option.textContent = label;
+      if (title) option.title = title;
       select.appendChild(option);
     }
-    select.addEventListener('change', () => {
-      if (!moreKeys.has(select.value)) return;
-      state.eventKind = select.value;
-      syncEventKinds();
-      loadEvents();
-    });
+    // The select element survives a 刷新; wire it once, then rebuild only its
+    // options.  The open row set is read from state each time.
+    if (!select.dataset.clairWired) {
+      select.dataset.clairWired = '1';
+      select.addEventListener('change', () => {
+        const chosen = (state.clairRows || []).find(
+          (entry) => entry.kind === select.value);
+        if (!chosen) return;
+        state.eventKind = select.value;
+        syncEventKinds();
+        loadEvents();
+      });
+    }
   }
   state.eventKind = state.eventKind || 'full_moon';
   syncEventKinds();
@@ -19842,6 +20454,7 @@ function renderCrescents(items) {
       if (!Number.isFinite(stamp)) return;
       $('when').value = new Date(stamp + tz * 3600 * 1000)
         .toISOString().slice(0, 19);
+      state.timeMode = 'manual';
       if ($('auto-refresh').checked) refreshDisk();
       setStatus(`时间已设为 ${$('when').value}（${item.night}，照亮 `
         + `${fmt(item.illumination_percent, 2)}%）`);
@@ -19947,6 +20560,7 @@ function setMainTimeFromEventRow(row) {
   const tz = Number($('tz').value) || 0;
   $('when').value = new Date(stamp + tz * 3600 * 1000)
     .toISOString().slice(0, 19);
+  state.timeMode = 'manual';
   if ($('auto-refresh').checked) refreshDisk();
   // Jumping to a row is how a reader enters an occultation; the layer has to
   // notice the clock moved even though no change event was fired.
@@ -21072,6 +21686,7 @@ function animationAnnotationsPayload() {
     satellite: satelliteMode(),
     satellites: satellitesWanted(),
     crater_suffix: craterSuffixWanted(),
+    crater_emphasis: Number($('label-crater-emphasis').value) || 0,
     avoid_overlap: !$('label-overlap').checked,
     lunar100: lunar100Wanted(),
     region: regionWanted(),
@@ -21518,6 +22133,17 @@ async function cancelAnimation() {
   }
   setAnimationStatus('正在终止…', 'busy');
   setStatus('正在终止动画…', 'busy');
+}
+
+/** 模拟设置 / 数据源设置: one pane, two parameter pages. */
+function setSimTab(name) {
+  state.simTab = name === 'data' ? 'data' : 'settings';
+  for (const button of document.querySelectorAll('#sim-tabs .tab')) {
+    button.setAttribute('aria-pressed',
+      String(button.dataset.sim === state.simTab));
+  }
+  $('sim-settings').hidden = state.simTab !== 'settings';
+  $('sim-data').hidden = state.simTab !== 'data';
 }
 
 function setTrainTab(name) {
@@ -22226,6 +22852,16 @@ function init() {
   applyLock();
   updateLockHint();
   buildClassToggles();
+  // Apply root defaults only after every dynamic control exists (the class
+  // switches are built just above), so their saved states are not skipped.
+  // The server injects the object before this script runs.
+  const bootDefaults = window.__MOON_DEFAULT_SETTINGS__;
+  if (bootDefaults && typeof bootDefaults === 'object') {
+    applySettings(bootDefaults);
+  }
+  for (const name of ['input', 'change']) {
+    $('when').addEventListener(name, () => { state.timeMode = 'manual'; });
+  }
 
   refreshSettingsList();
   setMoonLanguage(window.localStorage &&
@@ -22250,6 +22886,7 @@ function init() {
   drawMagnifier();
   drawPhaseStrip();
   setTrainTab('telescope');
+  setSimTab(state.simTab || 'settings');
 
   views.disk.name = 'disk';
   views.disk.stage = STACK;      // the stack holds the Moon and its overlay
@@ -22459,6 +23096,10 @@ function init() {
   ellipseModeWasOn = !!($('mesh-ellipse') && $('mesh-ellipse').checked);
   setProcImageTab('imaging');
   buildEventKinds();
+  if ($('clair-refresh')) {
+    $('clair-refresh').addEventListener('click', () => loadClairMenu(true));
+  }
+  loadClairMenu();
   for (const id of ['events-start', 'events-end']) {
     const field = $(id);
     if (field) field.addEventListener('change', loadEvents);
@@ -22593,6 +23234,26 @@ function init() {
   // 保存图像: its own resolution, its own format, its own render.  The physical
   // scale beside the field follows what is typed, not what was last rendered.
   $('disk-save').addEventListener('click', () => { saveDisk(); });
+  if ($('disk-generate-full')) {
+    $('disk-generate-full').addEventListener('click', () => {
+      if (state.diskGenerateBusy) generateFullDisk();
+      else openDiskGenerateConfirm();
+    });
+  }
+  if ($('disk-generate-cancel')) {
+    $('disk-generate-cancel').addEventListener('click', closeDiskGenerateConfirm);
+  }
+  if ($('disk-generate-confirm')) {
+    $('disk-generate-confirm').addEventListener('click', () => {
+      closeDiskGenerateConfirm();
+      generateFullDisk();
+    });
+  }
+  if ($('disk-generate-modal')) {
+    $('disk-generate-modal').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) closeDiskGenerateConfirm();
+    });
+  }
   // HDR is a JPEG-only affair, so the switch follows the format menu.
   $('disk-format').addEventListener('change', updateDiskHdrControls);
   $('disk-hdr').addEventListener('change', updateDiskHdrControls);
@@ -22610,8 +23271,12 @@ function init() {
     chooseDataSource($('data-source').value);
   });
   if ($('ephemeris-mode')) {
-    $('ephemeris-mode').addEventListener('change', syncEphemerisFileMenu);
-    $('ephemeris-apply').addEventListener('click', applyEphemeris);
+    $('ephemeris-mode').addEventListener('change', ephemerisChanged);
+  }
+  if ($('pyramid-select')) {
+    $('pyramid-select').addEventListener('change', () => {
+      choosePyramid($('pyramid-select').value);
+    });
   }
   // 区域高清补片: download only the ground the selection covers.
   $('patch-download').addEventListener('click', () => { downloadPatch(); });
@@ -22737,7 +23402,11 @@ function init() {
         setStatus(`已夹到${currentDataSourceName()}的分辨率下限：`
           + `${LIMITS.terrain_km_per_px.toFixed(3)} km/px`, 'error');
       }
-      scheduleOutputRender();
+      if ($('auto-refresh').checked) {
+        scheduleOutputRender();
+      } else {
+        setStatus('物理分辨率已改，点「更新模拟」才会重新渲染');
+      }
     });
   }
   // 物理分辨率: 同步全月面, a preset, or a typed number.
@@ -22760,7 +23429,8 @@ function init() {
       // reader put it.  Dispatching `change` here used to bounce the menu to
       // 自定义 and put a *second* field on screen beside the menu.
       syncOutputScale('kmpx');
-      scheduleOutputRender();
+      if ($('auto-refresh').checked) scheduleOutputRender();
+      else setStatus('物理分辨率已改，点「更新模拟」才会重新渲染');
       return;
     }
     // A preset is a *choice*, so the menu keeps it even when the number is
@@ -22977,13 +23647,17 @@ function init() {
   $('label-mountain-outline').addEventListener('change', () => {
     if (state.labelsOn) refreshLabelPlans();
     setStatus($('label-mountain-outline').checked
-      ? '显示山脉轮廓' : '不画山脉轮廓');
+      ? '显示山脉/山脊轮廓' : '不画山脉/山脊轮廓');
   });
   $('label-crater-suffix').addEventListener('change', () => {
     if (state.labelsOn) refreshLabelPlans();
     setStatus($('label-crater-suffix').checked
       ? '环形坑只写名字（不加「坑」）'
       : '环形坑名称带「坑」字');
+  });
+  $('label-crater-emphasis').addEventListener('change', () => {
+    if (state.labelsOn) refreshLabelPlans();
+    setStatus('已调整主坑与卫星坑的字号差');
   });
   // 停用避让 is a layout input: it changes which names can be placed, not just
   // where the existing ones sit, so it earns a fresh plan.
@@ -23132,6 +23806,12 @@ function init() {
   // file chooser and reads the .conf the reader picks -- the server's own
   // settings are the field's datalist, so a name can still be typed.
   $('settings-save').addEventListener('click', saveSettings);
+  if ($('settings-default')) {
+    $('settings-default').addEventListener('click', saveDefaultSettings);
+  }
+  if ($('preview-default')) {
+    $('preview-default').addEventListener('click', saveDefaultSettings);
+  }
   $('settings-load').addEventListener('click', () => {
     const picker = $('settings-pick');
     if (!picker) return;
@@ -23392,6 +24072,9 @@ function init() {
   for (const button of document.querySelectorAll('#train-tabs .tab')) {
     button.addEventListener('click', () => setTrainTab(button.dataset.train));
   }
+  for (const button of document.querySelectorAll('#sim-tabs .tab')) {
+    button.addEventListener('click', () => setSimTab(button.dataset.sim));
+  }
   // 天空位置示意图: the door, the window, and the controls inside it.
   $('sky-open').addEventListener('click', openSky);
   $('sky-close').addEventListener('click', closeSky);
@@ -23524,10 +24207,48 @@ function init() {
       if (event.key === 'Enter') filterExperiment();
     });
   }
-  for (const name of ['sun', 'calc', 'naked']) {
+  for (const name of ['sun', 'calc', 'birthday', 'naked']) {
     $('experiment-tab-' + name).addEventListener('click',
       () => setExperimentTab(name));
   }
+  for (const [id, mode] of [['disk-mirror-h', 'horizontal'],
+                            ['disk-mirror-v', 'vertical']]) {
+    const button = $(id);
+    if (!button) continue;
+    button.addEventListener('click', () => {
+      setDiskMirrorMode(state.diskMirror === mode ? 'none' : mode);
+    });
+  }
+  if ($('birthday-run')) {
+    $('birthday-run').addEventListener('click', birthdayRun);
+  }
+  if ($('birthday-when')) {
+    $('birthday-when').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') birthdayRun();
+    });
+  }
+  if ($('birthday-prev')) {
+    $('birthday-prev').addEventListener('click',
+      () => birthdayShow(state.birthdayIndex - 1));
+  }
+  if ($('birthday-next')) {
+    $('birthday-next').addEventListener('click',
+      () => birthdayShow(state.birthdayIndex + 1));
+  }
+  for (const side of ['left', 'right']) {
+    const button = $('birthday-save-' + side);
+    if (button) button.addEventListener('click', () => birthdaySave(side));
+  }
+  for (const [id, side] of [['birthday-splitter-left', 'left'],
+                            ['birthday-splitter-right', 'right']]) {
+    const splitter = $(id);
+    if (!splitter) continue;
+    splitter.addEventListener('mousedown', (event) => {
+      birthdaySplitStart(side, event);
+    });
+  }
+  document.addEventListener('mousemove', birthdaySplitMove);
+  document.addEventListener('mouseup', () => { state.birthdaySplitDrag = null; });
   $('calc-info-run').addEventListener('click', calculateCalculatorQuery);
   $('calc-from-main').addEventListener('click', syncCalculatorFromMain);
   $('calc-to-main').addEventListener('click', syncCalculatorTimeToMain);

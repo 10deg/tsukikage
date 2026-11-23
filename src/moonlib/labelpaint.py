@@ -348,9 +348,7 @@ def paint_annotation_plan(
     Image, ImageDraw, _ = _pillow()
     ink = dict(style or {})
     font_px = max(6.0, float(plan.font_px))
-    size = max(6, int(round(font_px)))
     bold = bool(ink.get("bold"))
-    font = _font(size, bold)
     base = _image_from_frame(frame)
     picture, was_float = base
     width, height = picture.size
@@ -358,7 +356,6 @@ def paint_annotation_plan(
     item_colour = _item_colour
     text_stroke = _rgba(ink.get("text_stroke"), (12, 14, 20, 235))
     marker_stroke = _rgba(ink.get("marker_stroke"), text_stroke)
-    text_stroke_px = int(round(_scaled_width(ink.get("text_stroke_width", 1.2), font_px)))
     marker_stroke_px = _scaled_width(ink.get("marker_stroke_width", 0.6), font_px)
     rim_width = _scaled_width(ink.get("outline_width", 1.0), font_px)
     rim_colour = _rgba(ink.get("outline_color"), (180, 214, 255, 240))
@@ -432,6 +429,10 @@ def paint_annotation_plan(
         lit = bool(getattr(item, "illuminated", True))
         draw = draws[lit]
         colour = item_colour(ink, item)
+        item_font_px = max(6.0, float(getattr(item, "font_px", 0.0) or font_px))
+        item_font = _font(max(6, int(round(item_font_px))), bold)
+        item_stroke_px = int(round(_scaled_width(
+            ink.get("text_stroke_width", 1.2), item_font_px)))
         left = float(item.label_x)
         top = float(item.label_y)
         right = left + float(item.label_w)
@@ -443,7 +444,7 @@ def paint_annotation_plan(
                 end_x = min(max(float(item.x), left), right)
                 end_y = min(max(float(item.y), top), bottom)
                 draw.line([start, (end_x, end_y)],
-                          fill=colour, width=max(1, int(round(font_px * 0.04))))
+                          fill=colour, width=max(1, int(round(item_font_px * 0.04))))
         text_x = left + 3.0
         if bold:
             # Pillow draws the character's own outlines; a face without a bold
@@ -451,11 +452,11 @@ def paint_annotation_plan(
             # right, which is what a canvas' synthetic bold does too.
             for offset in ((0.0, 0.0), (0.7, 0.0)):
                 draw.text((text_x + offset[0], mid_y + offset[1]), item.label,
-                          font=font, fill=colour, anchor="lm",
-                          stroke_width=text_stroke_px, stroke_fill=text_stroke)
+                          font=item_font, fill=colour, anchor="lm",
+                          stroke_width=item_stroke_px, stroke_fill=text_stroke)
         else:
-            draw.text((text_x, mid_y), item.label, font=font, fill=colour,
-                      anchor="lm", stroke_width=text_stroke_px,
+            draw.text((text_x, mid_y), item.label, font=item_font, fill=colour,
+                      anchor="lm", stroke_width=item_stroke_px,
                       stroke_fill=text_stroke)
 
     if rotation_deg or str(mirror or "none") not in ("none", ""):

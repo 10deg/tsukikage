@@ -31,7 +31,9 @@ import binascii
 import hashlib
 import io
 import json
+import html
 import math
+import os
 import re
 import subprocess
 import sys
@@ -44,9 +46,15 @@ from collections import OrderedDict
 from PIL import Image, ImageOps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import gettempdir
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+# matplotlib otherwise writes its font cache into the account's ~/.matplotlib,
+# which is often read-only on this host and prints a warning on the first map
+# overlay request.  Use a writable per-process cache directory instead.
+os.environ.setdefault("MPLCONFIGDIR", str(Path(gettempdir()) / "moonlib-matplotlib"))
 from urllib.parse import parse_qs, urlparse
+import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -60,12 +68,13 @@ from moonlib.annotations import (  # noqa: E402
     annotation_catalogue,
     feature_class,
 )
+from moonlib.features import load_nomenclature_meta, load_priority_features  # noqa: E402
 from moonlib.outlines import (  # noqa: E402
     outline_for,
     outlines_available,
 )
 
-MAP_VERSION = "1.1.5"
+MAP_VERSION = "1.2.0"
 MAP_STATIC = Path(__file__).resolve().parent / "map"
 TILE_PX = 256
 MIN_ZOOM = 0
@@ -107,7 +116,12 @@ _MIN_DIAMETER_BY_ZOOM = {
 }
 #: Classes that are meaningful even when the feature is a point, so the size
 #: filter above must not drop them.
-_POINT_CLASSES = frozenset({"statio", "lunar100", "libration", "impact", "albedo", "imp", "other"})
+_POINT_CLASSES = frozenset({
+    "statio", "lunar100", "libration", "impact", "albedo", "imp", "other",
+    # Named tracts are large, but a small lake in a close-up must not be
+    # dropped by the diameter floor before the client can weigh it.
+    "mare", "lacus", "sinus", "palus",
+})
 #: The simulator's DEFAULT_OFF_CLASSES: a first look at the Moon is not a
 #: catalogue of domes or observing lists; 着陆点 is on from the start.  Keep
 #: both pages on the same first paint.
@@ -164,10 +178,26 @@ def _outline_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
         return payload
     if kind in ("line", "centerline"):
         payload["path"] = entry.get("path") or []
-        if entry.get("ring"):
-            # A closed mountain ring travels beside the typesetting path: the
-            # map paints the ring, and the caption follows that same ring.
-            payload["ring"] = entry["ring"]
+        if entry.get("path_closed"):
+            payload["path_closed"] = True
+        ring = entry.get("ring")
+        if not ring and kind == "centerline":
+            # Some area features (Oceanus Procellarum, Mare Frigoris, the
+            # lacus rows) carry a centreline for typesetting but no ``ring``
+            # in an older catalogue file.  Their geometry is still the IAU
+            # polygon, and painting the centreline instead turned the whole
+            # sea into a single stroke.  Fall back to that polygon.  A plain
+            # ``line`` is a rille/ridge trace, not an area: it must keep its
+            # path even when the source geometry happens to be a buffer
+            # polygon around it.
+            geometry = entry.get("geometry") or {}
+            coordinates = geometry.get("coordinates")
+            if geometry.get("type") == "Polygon" and coordinates:
+                ring = coordinates[0]
+            elif geometry.get("type") == "MultiPolygon" and coordinates:
+                ring = coordinates[0][0]
+        if ring:
+            payload["ring"] = ring
         payload["rotation_deg"] = entry.get("rotation_deg")
         return payload
     geometry = entry.get("geometry") or {}
@@ -214,12 +244,14 @@ def _tile_counts(zoom: int) -> Tuple[int, int]:
     return 2 ** (z + 1), 2 ** z
 
 
-def _lonlat_grid(zoom: int, x: int, y: int) -> Tuple[np.ndarray, np.ndarray]:
+def _lonlat_grid(zoom: int, x: int, y: int,
+                 size: int = TILE_PX) -> Tuple[np.ndarray, np.ndarray]:
     cols, rows = _tile_counts(zoom)
     width = cols * TILE_PX
     height = rows * TILE_PX
-    px = x * TILE_PX + np.arange(TILE_PX, dtype=np.float64) + 0.5
-    py = y * TILE_PX + np.arange(TILE_PX, dtype=np.float64) + 0.5
+    step = TILE_PX / max(1, int(size))
+    px = x * TILE_PX + (np.arange(int(size), dtype=np.float64) + 0.5) * step
+    py = y * TILE_PX + (np.arange(int(size), dtype=np.float64) + 0.5) * step
     lon = -180.0 + px / width * 360.0
     lat = 90.0 - py / height * 180.0
     return np.meshgrid(lon, lat)
@@ -274,6 +306,47 @@ class _FallbackTerrain:
         self.sources = SimpleNamespace(dem_path=Path("flat"), albedo_path=None)
 
 
+def _colormap_rgb(name: str, values: np.ndarray) -> np.ndarray:
+    """RGB for a matplotlib colormap, with a small built-in fallback set."""
+    key = str(name or "rainbow")
+    try:
+        from matplotlib import colormaps
+        cmap = colormaps[key]
+        rgba = np.asarray(cmap(np.clip(values, 0.0, 1.0)))
+        return np.clip(rgba[..., :3], 0.0, 1.0)
+    except Exception:
+        pass
+    if key == "gray":
+        return np.repeat(np.clip(values, 0.0, 1.0)[..., None], 3, axis=-1)
+    if key == "hsv":
+        hue = (1.0 - values) * 0.66
+        sector = hue * 6.0
+        index = np.floor(sector).astype(np.int64) % 6
+        frac = sector - np.floor(sector)
+        p = np.zeros_like(values)
+        q = 1.0 - frac
+        u = frac
+        r = np.select([index == 0, index == 1, index == 2, index == 3,
+                       index == 4, index == 5],
+                      [1.0, q, p, p, u, 1.0], default=1.0)
+        g = np.select([index == 0, index == 1, index == 2, index == 3,
+                       index == 4, index == 5],
+                      [u, 1.0, 1.0, q, p, p], default=1.0)
+        b = np.select([index == 0, index == 1, index == 2, index == 3,
+                       index == 4, index == 5],
+                      [p, p, u, 1.0, 1.0, q], default=1.0)
+        return np.stack([r, g, b], axis=-1) * 0.98
+    stops = np.array([
+        [0.12, 0.10, 0.48], [0.10, 0.55, 0.90],
+        [0.20, 0.78, 0.35], [0.96, 0.82, 0.20],
+        [0.82, 0.16, 0.12],
+    ])
+    position = np.clip(values, 0.0, 1.0) * (len(stops) - 1)
+    left = np.clip(np.floor(position).astype(np.int64), 0, len(stops) - 2)
+    frac = (position - left)[..., None]
+    return stops[left] * (1.0 - frac) + stops[left + 1] * frac
+
+
 class LunarMapService:
     """Tiles, features and the small readouts the map page asks for."""
 
@@ -286,7 +359,9 @@ class LunarMapService:
         #: keeps its source-tree fetch tool fallback.
         self._data_download = data_download
         self._features: Optional[List[Dict[str, Any]]] = None
+        self._features_stamp_cache: Optional[Tuple[Tuple[str, int, int], ...]] = None
         self._tiles: "OrderedDict[Tuple[Any, ...], bytes]" = OrderedDict()
+        self._overlay_tiles: "OrderedDict[Tuple[Any, ...], bytes]" = OrderedDict()
         self._detail: "OrderedDict[Tuple[int, int, int], Any]" = OrderedDict()
         self._shadows: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
         self._photo_runtime: "OrderedDict[str, Any]" = OrderedDict()
@@ -608,11 +683,36 @@ class LunarMapService:
                 self._detail.popitem(last=False)
         return terrain
 
+    @staticmethod
+    def _features_stamp() -> Tuple[Tuple[str, int, int], ...]:
+        """Identity of the editable catalogue files, so a correction reloads."""
+        data = Path(moonlib.__file__).resolve().parent / "data"
+        stamp = []
+        for name in ("lunar_features.csv", "lunar_nomenclature.csv",
+                     "lunar100.csv"):
+            path = data / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            stamp.append((name, stat.st_mtime_ns, stat.st_size))
+        return tuple(stamp)
+
     def features(self) -> List[Dict[str, Any]]:
         with self._lock:
+            stamp = self._features_stamp()
             if self._features is not None:
-                return self._features
+                if self._features_stamp_cache is None:
+                    # A test double (or a caller) injected rows; adopt them and
+                    # start watching from this stamp rather than replacing them.
+                    self._features_stamp_cache = stamp
+                    return self._features
+                if stamp == self._features_stamp_cache:
+                    return self._features
+            self._features_stamp_cache = stamp
             rows: List[Dict[str, Any]] = []
+            meta_index = load_nomenclature_meta()
+            priority_index = load_priority_features()
             try:
                 catalogue = annotation_catalogue()
             except Exception:
@@ -640,6 +740,14 @@ class LunarMapService:
                     "layer": cls,
                     "note": str(getattr(feature, "note", "") or ""),
                     "lunar100": getattr(feature, "lunar100", None),
+                    "meta": meta_index.get(
+                        " ".join(name_en.split()).casefold(), {}
+                    ),
+                    "feature_id": meta_index.get(
+                        " ".join(name_en.split()).casefold(), {}
+                    ).get("Feature ID", ""),
+                    "priority": " ".join(name_en.split()).casefold()
+                    in priority_index,
                 })
             rows.sort(key=lambda row: row["diameter_km"], reverse=True)
             self._features = rows
@@ -819,6 +927,50 @@ class LunarMapService:
             -row["diameter_km"]))
         return {"query": text, "results": found[:limit]}
 
+    def feature_meta(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch Reference/Updated for one IAU feature on demand.
+
+        The bulk gazetteer export does not carry these two fields.  Fetching
+        all ~9000 pages is rate-limited and unnecessary for a local map: a page
+        is fetched only when its feature is selected, then cached for the
+        process lifetime.
+        """
+        raw = str(query.get("id") or "").strip()
+        if not raw.isdigit():
+            raise moonlib.MoonlibError("feature id must be numeric.")
+        cache = getattr(self, "_feature_meta_cache", None)
+        if cache is None:
+            cache = {}
+            self._feature_meta_cache = cache
+        if raw in cache:
+            return cache[raw]
+        url = f"https://planetarynames.wr.usgs.gov/Feature/{raw}"
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "Moonlib-local-map/1.0"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                page = response.read().decode("utf-8", "replace")
+        except Exception as error:
+            raise moonlib.MoonlibError(f"无法读取 IAU 资料页：{error}") from error
+
+        def field(label: str) -> str:
+            match = re.search(
+                r"<th>\s*" + re.escape(label) + r"\s*</th>\s*<td[^>]*>(.*?)</td>",
+                page, re.S | re.I)
+            if not match:
+                return ""
+            text = re.sub(r"<[^>]+>", " ", match.group(1))
+            return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+        result = {
+            "id": raw,
+            "Reference": field("Reference"),
+            "Updated": field("Updated"),
+            "Satellite Features": field("Satellite Features"),
+        }
+        cache[raw] = result
+        return result
+
     def point(self, query: Dict[str, Any]) -> Dict[str, Any]:
         lon = _finite(query.get("lon"))
         lat = _finite(query.get("lat"))
@@ -848,6 +1000,42 @@ class LunarMapService:
             "elevation_km": height,
             "radius_km": float(terrain.reference_radius_km + height),
             "level": level,
+        }
+
+    def elevation_range(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """Lowest and highest sampled ground height in a view rectangle."""
+        west = _finite(query.get("west"), -180.0)
+        east = _finite(query.get("east"), 180.0)
+        south = _finite(query.get("south"), -90.0)
+        north = _finite(query.get("north"), 90.0)
+        south = max(-90.0, min(90.0, south))
+        north = max(-90.0, min(90.0, north))
+        if north < south:
+            north, south = south, north
+        if east < west:
+            east += 360.0
+        east = min(east, west + 360.0)
+        count_x = 96
+        count_y = 64
+        lon = np.linspace(west + 0.5 * (east - west) / count_x,
+                          east - 0.5 * (east - west) / count_x, count_x)
+        lat = np.linspace(south + 0.5 * (north - south) / count_y,
+                          north - 0.5 * (north - south) / count_y, count_y)
+        lon_grid, lat_grid = np.meshgrid(lon, lat)
+        terrain = self.terrain()
+        try:
+            level = int(terrain.dem.level_for_ground_scale(1.0))
+        except Exception:
+            level = 0
+        heights = np.asarray(terrain.dem.sample(lon_grid, lat_grid, level),
+                             dtype=np.float64)
+        if not np.isfinite(heights).any():
+            raise moonlib.MoonlibError("视野内没有可用的高程数据。")
+        return {
+            "west": float(west), "east": float(east),
+            "south": float(south), "north": float(north),
+            "minimum_km": float(np.nanmin(heights)),
+            "maximum_km": float(np.nanmax(heights)),
         }
 
     # -- 测量工具 ---------------------------------------------------------
@@ -1571,10 +1759,186 @@ class LunarMapService:
             self._photo_tiles.popitem(last=False)
         return png
 
+    # -- hypsometric / contour overlay -----------------------------------
+    def overlay_palette(self, name: str, count: int = 64) -> Dict[str, Any]:
+        """Colour stops for the page's live colour bar."""
+        count = max(2, min(128, int(count)))
+        values = np.linspace(0.0, 1.0, count)
+        rgb = _colormap_rgb(name, values)
+        return {
+            "name": str(name or "jet"),
+            "colors": [
+                "#%02x%02x%02x" % tuple(int(round(c * 255)) for c in row)
+                for row in rgb
+            ],
+        }
+
+    def overlay_tile(
+        self,
+        zoom: int,
+        x: int,
+        y: int,
+        *,
+        minimum: float = -8.0,
+        maximum: float = 10.0,
+        levels: int = 24,
+        alpha: int = 112,
+        line_alpha: int = 220,
+        palette: str = "rainbow",
+        scale: str = "linear",
+        line_width: int = 1,
+        line_color: str = "#000000",
+        line_style: str = "solid",
+        offset: float = 0.0,
+        detail: int = 1,
+        interval_km: float = 0.1,
+        contour_scale: float = 0.0,
+        reverse: bool = False,
+    ) -> bytes:
+        """A transparent RGBA tile: hypsometric colour plus contour lines.
+
+        This is deliberately a separate layer from the shaded base.  The base
+        still supplies the hillshade; the overlay supplies elevation colour and
+        lines, so opacity can be tuned without re-rendering the terrain light.
+        """
+        from PIL import Image
+
+        cols, rows = _tile_counts(zoom)
+        if not (0 <= zoom <= MAX_ZOOM and 0 <= x < cols and 0 <= y < rows):
+            raise moonlib.MoonlibError("overlay tile outside the pyramid.")
+        minimum = float(minimum)
+        maximum = float(maximum)
+        if not (math.isfinite(minimum) and math.isfinite(maximum)
+                and maximum > minimum):
+            raise moonlib.MoonlibError("overlay elevation range is invalid.")
+        count = max(2, min(120, int(levels)))
+        alpha = max(0, min(255, int(alpha)))
+        line_alpha = max(0, min(255, int(line_alpha)))
+        palette = str(palette or "jet")
+        scale = "log" if str(scale or "").lower() == "log" else "linear"
+        offset = max(-1.0, min(1.0, float(offset)))
+        detail = max(1, min(3, int(detail)))
+        line_width = max(0.1, min(5.0, float(line_width)))
+        interval_km = max(0.01, min(10.0, float(interval_km)))
+        line_style = str(line_style or "solid").lower()
+        if line_style not in ("solid", "dash", "dot"):
+            line_style = "solid"
+        try:
+            colour = str(line_color or "#1c1e22").lstrip("#")
+            if len(colour) == 3:
+                colour = "".join(ch * 2 for ch in colour)
+            line_rgb = tuple(int(colour[i:i + 2], 16) for i in (0, 2, 4))
+        except (ValueError, IndexError):
+            line_rgb = (28, 30, 34)
+        key = (int(zoom), int(x), int(y), round(minimum, 3),
+               round(maximum, 3), count, alpha, line_alpha, palette,
+               scale, line_width, line_rgb, line_style, round(offset, 4), detail,
+               round(interval_km, 4), round(float(contour_scale), 3), bool(reverse))
+        with self._lock:
+            cached = self._overlay_tiles.get(key)
+            if cached is not None:
+                self._overlay_tiles.move_to_end(key)
+                return cached
+        terrain = self._tile_terrain(zoom, x, y)
+        size = TILE_PX * detail
+        lon, lat = _lonlat_grid(zoom, x, y, size)
+        # Contours have their own sampling resolution.  At low map zoom the
+        # base tile's DEM level is coarse enough that small crater rims fall
+        # between samples and the contour disappears; 自动 chooses a finer
+        # level at low zoom (up to 8x), while the explicit menu can override it.
+        total_w = cols * TILE_PX
+        total_h = rows * TILE_PX
+        center_lat = float(np.mean(lat))
+        km_per_px = (
+            math.radians(360.0 / total_w) * terrain.reference_radius_km
+            * max(math.cos(math.radians(center_lat)), 0.08)
+        )
+        scale_power = float(contour_scale)
+        if not math.isfinite(scale_power) or scale_power <= 0:
+            scale_power = max(1.0, min(8.0, 8.0 / max(1.0, float(zoom))))
+        scale_power = max(1.0, min(16.0, scale_power))
+        try:
+            level = int(terrain.dem.level_for_ground_scale(
+                km_per_px / scale_power))
+        except Exception:
+            level = 0
+        level = max(0, min(level, int(getattr(terrain.dem, "n_levels", level + 1)) - 1))
+        heights = np.asarray(terrain.dem.sample(lon, lat, level), dtype=np.float64)
+        if heights.shape != lon.shape:
+            heights = np.broadcast_to(heights, lon.shape).astype(np.float64)
+        # Altas-style relief inside the colour layer: a flat elevation tint
+        # hides every small crater, even though the contour lines have it.
+        # A fixed north-west light (315°, 45°) makes the same DEM structure
+        # visible without coupling the overlay to the page's current Sun.
+        try:
+            dlon = math.radians(360.0 / (cols * size))
+            dlat = math.radians(180.0 / (rows * size))
+            coslat = np.maximum(np.cos(np.radians(lat)), 0.02)
+            dx = dlon * terrain.reference_radius_km * coslat
+            dy = dlat * terrain.reference_radius_km
+            gy, gx = np.gradient(heights, dy, dx)
+            norm = np.sqrt(gx * gx + gy * gy + 1.0)
+            # light from north-west, 45° above the local horizon
+            lx = -math.sqrt(0.5)
+            ly = -math.sqrt(0.5)
+            lz = math.sqrt(0.5)
+            hill = np.clip((-gx * lx - gy * ly + lz) / norm, 0.0, 1.0)
+            shade = 0.35 + 0.65 * hill
+        except Exception:
+            shade = np.ones_like(heights)
+        t = np.clip((heights - minimum) / max(maximum - minimum, 1e-9), 0.0, 1.0)
+        if scale == "log":
+            # A display-space log stretch.  Elevations can be negative, so use
+            # log1p on the normalised fraction rather than log(height).
+            t = np.log1p(t * 99.0) / math.log(100.0)
+        if reverse:
+            t = 1.0 - t
+        t = np.clip(t + offset, 0.0, 1.0)
+        rgb = _colormap_rgb(palette, t) * shade[..., None]
+        rgba = np.zeros((*heights.shape, 4), dtype=np.uint8)
+        rgba[..., :3] = np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        rgba[..., 3] = alpha
+        # Contours use a fixed *local* elevation interval (default 100 m), not
+        # a count spread over the whole DEM range: that is what keeps small
+        # craters visible at atlas-like scales.  Major contours every five
+        # intervals are darker.
+        band = np.floor((heights - minimum) / interval_km).astype(np.int64)
+        edge = np.zeros_like(band, dtype=bool)
+        edge[:, 1:] |= band[:, 1:] != band[:, :-1]
+        edge[1:, :] |= band[1:, :] != band[:-1, :]
+        if line_style != "solid":
+            yy, xx = np.indices(edge.shape)
+            if line_style == "dash":
+                edge &= ((xx + yy) // 4) % 2 == 1
+            else:
+                edge &= (xx % 4 == 0) & (yy % 4 == 0)
+        for _ in range(max(1, int(round(line_width * detail))) - 1):
+            edge = (edge | np.roll(edge, 1, axis=0)
+                    | np.roll(edge, -1, axis=0)
+                    | np.roll(edge, 1, axis=1)
+                    | np.roll(edge, -1, axis=1))
+        major = edge & ((band % 5) == 0)
+        rgba[edge, 3] = line_alpha
+        rgba[edge, :3] = line_rgb
+        rgba[major, 3] = min(255, line_alpha + 20)
+        rgba[major, :3] = tuple(max(0, channel - 14) for channel in line_rgb)
+        image = Image.fromarray(rgba)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", compress_level=3)
+        png = buffer.getvalue()
+        with self._lock:
+            self._overlay_tiles[key] = png
+            self._overlay_tiles.move_to_end(key)
+            while len(self._overlay_tiles) > 128:
+                self._overlay_tiles.popitem(last=False)
+        return png
+
     # -- tiles -----------------------------------------------------------
     def tile(self, zoom: int, x: int, y: int,
              light: Optional[Tuple[float, float]] = None,
-             earthshine: bool = True, shadow_bias: float = 0.0) -> bytes:
+             earthshine: bool = True, shadow_bias: float = 0.0,
+             surface_texture: bool = True, contrast: float = 1.0,
+             low_sun: bool = False, relief_direction: str = "W") -> bytes:
         cols, rows = _tile_counts(zoom)
         if not (0 <= zoom <= MAX_ZOOM and 0 <= x < cols and 0 <= y < rows):
             raise moonlib.MoonlibError("tile outside the pyramid.")
@@ -1584,14 +1948,19 @@ class LunarMapService:
         )
         bias = max(-0.5, min(0.5, float(shadow_bias)))
         key = (int(zoom), int(x), int(y), light_key, bool(earthshine),
-               round(bias, 3))
+               round(bias, 3), bool(surface_texture), round(float(contrast), 3),
+               bool(low_sun), str(relief_direction).upper()[:1])
         with self._lock:
             cached = self._tiles.get(key)
             if cached is not None:
                 self._tiles.move_to_end(key)
                 return cached
         png = self._render_tile(int(zoom), int(x), int(y), light,
-                                earthshine=bool(earthshine), shadow_bias=bias)
+                                earthshine=bool(earthshine), shadow_bias=bias,
+                                surface_texture=bool(surface_texture),
+                                contrast=float(contrast),
+                                low_sun=bool(low_sun),
+                                relief_direction=relief_direction)
         with self._lock:
             self._tiles[key] = png
             self._tiles.move_to_end(key)
@@ -1739,7 +2108,11 @@ class LunarMapService:
     def _render_tile(self, zoom: int, x: int, y: int,
                      light: Optional[Tuple[float, float]] = None,
                      earthshine: bool = True,
-                     shadow_bias: float = 0.0) -> bytes:
+                     shadow_bias: float = 0.0,
+                     surface_texture: bool = True,
+                     contrast: float = 1.0,
+                     low_sun: bool = False,
+                     relief_direction: str = "W") -> bytes:
         from PIL import Image
 
         terrain = self._tile_terrain(zoom, x, y)
@@ -1812,6 +2185,22 @@ class LunarMapService:
                 + np.cos(lat_r) * np.sin(lon_r) * sy
                 + np.sin(lat_r) * sz
             )
+        if low_sun:
+            # Local low-sun mosaic: each tile gets the same grazing light
+            # direction in its own local east/north frame.  There is no global
+            # terminator and no earthshine; this is a relief mosaic, not a
+            # simulated time of day.
+            altitude = math.radians(12.0)
+            direction = str(relief_direction or "W").upper()[:1]
+            if direction == "E":
+                light_east, light_north = math.cos(altitude), 0.0
+            elif direction == "S":
+                light_east, light_north = 0.0, -math.cos(altitude)
+            elif direction == "N":
+                light_east, light_north = 0.0, math.cos(altitude)
+            else:  # W, and any legacy/unknown value
+                light_east, light_north = -math.cos(altitude), 0.0
+            light_up = math.sin(altitude)
         direct = (
             normal_east * light_east
             + normal_north * light_north
@@ -1824,10 +2213,11 @@ class LunarMapService:
         # 地照 is the earthshine floor on the night side.  Turning it off lets
         # the night (and the core of a cast shadow) go to black; the brightness
         # and shadow-bias controls can then lift whatever is still wanted.
-        ambient = 0.20 if light is None else (0.13 if earthshine else 0.0)
-        gain = 0.90 if light is None else 0.88
+        ambient = (0.28 if low_sun else
+                   0.20 if light is None else (0.13 if earthshine else 0.0))
+        gain = 1.45 if low_sun else (0.90 if light is None else 0.88)
         shadow = None
-        if light is not None:
+        if light is not None and not low_sun:
             if zoom >= 6:
                 # 132-260x is the magnification where the high-resolution
                 # picture and the cast shadow read as one surface.  Freeze the
@@ -1862,7 +2252,7 @@ class LunarMapService:
         shade = np.clip(shade, 0.0, 1.05)
 
         colors = None
-        if terrain.albedo is not None:
+        if surface_texture and terrain.albedo is not None:
             try:
                 colors = np.asarray(
                     terrain.albedo_rgb(lon, lat, albedo_level), dtype=np.float64
@@ -1881,6 +2271,9 @@ class LunarMapService:
                            0.15, 1.0)
             base = np.repeat(grey[..., None], 3, axis=-1)
         rgb = np.clip(base * shade[..., None], 0.0, 1.0)
+        factor = max(0.1, min(10.0, float(contrast)))
+        if abs(factor - 1.0) > 1e-6:
+            rgb = np.clip((rgb - 0.5) * factor + 0.5, 0.0, 1.0)
         # A soft highlight shoulder: the full-Moon shading otherwise multiplies
         # bright highland albedo straight towards 255 and the landforms
         # disappear in a white field.  The curve keeps the midtones and rolls
@@ -2198,7 +2591,7 @@ def _delete_photo(photo_id: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     service: LunarMapService
 
-    server_version = "TsukikageMap/1.1.5"
+    server_version = "TsukikageMap/1.2.0"
 
     # -- plumbing --------------------------------------------------------
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -2280,6 +2673,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, self.service.feature_query(query))
             if path == "/api/map/search":
                 return self._json(200, self.service.search(query))
+            if path == "/api/map/meta":
+                return self._json(200, self.service.feature_meta(query))
+            if path == "/api/map/elevation-range":
+                return self._json(200, self.service.elevation_range(query))
             if path == "/api/map/point":
                 return self._json(200, self.service.point(query))
             if path == "/api/map/lighting":
@@ -2331,6 +2728,33 @@ class Handler(BaseHTTPRequestHandler):
                        if re.fullmatch(r"[0-9a-f]{16}", part)][:16]
                 png = self.service.photo_overlay_tile(zoom, x, y, ids)
                 return self._send(200, png, "image/png", cache="no-store")
+            if path == "/api/map/overlay/palette":
+                return self._json(200, self.service.overlay_palette(
+                    str(query.get("name") or "jet"),
+                    int(_finite(query.get("n"), 64.0))))
+            match = re.fullmatch(
+                r"/api/map/overlay/(\d+)/(\d+)/(\d+)\.png", path)
+            if match:
+                zoom, x, y = (int(part) for part in match.groups())
+                png = self.service.overlay_tile(
+                    zoom, x, y,
+                    minimum=_finite(query.get("min"), -8.0),
+                    maximum=_finite(query.get("max"), 10.0),
+                    levels=int(_finite(query.get("levels"), 24.0)),
+                    alpha=int(_finite(query.get("alpha"), 112.0)),
+                    line_alpha=int(_finite(query.get("line_alpha"), 220.0)),
+                    palette=str(query.get("palette") or "rainbow"),
+                    scale=str(query.get("scale") or "linear"),
+                    line_width=_finite(query.get("line_width"), 1.0),
+                    line_color=str(query.get("line_color") or "#1c1e22"),
+                    line_style=str(query.get("line_style") or "solid"),
+                    offset=_finite(query.get("offset"), 0.0),
+                    detail=int(_finite(query.get("detail"), 1.0)),
+                    interval_km=_finite(query.get("interval_km"), 0.1),
+                    contour_scale=_finite(query.get("contour_scale"), 0.0),
+                    reverse=query.get("reverse", "0") in ("1", "true", "True"),
+                )
+                return self._send(200, png, "image/png", cache="no-store")
             match = re.fullmatch(r"/api/map/tile/(\d+)/(\d+)/(\d+)\.png", path)
             if match:
                 zoom, x, y = (int(part) for part in match.groups())
@@ -2350,7 +2774,12 @@ class Handler(BaseHTTPRequestHandler):
                     shadow_bias = 0.0
                 png = self.service.tile(
                     zoom, x, y, light, earthshine=earthshine,
-                    shadow_bias=shadow_bias)
+                    shadow_bias=shadow_bias,
+                    surface_texture=query.get("texture", "1")
+                    not in ("0", "false", "False"),
+                    contrast=_finite(query.get("contrast"), 1.0),
+                    low_sun=query.get("relief", "0") in ("1", "true", "True"),
+                    relief_direction=str(query.get("relief_dir") or "W"))
                 # Tiles carry baked shadows; leaving them in the browser
                 # cache means a restart can still be showing yesterday's
                 # algorithm, which is exactly the local mismatch reported.

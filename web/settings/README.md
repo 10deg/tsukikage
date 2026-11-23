@@ -54,3 +54,18 @@
 ```bash
 ./.venv/bin/python tools/preview_annotations.py --list-classes
 ```
+
+## Clair-Obscur 事件表
+
+内置表在 `src/moonlib/data/clair_obscur.csv`；这里的 `clair_obscur_user.csv` 用来放
+自定义或修正的行，列名与内置表相同。网页事件栏的「刷新」会重新读取两份表；同名事件以
+用户表为准。
+没有锚点、只由余经度决定的条目（如 Cassini's Moon Maiden、Aries' Hoofprint）沿用
+参考表写法：`余经度` 填最佳值，`起始太阳高度` / `结束太阳高度` 两列填余经度窗口。
+有锚点的条目则按列名填太阳高度窗口。
+
+`default.conf` 在项目根目录，是页面启动时统一应用的默认值；网页上的「存为默认」会覆盖它。
+这里 `web/settings/` 下的 `.conf` 仍是可命名的个人设置文件。
+
+根目录 `default.conf` 里的 `"when": "now"` 表示每次打开页面读取电脑当前时间；把它改成具体
+日期时间则固定为那个时刻。网页上的「存为默认」会保留 `now`（若本次没有手动改过时间）。

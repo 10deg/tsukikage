@@ -71,7 +71,10 @@ const LARGE_CRATER_KM = 100;
 
 //: Region names sit across their formation, like the full-disk page, instead of
 //: hanging off a marker.
-const REGION_LABEL_CLASSES = new Set(['basin', 'mare', 'lacus', 'sinus']);
+const REGION_LABEL_CLASSES = new Set(['basin', 'mare', 'lacus', 'sinus', 'palus']);
+//: The named tracts a reader expects to see at every density.  Maria lead;
+//: lakes, bays and marshes follow, but none of them is thinned by the slider.
+const MAJOR_REGION_CLASSES = new Set(['mare', 'lacus', 'sinus', 'palus']);
 
 const $ = (id) => document.getElementById(id);
 
@@ -87,6 +90,22 @@ function craterish(feature) {
   if (feature.class === 'crater') return true;
   return feature.class === 'libration'
     && /crater\s*$/i.test(String(feature.note || ''));
+}
+
+/** A crater name without its class word, letter still in place.
+ *
+ * The catalogue writes a satellite as "克拉维斯坑P" (坑 before the letter), so
+ * dropping only a trailing 坑 left "克拉维斯坑P" on screen and then produced
+ * "克拉维斯坑P坑" when the suffix was switched on.  Accept the class word at
+ * either position and always put the letter last.
+ */
+function craterCaptionText(text) {
+  const raw = String(text || '').trim();
+  const match = /坑\s*([A-Z])?\s*$/.exec(raw);
+  if (!match) return raw;
+  const base = raw.slice(0, match.index).trim();
+  const letter = match[1];
+  return letter ? `${base} ${letter}` : base;
 }
 
 /** The name a label carries, in the current language and label modes.
@@ -108,8 +127,9 @@ function featureName(feature) {
   const en = String(feature.name_en || feature.name || '').trim();
   if (state.language === 'en') return en || zh;
   let chinese = zh || en;
-  if (state.craterSuffix && craterish(feature)) {
-    chinese = `${chinese.replace(/坑\s*$/, '')}坑`;
+  if (craterish(feature)) {
+    chinese = craterCaptionText(chinese);
+    if (state.craterSuffix) chinese = `${chinese}坑`;
   }
   if (state.language === 'both') {
     return en && en !== chinese ? `${chinese}·${en}` : chinese;
@@ -158,6 +178,8 @@ const state = {
   health: null,
   layers: null,
   active: new Set(),
+  //: Classes whose features are highlighted and painted above the rest.
+  emphasis: new Set(),
   labels: true,
   marksOn: true,
   outlines: true,
@@ -168,6 +190,7 @@ const state = {
   satelliteFull: true,
   satellites: true,
   craterSuffix: false,
+  craterEmphasis: 1.5,
   labelFont: 0,
   labelColour: true,
   textColor: '#eef2ff',
@@ -181,6 +204,13 @@ const state = {
   outlineStyle: 'solid',
   avoidOverlap: true,
   brightness: 1,
+  contrast: 1,
+  surfaceTexture: true,
+  lowSunStatic: false,
+  lowSunPrevLighting: true,
+  lowSunPrevEarthshine: true,
+  lowSunPrevTexture: true,
+  lowSunDirection: 'W',
   earthshine: true,
   shadowBias: 0,
   zoom: 0,
@@ -192,6 +222,23 @@ const state = {
   height: 1,
   dpr: 1,
   tiles: new Map(),
+  overlayOn: false,
+  overlayOffset: 0,
+  overlayMin: -8,
+  overlayMax: 10,
+  overlayRangeKey: '',
+  overlayRangeTimer: null,
+  overlayRangeManual: false,
+  overlayHeightLocked: false,
+  overlayReverse: false,
+  mapEphemerisChoices: {},
+  overlayDragKind: null,
+  overlayTiles: new Map(),
+  overlaySourceCanvas: null,
+  overlaySourcePixels: null,
+  overlaySourceKey: '',
+  overlaySourceReadyKey: '',
+  overlaySourceLoadingKey: '',
   loading: 0,
   features: [],
   featureTotal: 0,
@@ -602,6 +649,36 @@ function clampCenter() {
   state.mercY = 0;
 }
 
+/** The equirectangular scale that shows the whole world in this canvas. */
+function viewScaleAtFit() {
+  const world = worldSize();
+  return Math.min(state.width / world.w, state.height / world.h) * 0.94;
+}
+
+/** Carry the centre and magnification across a projection change.
+ *
+ * Equirectangular/Mercator share ``centerLon``/``centerLat``/``scale``; the
+ * sphere keeps its own ``globe.lon``/``lat``/``zoom``.  Switching without this
+ * bridge dropped the reader back to the last sphere view (or to a fit-scale
+ * flat map), which is the "reset" this function removes.
+ */
+function transferViewBetweenProjections(from, to) {
+  const flat = (mode) => mode === 'equirect' || mode === 'mercator';
+  if (from === to) return;
+  if (flat(from) && to === 'globe') {
+    state.globe.lon = state.centerLon;
+    state.globe.lat = state.centerLat;
+    const fit = viewScaleAtFit();
+    state.globe.zoom = clamp(state.scale / Math.max(fit, 1e-9), 0.25, 8);
+    return;
+  }
+  if (from === 'globe' && flat(to)) {
+    state.centerLon = state.globe.lon;
+    state.centerLat = state.globe.lat;
+    state.scale = clamp(viewScaleAtFit() * state.globe.zoom, 0.18, 16);
+  }
+}
+
 function fitView() {
   endInteraction();
   if (isGlobeLike()) {
@@ -614,6 +691,7 @@ function fitView() {
     state.mercY = 0;
     state.earthPanX = 0;
     state.earthPanY = 0;
+    updateOverlayAvailability();
     flushRender();
     scheduleFeatures();
     scheduleViewSave();
@@ -1940,34 +2018,30 @@ async function loadRebuildStatus() {
   }
 }
 
-function syncMapEphemerisFileMenu() {
-  const mode = $('map-ephemeris-mode');
-  const file = $('map-ephemeris-file');
-  if (!mode || !file) return;
-  file.hidden = mode.value !== 'custom';
+function mapEphemerisChoices(payload) {
+  return Array.isArray(payload && payload.available) ? payload.available : [];
 }
 
 function paintMapEphemeris(payload) {
-  if (!payload) return;
-  const mode = $('map-ephemeris-mode');
-  const file = $('map-ephemeris-file');
-  const note = $('map-ephemeris-note');
-  if (!mode || !file) return;
-  mode.value = ['recent', 'long', 'custom'].includes(payload.mode)
-    ? payload.mode : 'recent';
-  file.innerHTML = '';
-  file.options.length = 0;
-  for (const choice of payload.choices || []) {
+  const select = $('map-ephemeris-choice');
+  if (!select) return;
+  const choices = mapEphemerisChoices(payload);
+  state.mapEphemerisChoices = {};
+  select.innerHTML = '';
+  for (const choice of choices) {
     const option = document.createElement('option');
-    option.value = choice.name;
-    option.textContent = choice.name;
-    file.appendChild(option);
+    option.value = choice.id || `${choice.mode}:${choice.file || ''}`;
+    option.textContent = choice.label || choice.file || choice.mode;
+    option.dataset.mode = choice.mode || 'recent';
+    option.dataset.file = choice.file || '';
+    state.mapEphemerisChoices[option.value] = choice;
+    select.appendChild(option);
   }
-  if (payload.file) file.value = payload.file;
-  syncMapEphemerisFileMenu();
-  if (note) {
-    note.textContent = `${payload.label}${payload.file ? ' · ' + payload.file : ''}`;
-  }
+  const current = choices.find((choice) => (
+    choice.mode === payload.mode
+    && (choice.file || '') === (payload.file || '')
+  ));
+  if (current) select.value = current.id || `${current.mode}:${current.file || ''}`;
 }
 
 async function loadMapEphemeris() {
@@ -1977,28 +2051,30 @@ async function loadMapEphemeris() {
     if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
     paintMapEphemeris(payload);
   } catch (error) {
-    if ($('map-ephemeris-note')) {
-      $('map-ephemeris-note').textContent =
-        '读取星历失败：' + String(error.message || error);
+    if ($('map-ephemeris-choice')) {
+      $('map-ephemeris-choice').innerHTML = '';
+      const option = document.createElement('option');
+      option.textContent = '无可用星历';
+      $('map-ephemeris-choice').appendChild(option);
     }
   }
 }
 
-async function applyMapEphemeris() {
-  const mode = $('map-ephemeris-mode').value;
-  const file = $('map-ephemeris-file').value;
-  const button = $('map-ephemeris-apply');
-  if (mode === 'custom' && !file) {
-    setStatus('kernels 目录里没有可用的自定义 .bsp', 'error');
-    return;
-  }
-  if (button) { button.disabled = true; button.textContent = '重载中…'; }
+async function applyMapEphemeris(choiceId) {
+  const select = $('map-ephemeris-choice');
+  if (!select) return;
+  const choice = state.mapEphemerisChoices[choiceId];
+  if (!choice) return;
+  select.disabled = true;
   setStatus('正在切换星历并重载内核…');
   try {
     const response = await fetch('/api/map/ephemeris', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, file: mode === 'custom' ? file : null }),
+      body: JSON.stringify({
+        mode: choice.mode || 'recent',
+        file: choice.file || null,
+      }),
     });
     const payload = await response.json();
     if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
@@ -2007,18 +2083,19 @@ async function applyMapEphemeris() {
     state.projectedBase = null;
     await loadLighting().catch(() => {});
     render();
-    setStatus(`星历已切换为 ${payload.label}${payload.file ? ' · ' + payload.file : ''}`);
+    setStatus(`星历已切换为 ${payload.label || choice.label || choice.mode}`);
   } catch (error) {
     setStatus('星历切换失败：' + String(error.message || error), 'error');
   } finally {
-    if (button) { button.disabled = false; button.textContent = '切换'; }
+    select.disabled = false;
   }
 }
 
 function wireDataSettings() {
-  if ($('map-ephemeris-mode')) {
-    $('map-ephemeris-mode').addEventListener('change', syncMapEphemerisFileMenu);
-    $('map-ephemeris-apply').addEventListener('click', applyMapEphemeris);
+  if ($('map-ephemeris-choice')) {
+    $('map-ephemeris-choice').addEventListener('change', (event) => {
+      applyMapEphemeris(event.target.value);
+    });
   }
   if ($('map-copy-link')) {
     $('map-copy-link').addEventListener('click', copyMapLink);
@@ -2738,6 +2815,7 @@ function render() {
   drawManualMarks();
   drawMapMeasure();
   drawScaleBar();
+  if (state.overlayOn) scheduleOverlayRange();
   const zoomLabel = $('zoom-label');
   if (zoomLabel) {
     // Magnification relative to the z0 tile grid: each zoom step doubles the
@@ -2769,6 +2847,14 @@ function tileQuery() {
   if (lightKey) params.set('light', lightKey);
   params.set('v', TILE_VERSION);
   if (!state.earthshine) params.set('earth', '0');
+  if (state.lowSunStatic) {
+    params.set('relief', '1');
+    params.set('relief_dir', state.lowSunDirection || 'W');
+  }
+  if (!state.surfaceTexture) params.set('texture', '0');
+  let contrast = Number(state.contrast) || 1;
+  if (state.lowSunStatic) contrast = Math.max(1.6, contrast);
+  if (Math.abs(contrast - 1) > 0.001) params.set('contrast', contrast.toFixed(2));
   const bias = Number(state.shadowBias) || 0;
   if (Math.abs(bias) > 0.0005) params.set('shadow', bias.toFixed(3));
   return '?' + params.toString();
@@ -2776,6 +2862,8 @@ function tileQuery() {
 
 function clearBaseCaches() {
   state.tiles.clear();
+  state.overlayTiles.clear();
+  clearOverlaySource();
   state.sourceCanvas = null;
   state.sourcePixels = null;
   state.sourceKey = '';
@@ -2783,9 +2871,28 @@ function clearBaseCaches() {
   state.sourceLoadingKey = '';
 }
 
+function clearProjectionSource() {
+  clearOverlaySource();
+  state.sourceCanvas = null;
+  state.sourcePixels = null;
+  state.sourceKey = '';
+  state.sourceReadyKey = '';
+  state.sourceLoadingKey = '';
+}
+
+function clearOverlaySource() {
+  state.overlaySourceCanvas = null;
+  state.overlaySourcePixels = null;
+  state.overlaySourceKey = '';
+  state.overlaySourceReadyKey = '';
+  state.overlaySourceLoadingKey = '';
+}
+
 function tileCacheKey(z, x, y) {
   return tileKey(z, x, y) + '|' + (tileLightKey() || 'plain')
-    + '|' + tileToneKey();
+    + '|' + tileToneKey() + '|' + (state.surfaceTexture ? 't1' : 't0')
+    + '|' + (Number(state.contrast) || 1).toFixed(2)
+    + '|' + (state.lowSunStatic ? 'static:' + state.lowSunDirection : 'live');
 }
 
 function tileEntry(z, x, y) {
@@ -2813,6 +2920,312 @@ function tileEntry(z, x, y) {
   };
   entry.image.src = `/api/map/tile/${z}/${x}/${y}.png${tileQuery()}`;
   return entry;
+}
+
+const overlayPaletteCache = new Map();
+let overlayColorSeq = 0;
+
+async function overlayPaletteColors(name) {
+  const key = String(name || 'rainbow');
+  if (overlayPaletteCache.has(key)) return overlayPaletteCache.get(key);
+  const response = await fetch(
+    '/api/map/overlay/palette?name=' + encodeURIComponent(key) + '&n=64');
+  const payload = await response.json();
+  if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
+  const colors = payload.colors || [];
+  overlayPaletteCache.set(key, colors);
+  return colors;
+}
+
+function overlayReadout(id, value) {
+  const node = $(id);
+  if (node) node.textContent = value;
+}
+
+const OVERLAY_ELEVATION_MIN = -10;
+const OVERLAY_ELEVATION_MAX = 11;
+
+function overlayValues() {
+  let min = Number(state.overlayMin);
+  let max = Number(state.overlayMax);
+  if (!Number.isFinite(min)) min = -8;
+  if (!Number.isFinite(max)) max = 10;
+  min = Math.max(OVERLAY_ELEVATION_MIN, Math.min(OVERLAY_ELEVATION_MAX, min));
+  max = Math.max(OVERLAY_ELEVATION_MIN, Math.min(OVERLAY_ELEVATION_MAX, max));
+  if (min > max - 0.5) {
+    max = Math.min(OVERLAY_ELEVATION_MAX, min + 0.5);
+  }
+  state.overlayMin = min;
+  state.overlayMax = max;
+  return { min, max };
+}
+
+function overlayHandlePosition(kind) {
+  const { min, max } = overlayValues();
+  const span = OVERLAY_ELEVATION_MAX - OVERLAY_ELEVATION_MIN;
+  if (kind === 'min') return (min - OVERLAY_ELEVATION_MIN) / span * 100;
+  if (kind === 'max') return (max - OVERLAY_ELEVATION_MIN) / span * 100;
+  return (state.overlayOffset + 0.5) * 100;
+}
+
+function overlaySetHandles() {
+  for (const kind of ['min', 'max', 'offset']) {
+    const handle = $('overlay-handle-' + kind);
+    if (handle) handle.style.left = `${overlayHandlePosition(kind)}%`;
+  }
+}
+
+async function refreshOverlayColorbar() {
+  const { min, max } = overlayValues();
+  const palette = ($('overlay-palette') && $('overlay-palette').value) || 'jet';
+  const offset = Number(state.overlayOffset) || 0;
+  overlaySetHandles();
+  const seq = ++overlayColorSeq;
+  try {
+    const colors = await overlayPaletteColors(palette);
+    if (seq !== overlayColorSeq || !colors.length) return;
+    const shift = Math.round(offset * (colors.length - 1));
+    let shifted = colors.map((_, index) => colors[
+      Math.max(0, Math.min(colors.length - 1, index + shift))]);
+    if (state.overlayReverse) shifted = shifted.slice().reverse();
+    const gradient = `linear-gradient(90deg, ${shifted.join(', ')})`;
+    const track = $('overlay-color-gradient');
+    if (track) track.style.background = gradient;
+    const minimum = $('overlay-min-label');
+    const maximum = $('overlay-max-label');
+    if (minimum) minimum.textContent = `${min.toFixed(1)} km`;
+    if (maximum) maximum.textContent = `${max.toFixed(1)} km`;
+  } catch (error) {
+    const track = $('overlay-color-gradient');
+    if (track) track.style.background = '#273140';
+  }
+}
+
+function overlaySetFromFraction(kind, fraction) {
+  const f = Math.max(0, Math.min(1, Number(fraction) || 0));
+  const range = OVERLAY_ELEVATION_MAX - OVERLAY_ELEVATION_MIN;
+  if (kind === 'min') {
+    const { max } = overlayValues();
+    state.overlayMin = Math.round(Math.max(
+      OVERLAY_ELEVATION_MIN,
+      Math.min(max - 0.5, OVERLAY_ELEVATION_MIN + f * range)) * 2) / 2;
+  } else if (kind === 'max') {
+    const { min } = overlayValues();
+    state.overlayMax = Math.round(Math.min(
+      OVERLAY_ELEVATION_MAX,
+      Math.max(min + 0.5, OVERLAY_ELEVATION_MIN + f * range)) * 2) / 2;
+  } else {
+    state.overlayOffset = Math.round((f - 0.5) * 100) / 100;
+  }
+  refreshOverlayColorbar();
+  overlayTilesChanged();
+}
+
+let overlayTimer = null;
+
+function overlayTrackFraction(event, kind = 'min') {
+  const track = $(kind === 'offset' ? 'overlay-color-track' : 'overlay-height-track');
+  if (!track) return 0.5;
+  const rect = track.getBoundingClientRect();
+  if (!(rect.width > 0)) return 0.5;
+  return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+}
+
+function overlayViewBounds() {
+  if (isGlobeLike()) return null;
+  const world = worldSize();
+  const pxPerDeg = (world.w / 360) * state.scale;
+  const span = pxPerDeg > 0 ? state.width / pxPerDeg : 360;
+  if (span >= 359.999) {
+    return { west: -180, east: 180, north: 90, south: -90 };
+  }
+  const westPoint = screenToLonLat(0, 0);
+  const eastPoint = screenToLonLat(state.width, state.height);
+  let west = westPoint ? westPoint.lon : -180;
+  let east = eastPoint ? eastPoint.lon : 180;
+  let north = westPoint ? westPoint.lat : 90;
+  let south = eastPoint ? eastPoint.lat : -90;
+  if (north < south) { north = 90; south = -90; }
+  if (east <= west) east += 360;
+  return { west, east, north, south };
+}
+
+async function autoFitOverlay(kind) {
+  const bounds = overlayViewBounds();
+  if (!bounds) return;
+  const query = new URLSearchParams({
+    west: String(bounds.west), east: String(bounds.east),
+    south: String(bounds.south), north: String(bounds.north),
+  });
+  try {
+    const response = await fetch('/api/map/elevation-range?' + query.toString());
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error || response.statusText);
+    const minimum = Math.round(Number(payload.minimum_km) * 2) / 2;
+    const maximum = Math.round(Number(payload.maximum_km) * 2) / 2;
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) return;
+    if (kind === 'min' || kind === 'both') {
+      state.overlayMin = Math.min(minimum, maximum - 0.5);
+    }
+    if (kind === 'max' || kind === 'both') {
+      state.overlayMax = Math.max(maximum, minimum + 0.5);
+    }
+    state.overlayRangeManual = false;
+    state.overlayHeightLocked = false;
+    const lock = $('overlay-lock-height');
+    if (lock) {
+      lock.setAttribute('aria-pressed', 'false');
+      lock.textContent = '锁定当前高度';
+    }
+    state.overlayRangeKey = JSON.stringify(overlayViewBounds());
+    overlayValues();
+    refreshOverlayColorbar();
+    overlayTilesChanged();
+  } catch (error) {
+    // A missing range leaves the reader's current bounds alone.
+  }
+}
+
+function overlayPointerMove(event) {
+  if (!state.overlayDragKind) return;
+  overlaySetFromFraction(state.overlayDragKind,
+    overlayTrackFraction(event, state.overlayDragKind));
+  if (event.preventDefault) event.preventDefault();
+}
+
+function scheduleOverlayRange() {
+  if (!state.overlayOn || state.overlayRangeManual) return;
+  const bounds = overlayViewBounds();
+  if (!bounds) return;
+  const key = JSON.stringify(bounds);
+  if (key === state.overlayRangeKey) return;
+  state.overlayRangeKey = key;
+  if (state.overlayRangeTimer) clearTimeout(state.overlayRangeTimer);
+  state.overlayRangeTimer = setTimeout(() => {
+    state.overlayRangeTimer = null;
+    if (!state.overlayOn || state.overlayRangeManual) return;
+    autoFitOverlay('both');
+  }, 260);
+}
+
+function updateOverlayAvailability() {
+  const disabled = state.projection === 'globe' || state.projection === 'earth';
+  const toggle = $('overlay-toggle');
+  const panel = $('overlay-panel');
+  if (panel) panel.dataset.disabled = String(disabled);
+  if (toggle) {
+    toggle.disabled = disabled;
+    toggle.title = disabled ? '球面模式不支持叠加层' : '在底图上叠加高程上色与等高线';
+    if (disabled) toggle.checked = false;
+  }
+  if (disabled) {
+    state.overlayOn = false;
+    if ($('overlay-options')) $('overlay-options').hidden = true;
+  } else if ($('overlay-options')) {
+    $('overlay-options').hidden = !state.overlayOn;
+  }
+}
+
+function overlayTilesChanged() {
+  state.overlayTiles.clear();
+  clearProjectionSource();
+  clearOverlaySource();
+  if (state.overlayOn) {
+    if (overlayTimer) clearTimeout(overlayTimer);
+    overlayTimer = setTimeout(() => {
+      overlayTimer = null;
+      if (state.overlayOn) render();
+    }, 120);
+  }
+}
+
+function overlayQuery() {
+  const valueOr = (id, fallback) => {
+    const node = $(id);
+    const value = node ? Number(node.value) : NaN;
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const params = new URLSearchParams();
+  const bounds = overlayValues();
+  params.set('min', String(bounds.min));
+  params.set('max', String(bounds.max));
+  params.set('interval_km', String(Math.max(0.01, Math.min(1,
+    (valueOr('overlay-interval', 100) || 100) / 1000))));
+  params.set('alpha', String(Math.round(Math.max(0, Math.min(1,
+    valueOr('overlay-alpha', 0.44))) * 255)));
+  params.set('scale', ($('overlay-scale') && $('overlay-scale').value) || 'linear');
+  params.set('palette', ($('overlay-palette') && $('overlay-palette').value) || 'jet');
+  params.set('line_color', ($('overlay-line-color') && $('overlay-line-color').value) || '#000000');
+  params.set('line_width', String(Math.max(0.1, Math.min(5,
+    valueOr('overlay-line-width', 1)))));
+  params.set('line_alpha', String(Math.round(Math.max(0, Math.min(1,
+    valueOr('overlay-line-alpha', 0.86))) * 255)));
+  params.set('offset', String(Number(state.overlayOffset) || 0));
+  if (state.overlayReverse) params.set('reverse', '1');
+  params.set('contour_scale', String(valueOr('overlay-contour-scale', 0)));
+  params.set('detail', '2');
+  return params.toString();
+}
+
+function overlayTileEntry(z, x, y) {
+  const query = overlayQuery();
+  const key = tileKey(z, x, y) + '|' + query;
+  let entry = state.overlayTiles.get(key);
+  if (entry) return entry;
+  entry = { image: new Image(), ready: false, failed: false };
+  state.overlayTiles.set(key, entry);
+  while (state.overlayTiles.size > 240) {
+    const oldest = state.overlayTiles.keys().next().value;
+    state.overlayTiles.delete(oldest);
+  }
+  state.loading += 1;
+  updateLoading();
+  entry.image.onload = () => {
+    entry.ready = true;
+    state.loading = Math.max(0, state.loading - 1);
+    updateLoading();
+    render();
+  };
+  entry.image.onerror = () => {
+    entry.failed = true;
+    state.loading = Math.max(0, state.loading - 1);
+    updateLoading();
+  };
+  entry.image.src = `/api/map/overlay/${z}/${x}/${y}.png?${query}`;
+  return entry;
+}
+
+/** Draw the transparent elevation/contour layer over the shaded tiles. */
+function drawOverlayTiles() {
+  // The contour layer is rendered at a higher sampling multiplier by the
+  // server (detail=2), not by requesting four deeper tiles.  The same tile
+  // addresses stay in use; only its PNG is 512 px and drawn down to the tile's
+  // displayed size, which sharpens sub-pixel contour samples without
+  // multiplying the number of requests.
+  const world = worldSize();
+  const cam = camera();
+  const left = cam.x - state.width / (2 * state.scale);
+  const top = cam.y - state.height / (2 * state.scale);
+  const right = cam.x + state.width / (2 * state.scale);
+  const bottom = cam.y + state.height / (2 * state.scale);
+  const x0 = Math.floor(left / TILE);
+  const x1 = Math.ceil(right / TILE);
+  const y0 = Math.max(0, Math.floor(top / TILE));
+  const y1 = Math.min(world.rows - 1, Math.ceil(bottom / TILE));
+  const size = TILE * state.scale;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  for (let y = y0; y <= y1; y += 1) {
+    const screenY = (y * TILE - cam.y) * state.scale + state.height / 2;
+    for (let sx = x0; sx <= x1; sx += 1) {
+      const x = ((sx % world.cols) + world.cols) % world.cols;
+      const entry = overlayTileEntry(state.zoom, x, y);
+      if (!entry.ready) continue;
+      const screenX = (sx * TILE - cam.x) * state.scale + state.width / 2;
+      ctx.drawImage(entry.image, screenX, screenY, size + 1, size + 1);
+    }
+  }
+  ctx.restore();
 }
 
 function drawTiles() {
@@ -2880,6 +3293,7 @@ function drawTiles() {
       }
     }
   }
+  if (state.overlayOn) drawOverlayTiles();
   ctx.restore();
 }
 
@@ -2935,6 +3349,9 @@ function lightingWhen() {
 }
 
 function tileLightKey() {
+  // 低角度静态 is a fixed display texture: the Sun does not move with the
+  // clock, so the cache key stays constant while the mode is on.
+  if (state.lowSunStatic) return '';
   // 月面光照 decides whether the tiles are shaded.  The terminator overlay is
   // a separate switch; the old 夜面压暗 layer has been removed.
   return state.lightingOn ? state.lightingKey : '';
@@ -3037,12 +3454,17 @@ function drawLightPoint(lon, lat, colour, label) {
 }
 
 function drawLightingOverlay() {
+  if (state.lowSunStatic) return;
   const light = state.lighting;
   const marks = state.marks;
   // Geometric marks first: they are geometry, not lighting, so they stay when
   // the shaded tiles are switched off.
   if (state.marksOn) {
-    if (marks.equator && !state.marks.graticule) {
+    // The graticule draws a parallel at 0° as part of its grid; when the
+    // equator is also switched on it is a *different* mark and must sit above
+    // that grid, so this is drawn unconditionally here (drawLightingOverlay
+    // runs after drawGraticule).
+    if (marks.equator) {
       drawParallel(0, 'rgba(150, 200, 255, .55)');
     }
     if (marks.poles) {
@@ -3220,7 +3642,7 @@ function ensureProjectionSource() {
   const rows = window ? window.y1 - window.y0 + 1 : 2 ** sourceZoom;
   const globalCols = 2 ** (sourceZoom + 1);
   const key = [
-    tileLightKey() || 'plain', tileToneKey(), state.projection, sourceZoom,
+    tileQuery(), tileToneKey(), state.projection, sourceZoom,
     window ? `${window.x0},${window.y0},${window.x1},${window.y1}` : 'world',
   ].join('|');
   if (state.sourceCanvas && state.sourceReadyKey === key) return;
@@ -3258,32 +3680,100 @@ function ensureProjectionSource() {
     }
     render();
   };
+  const tileUrl = (z, x, y) => `/api/map/tile/${z}/${x}/${y}.png${query}`;
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
-      const image = new Image();
       // A window that crosses the dateline keeps unwrapped x indices so the
       // columns stay in order; the tile itself still has the wrapped address.
       const tileX = ((x0 + col) % globalCols + globalCols) % globalCols;
-      const url = `/api/map/tile/${sourceZoom}/${tileX}/${y0 + row}.png${query}`;
+      const baseUrl = tileUrl(sourceZoom, tileX, y0 + row);
+      const image = new Image();
       let attempts = 0;
       image.onload = () => {
         source.drawImage(image, col * TILE, row * TILE);
         finish();
       };
       image.onerror = () => {
-        // One retry, then give up.  A dropped request used to leave its cell
-        // as the dark fill for the life of the texture -- one black block
-        // among sharp neighbours, which reads as a seam.
         attempts += 1;
         if (attempts <= 1) {
           setTimeout(() => {
-            image.src = url + (url.includes('?') ? '&' : '?') + 'retry=' + attempts;
+            image.src = baseUrl + (baseUrl.includes('?') ? '&' : '?')
+              + 'retry=' + attempts;
           }, 350);
           return;
         }
         finish();
       };
-      image.src = url;
+      image.src = baseUrl;
+    }
+  }
+}
+
+/** The overlay's own source, used only by the Mercator projector.
+ *
+ * Keeping it separate from the base source is what fixed the black Mercator
+ * frame: an RGBA overlay drawn into the opaque base canvas was being sampled
+ * as if it were ground colour.  Here its alpha is kept and blended per output
+ * pixel in drawProjectedBase().
+ */
+function ensureOverlaySource() {
+  if (!state.overlayOn || state.projection !== 'mercator') return;
+  const window = projectionSourceWindow();
+  const sourceZoom = window ? window.z : 4;
+  const x0 = window ? window.x0 : 0;
+  const y0 = window ? window.y0 : 0;
+  const cols = window ? window.x1 - window.x0 + 1 : 2 ** (sourceZoom + 1);
+  const rows = window ? window.y1 - window.y0 + 1 : 2 ** sourceZoom;
+  const globalCols = 2 ** (sourceZoom + 1);
+  const query = overlayQuery();
+  const key = [state.projection, sourceZoom,
+    window ? `${window.x0},${window.y0},${window.x1},${window.y1}` : 'world',
+    query].join('|');
+  if (state.overlaySourceCanvas && state.overlaySourceReadyKey === key) return;
+  if (state.overlaySourceLoadingKey === key) return;
+  state.overlaySourceLoadingKey = key;
+  state.overlaySourceKey = key;
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * TILE;
+  canvas.height = rows * TILE;
+  const source = canvas.getContext('2d');
+  let done = 0;
+  const total = cols * rows;
+  const finish = () => {
+    done += 1;
+    if (done < total) return;
+    if (state.overlaySourceKey !== key) return;
+    state.overlaySourceLoadingKey = null;
+    state.overlaySourceCanvas = canvas;
+    state.overlaySourceReadyKey = key;
+    try {
+      state.overlaySourcePixels = source.getImageData(0, 0, canvas.width, canvas.height);
+    } catch (error) {
+      state.overlaySourcePixels = null;
+    }
+    render();
+  };
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const tileX = ((x0 + col) % globalCols + globalCols) % globalCols;
+      const image = new Image();
+      let attempts = 0;
+      image.onload = () => {
+        source.drawImage(image, col * TILE, row * TILE);
+        finish();
+      };
+      image.onerror = () => {
+        attempts += 1;
+        if (attempts <= 1) {
+          setTimeout(() => {
+            image.src = `/api/map/overlay/${sourceZoom}/${tileX}/${y0 + row}.png?${query}`
+              + '&retry=' + attempts;
+          }, 350);
+          return;
+        }
+        finish();
+      };
+      image.src = `/api/map/overlay/${sourceZoom}/${tileX}/${y0 + row}.png?${query}`;
     }
   }
 }
@@ -3397,6 +3887,7 @@ function paintGlobeBase(out, width, height, source, sourceWidth, sourceHeight,
 
 function drawProjectedBase() {
   ensureProjectionSource();
+  if (state.overlayOn && state.projection === 'mercator') ensureOverlaySource();
   if (!state.sourceCanvas || !state.sourcePixels) return;
   // A full-resolution globe repaint costs tens of milliseconds and most of a
   // 120 Hz frame.  While the camera moves, paint a smaller buffer and let
@@ -3415,6 +3906,7 @@ function drawProjectedBase() {
     state.earthPanX, state.earthPanY,
     width, height, resolution, state.scale, state.sourceReadyKey,
     state.brightness,
+    state.overlayOn ? state.overlaySourceReadyKey : '',
   ].join('|');
   if (state.projectedBase && state.projectedBase.key === cacheKey) {
     ctx.drawImage(state.projectedBase.canvas, 0, 0, state.width, state.height);
@@ -3424,6 +3916,11 @@ function drawProjectedBase() {
   const source = state.sourcePixels.data;
   const sourceWidth = state.sourcePixels.width;
   const sourceHeight = state.sourcePixels.height;
+  const overlay = state.overlayOn && state.projection === 'mercator'
+    ? state.overlaySourcePixels : null;
+  const overlayWidth = overlay ? overlay.width : 0;
+  const overlayHeight = overlay ? overlay.height : 0;
+  const overlayData = overlay ? overlay.data : null;
   const image = ctx.createImageData(width, height);
   const out = image.data;
   const background = [5, 7, 11, 255];
@@ -3470,9 +3967,21 @@ function drawProjectedBase() {
           out[offset + 2] = background[2];
         } else {
           const sourceOffset = (sy * sourceWidth + sx[x]) * 4;
-          out[offset] = Math.min(255, source[sourceOffset] * gain);
-          out[offset + 1] = Math.min(255, source[sourceOffset + 1] * gain);
-          out[offset + 2] = Math.min(255, source[sourceOffset + 2] * gain);
+          let red = source[sourceOffset];
+          let green = source[sourceOffset + 1];
+          let blue = source[sourceOffset + 2];
+          if (overlayData && sy < overlayHeight && sx[x] < overlayWidth) {
+            const overlayOffset = (sy * overlayWidth + sx[x]) * 4;
+            const alpha = overlayData[overlayOffset + 3] / 255;
+            if (alpha > 0.001) {
+              red = red * (1 - alpha) + overlayData[overlayOffset] * alpha;
+              green = green * (1 - alpha) + overlayData[overlayOffset + 1] * alpha;
+              blue = blue * (1 - alpha) + overlayData[overlayOffset + 2] * alpha;
+            }
+          }
+          out[offset] = Math.min(255, red * gain);
+          out[offset + 1] = Math.min(255, green * gain);
+          out[offset + 2] = Math.min(255, blue * gain);
         }
         out[offset + 3] = 255;
       }
@@ -3690,6 +4199,8 @@ function densityGateSet() {
 
 function densityPasses(feature) {
   if (labelTier(feature) === 0) return true;
+  if (feature.priority) return true;
+  if (MAJOR_REGION_CLASSES.has(feature.class)) return true;
   return densityGateSet().has(feature);
 }
 
@@ -3796,7 +4307,9 @@ async function refreshFeatures() {
       if (north < south) { north = 90; south = -90; }
     }
   }
-  const max = densityIsMax();
+  // An emphasized class asks for the whole family, so the request has to use
+  // the wide limit and drop the per-zoom size floor even at 50% density.
+  const max = densityIsMax() || state.emphasis.size > 0;
   const query = new URLSearchParams({
     west: String(west), east: String(east),
     south: String(south), north: String(north),
@@ -3916,7 +4429,15 @@ function visibleOutlineAnchor(feature, margin) {
 /** Font size for the map's names, or the reader's typed value. */
 function labelFontPx() {
   const typed = Number(state.labelFont);
-  return Number.isFinite(typed) && typed >= 6 ? Math.min(64, typed) : 11;
+  // 1.7.6: the automatic size is two points smaller; a typed size is the
+  // reader's own choice and is left alone.
+  return Number.isFinite(typed) && typed >= 6 ? Math.min(64, typed) : 9;
+}
+
+/** Is this feature drawn as highlighted: selected, or in an emphasized class? */
+function featureHighlighted(feature) {
+  return !!feature && (state.selected === feature
+    || state.emphasis.has(feature.class));
 }
 
 /** A class colour, or one text colour for every name. */
@@ -3949,10 +4470,22 @@ function outlineDash() {
 
 /** Priority tier for one map caption; see the class constants above. */
 function labelTier(feature) {
+  // 隐藏高权重清单: a row in priority_features.csv lifts its feature to the
+  // top ordinary tier without adding a visible category switch.
+  if (feature && feature.priority) return 1;
   const key = feature.class;
   if (LABEL_TIER0.has(key)) return 0;
   if (LABEL_TIER1.has(key)) return 1;
+  // 月海/月湖/月沼/月湾 are the map's largest named tracts and the first thing
+  // a reader looks for; give them the top ordinary tier together, with maria
+  // sorted ahead by their larger diameter.
+  if (MAJOR_REGION_CLASSES.has(key)) return 1;
   if (LABEL_TIER2.has(key)) return 2;
+  // 着陆点 are small and easy to lose under a crowd of crater names, but they
+  // are also what a reader is most often looking for.  Give them the maria's
+  // tier so they are placed early enough to take part in avoidance instead of
+  // being dropped by it; their labels still collide-check like every other.
+  if (key === 'statio') return 1;
   const diameter = Number(feature.diameter_km) || 0;
   if (key === 'crater') {
     // A satellite crater never outranks its parent: the parent is the place,
@@ -3967,9 +4500,11 @@ function labelTier(feature) {
 /** Caption size by priority tier: a nudge, except 月海 which is much larger. */
 function labelFontFor(feature) {
   if (feature && feature.class === 'crater') {
-    // The parent is a size above the base and the satellite half a size below,
-    // so the relationship is visible without reading the letter.
-    return Math.max(6, labelFontPx() + (satelliteLetter(feature) ? -0.5 : 1));
+    // The reader's 字号强调 is the parent-minus-satellite difference in points;
+    // the pair stays centred on the base size.
+    const emphasis = Math.max(0, Number(state.craterEmphasis) || 0);
+    return Math.max(6, labelFontPx()
+      + (satelliteLetter(feature) ? -0.5 * emphasis : 0.5 * emphasis));
   }
   const tier = labelTier(feature);
   const delta = tier === 0 ? 1.0
@@ -4013,6 +4548,7 @@ function resetLabelSettings() {
   state.satelliteFull = true;
   state.satellites = true;
   state.craterSuffix = false;
+  state.craterEmphasis = 1.5;
   setValue('label-font', '');
   setValue('label-colour', true);
   setValue('text-color', '#eef2ff');
@@ -4032,6 +4568,7 @@ function resetLabelSettings() {
   setValue('mountain-outline-toggle', true);
   setValue('label-satellites', true);
   setValue('label-crater-suffix', true);
+  setValue('label-crater-emphasis', '1.5');
   if ($('label-satellite')) {
     $('label-satellite').setAttribute('aria-pressed', 'true');
     $('label-satellite').textContent = 'A';
@@ -4043,6 +4580,7 @@ function resetLabelSettings() {
     if (layer.type !== 'features') continue;
     state.density[layer.id] = 0.5;
   }
+  state.emphasis.clear();
   for (const input of document.querySelectorAll('#label-classes input')) {
     const key = input.dataset.layer;
     const layer = ((state.layers && state.layers.layers) || [])
@@ -4052,7 +4590,7 @@ function resetLabelSettings() {
     if (layer.default) state.active.add(key);
     else state.active.delete(key);
     const chip = input.closest('.cls-chip');
-    if (chip) chip.dataset.on = String(input.checked);
+    if (chip) paintClassChip(chip, key);
   }
   updateLayerHint();
   refreshFeatures();
@@ -4077,17 +4615,27 @@ function drawFeatures() {
     if (!classes.has(feature.class)) continue;
     if (!state.satellites && satelliteLetter(feature)) continue;
     const tier = labelTier(feature);
-    // Tier 0 is an overlay list: density never hides it.
-    if (tier !== 0 && !densityPasses(feature)) continue;
+    // Tier 0 is an overlay list and an emphasized class is an explicit "show
+    // me this family": neither is thinned by the density slider.
+    const emphasized = state.emphasis.has(feature.class);
+    if (tier !== 0 && !emphasized && !densityPasses(feature)) continue;
     const pixels = featurePixels(feature);
     const centreVisible = insideScreen(pixels.screen, 0);
     const anchor = centreVisible ? null : visibleOutlineAnchor(feature, 30);
     if (!centreVisible && !anchor) continue;
-    items.push({ feature, ...pixels, tier, anchor, partial: !centreVisible && !!anchor });
+    items.push({
+      feature, ...pixels, tier, anchor,
+      partial: !centreVisible && !!anchor,
+      emphasized,
+    });
   }
-  items.sort((left, right) => left.tier - right.tier
+  // Emphasized classes are painted last so their markers sit above every
+  // ordinary class; within each group the old tier/size order is unchanged.
+  const markerItems = [...items].sort((left, right) =>
+    Number(left.emphasized) - Number(right.emphasized)
+    || left.tier - right.tier
     || right.feature.diameter_km - left.feature.diameter_km);
-  for (const item of items) drawFeatureMarker(item);
+  for (const item of markerItems) drawFeatureMarker(item);
   // A selection change repaints the same layout: the boxes that were reserved
   // last frame are still what the reader sees, so no name jumps.  Every other
   // reason to redraw falls through and lays the captions out afresh.
@@ -4105,18 +4653,25 @@ function drawFeatures() {
   }
   state.textTracks = {};
   labelPlacements = [];
+  const painted = [];
   const occupied = [];
   // Higher tiers reserve their captions first.  Within a tier, larger features
   // go first and avoid only the captions already placed in that or a higher
   // tier, so one weight class does not erase the rest of its own class.
-  for (const item of items) {
+  // Labels of emphasized classes are placed first: they reserve their space
+  // before the ordinary captions, and the ordinary ones then avoid them.
+  const labelItems = [...items].sort((left, right) =>
+    Number(right.emphasized) - Number(left.emphasized)
+    || left.tier - right.tier
+    || right.feature.diameter_km - left.feature.diameter_km);
+  for (const item of labelItems) {
     if (item.tier === 0) continue;
     // The selected feature's name is part of the selection, so it is placed
     // even when the avoidance pass would have skipped it.
     const chosen = item.feature === state.selected;
     const placement = layoutFeatureLabel(item, occupied, chosen);
     if (!placement) continue;
-    paintFeatureLabel(placement);
+    painted.push(placement);
     labelPlacements.push(placement);
     const box = placement.box;
     state.labelHits.push({
@@ -4127,11 +4682,11 @@ function drawFeatures() {
     if (labelAvoidanceEnabled()) occupied.push(box);
   }
   // Tier 0 overlays after everything else, with no collision test at all.
-  for (const item of items) {
+  for (const item of labelItems) {
     if (item.tier !== 0) continue;
     const placement = layoutFeatureLabel(item, [], true);
     if (!placement) continue;
-    paintFeatureLabel(placement);
+    painted.push(placement);
     labelPlacements.push(placement);
     const box = placement.box;
     state.labelHits.push({
@@ -4139,6 +4694,13 @@ function drawFeatures() {
       left: box.left, top: box.top, right: box.right, bottom: box.bottom,
     });
   }
+  // Paint the ordinary captions first and the emphasized class last, so an
+  // emphasized name is literally on top as well as first in the layout.
+  const emphasizedPlacement = (placement) => !!placement.feature
+    && state.emphasis.has(placement.feature.class);
+  painted.sort((left, right) =>
+    Number(emphasizedPlacement(left)) - Number(emphasizedPlacement(right)));
+  for (const placement of painted) paintFeatureLabel(placement);
 }
 
 /** The true-diameter circle on the sphere, projected for this map view. */
@@ -4296,9 +4858,10 @@ function drawFeatureOutline(item) {
       && (outline.kind === 'line' || outline.kind === 'centerline')) {
     return false;
   }
-  // 显示山脉轮廓 is a veto on top of the linear switch: turning it off hides
-  // the mountains even while the rilles and ridges stay drawn.
-  if (!state.mountainOutlines && feature.class === 'mons') return false;
+  // 显示山脉/山脊轮廓 is a veto on top of the linear switch: turning it off
+  // hides both mountains and ridges while the rilles stay drawn.
+  if (!state.mountainOutlines
+      && (feature.class === 'mons' || feature.class === 'dorsum')) return false;
   let segments = null;
   if (outline.kind === 'circle') {
     const radiusKm = Number(outline.radius_km) || 0;
@@ -4328,7 +4891,7 @@ function strokeRim(segments, feature) {
   const colour = state.labelColour
     ? labelColourFor(feature)
     : (state.outlineColor || labelColourFor(feature));
-  const highlight = state.selected === feature;
+  const highlight = featureHighlighted(feature);
   ctx.save();
   ctx.strokeStyle = colour;
   ctx.globalAlpha = highlight ? 0.95 : 0.62;
@@ -4365,6 +4928,34 @@ function smoothPathPoints(points, passes = 2) {
   return current;
 }
 
+/** A ring pulled towards its own centre, for typesetting inside the outline.
+ *
+ * A closed mountain ring has no single "middle line" in the catalogue; the
+ * midpoint between its outer and inner edges is approximated by shrinking the
+ * ring about its centroid.  Longitudes are unwrapped around the first point so
+ * a ring crossing the antimeridian does not collapse to a seam.
+ */
+function insetRing(points, factor = 0.82) {
+  if (!points || points.length < 3) return points;
+  const reference = Number(points[0][0]);
+  let sumLon = 0;
+  let sumLat = 0;
+  const unwrapped = points.map(([lon, lat]) => {
+    let value = Number(lon);
+    while (value - reference > 180) value -= 360;
+    while (value - reference < -180) value += 360;
+    sumLon += value;
+    sumLat += Number(lat);
+    return [value, Number(lat)];
+  });
+  const centreLon = sumLon / unwrapped.length;
+  const centreLat = sumLat / unwrapped.length;
+  return unwrapped.map(([lon, lat]) => [
+    centreLon + (lon - centreLon) * factor,
+    centreLat + (lat - centreLat) * factor,
+  ]);
+}
+
 /** Stable key for a feature's per-session text-placement offset. */
 function textTrackKey(feature) {
   return feature.id === undefined || feature.id === null
@@ -4380,10 +4971,30 @@ function textTrackKey(feature) {
  *  time decision.
  */
 function layoutTextAlongPath(item, text, fontPx) {
-  // Follow the painted outline, not a separate centreline: after the IAU ring
-  // replaced the old polyline, a caption still running along the centreline
-  // read as a leftover from the previous shape.
-  const segments = projectOutlineSegments(item.feature.outline, true);
+  // 山脉名称走轮廓内部的中线，而不是贴着外圈：IAU 给山脉的是一圈闭合
+  // 轮廓，把字压在那条线上会显得它属于边界而不是整条山脉。月溪/山脊本来
+  // 就只有轨迹，仍沿轨迹排。没有中线的闭合轮廓才退回环线。
+  const outline = item.feature.outline || {};
+  const hasPath = !!(outline.path && outline.path.length >= 2);
+  const hasRing = !!(outline.ring && outline.ring.length >= 2);
+  const useMiddle = hasPath && (item.feature.class === 'mons'
+    || outline.kind === 'line' || outline.kind === 'centerline');
+  let ground = useMiddle ? outline.path : (hasRing ? outline.ring : outline.path);
+  if (!ground || ground.length < 2) return null;
+  // A ring's typesetting path may itself be closed (Montes Rook / Cordillera).
+  // That is a different case from a plain trace: the caption runs round the
+  // whole ring, and the path must not be given a west-to-east direction.
+  const groundLast = ground[ground.length - 1];
+  const pathClosed = !!outline.path_closed
+    || (useMiddle && Math.abs(Number(ground[0][0]) - Number(groundLast[0])) < 1e-4
+        && Math.abs(Number(ground[0][1]) - Number(groundLast[1])) < 1e-4);
+  const closedGround = !useMiddle || pathClosed;
+  // A closed ring without its own midline belongs between its two edges, not
+  // on the outer stroke: pull the typesetting path towards the middle.  A
+  // catalogue midline is already in the middle and is left alone.
+  if (!useMiddle) ground = insetRing(ground);
+  const segments = projectOutlineSegments(
+    closedGround ? { ring: ground } : { path: ground }, closedGround);
   if (!segments) return null;
   let route = null;
   for (const segment of segments) {
@@ -4469,12 +5080,32 @@ function layoutTextAlongPath(item, text, fontPx) {
 
   const forward = measurePath(points);
   const backward = measurePath(points.slice().reverse());
-  const forwardChoice = bestWindow(forward);
-  const backwardChoice = bestWindow(backward);
-  const chosen = backwardChoice && (!forwardChoice
-    || backwardChoice.score > forwardChoice.score + 1e-6)
-    ? backward : forward;
-  const choice = chosen === forward ? forwardChoice : backwardChoice;
+  // 线状地貌的阅读方向由轮廓两端的地面坐标决定：从西端点到东端点。若投影
+  // 把画面东西翻转（望远镜视或某些视角），再翻回来让字保持从左到右 ——
+  // 两种情形都是整段文字一个朝向，不会因为拖动经过弯道而逐字倒转。
+  let eastward = true;
+  if (!closedGround && ground.length >= 2) {
+    let delta = Number(ground[ground.length - 1][0]) - Number(ground[0][0]);
+    while (delta > 180) delta -= 360;
+    while (delta < -180) delta += 360;
+    eastward = delta >= 0;
+  }
+  let chosen;
+  let choice;
+  if (closedGround) {
+    const forwardChoice = bestWindow(forward);
+    const backwardChoice = bestWindow(backward);
+    chosen = backwardChoice && (!forwardChoice
+      || backwardChoice.score > forwardChoice.score + 1e-6)
+      ? backward : forward;
+    choice = chosen === forward ? forwardChoice : backwardChoice;
+  } else {
+    chosen = eastward ? forward : backward;
+    const first = chosen.path[0];
+    const last = chosen.path[chosen.path.length - 1];
+    if (first.x > last.x) chosen = chosen === forward ? backward : forward;
+    choice = bestWindow(chosen);
+  }
   if (!choice) return null;
   points = chosen.path;
   const length = chosen.length;
@@ -4488,11 +5119,8 @@ function layoutTextAlongPath(item, text, fontPx) {
   const range = Math.max(1, length - total);
   let start = choice.start + shift * range;
   const first = points[0], last = points[points.length - 1];
-  const outline = item.feature.outline || {};
-  // The ring is what the caption follows whenever there is one; a plain line
-  // feature has only its trace.  A closed ring loops at its seam.
-  const followsRing = !!(outline.ring && outline.ring.length >= 2);
-  const loop = followsRing
+  // A closed ring loops at its seam; an open centreline or trace does not.
+  const loop = closedGround
     || Math.hypot(last.x - first.x, last.y - first.y) < length * 0.18;
   if (loop) {
     start = ((start % range) + range) % range;
@@ -4554,7 +5182,7 @@ function layoutTextAlongPath(item, text, fontPx) {
 /** Paint a caption laid out by :func:`layoutTextAlongPath`. */
 function paintTextAlongPath(placement) {
   const { feature, fontPx, spots } = placement;
-  const highlight = state.selected === feature;
+  const highlight = featureHighlighted(feature);
   const colour = labelTextColourFor(feature);
   const bold = (state.textBold || highlight) ? '600 ' : '';
   ctx.save();
@@ -4564,9 +5192,10 @@ function paintTextAlongPath(placement) {
   ctx.lineJoin = 'round';
   const strokeWidth = Number(state.textStrokeWidth) || 0;
   spots.forEach((spot) => {
-    let angle = spot.angle;
-    if (angle > Math.PI / 2) angle -= Math.PI;
-    else if (angle < -Math.PI / 2) angle += Math.PI;
+    // One orientation for the whole run: no per-character ±180° flip, which
+    // is what made a dragged caption turn upside down glyph by glyph when it
+    // crossed the steep part of its own path.
+    const angle = spot.angle;
     ctx.save();
     ctx.translate(spot.x, spot.y);
     ctx.rotate(angle);
@@ -4599,7 +5228,7 @@ function drawFeatureMarker(item) {
   const colour = labelColourFor(feature);
   const fontPx = labelFontPx();
   let rimDrawn = false;
-  const highlight = state.selected === feature;
+  const highlight = featureHighlighted(feature);
   ctx.save();
   // 轮廓: the catalogue's own shape — circle, traced path or ring.  A feature
   // with no outline keeps its marker so it is still locatable.
@@ -4692,6 +5321,24 @@ function layoutFeatureLabel(item, occupied, force = false) {
   // radius away.  A region's name still belongs across the formation, so that
   // branch keeps its centred first choice.
   const gap = Math.max(3, item.marker || 4);
+  const beside = [
+    { x: screen.x + gap + 6, y: screen.y, align: 'left' },
+    { x: screen.x + gap + 6, y: screen.y - height * 0.9, align: 'left' },
+    { x: screen.x + gap + 6, y: screen.y + height * 0.9, align: 'left' },
+    { x: screen.x - gap - 6, y: screen.y, align: 'right' },
+    { x: screen.x, y: screen.y - gap - height * 0.7, align: 'center' },
+    { x: screen.x, y: screen.y + gap + height * 0.7, align: 'center' },
+  ];
+  // A crater whose rim is actually drawn is a shape, not a point: its name
+  // belongs inside that shape, centred, not hung off its right edge.  Small
+  // craters that cannot hold the text keep the ordinary beside-the-marker
+  // placement -- otherwise the name would stick out of the rim it describes.
+  // The circle is only painted when its apparent diameter clears the
+  // two-pixel floor in drawFeatureOutline().  A smaller crater is just a
+  // marker; its name belongs to the right of that marker, not centred on a
+  // rim that was never drawn.
+  const centredCrater = feature.class === 'crater' && ringDrawn
+    && radius >= 1.2;
   const attempts = REGION_LABEL_CLASSES.has(feature.class)
     ? [
       { x: screen.x, y: screen.y, align: 'center' },
@@ -4699,14 +5346,16 @@ function layoutFeatureLabel(item, occupied, force = false) {
       { x: screen.x, y: screen.y + height * 0.9, align: 'center' },
       { x: screen.x + gap + 6, y: screen.y, align: 'left' },
     ]
-    : [
-      { x: screen.x + gap + 6, y: screen.y, align: 'left' },
-      { x: screen.x + gap + 6, y: screen.y - height * 0.9, align: 'left' },
-      { x: screen.x + gap + 6, y: screen.y + height * 0.9, align: 'left' },
-      { x: screen.x - gap - 6, y: screen.y, align: 'right' },
-      { x: screen.x, y: screen.y - gap - height * 0.7, align: 'center' },
-      { x: screen.x, y: screen.y + gap + height * 0.7, align: 'center' },
-    ];
+    : centredCrater
+      ? [
+        { x: screen.x, y: screen.y, align: 'center' },
+        { x: screen.x, y: screen.y - height * 0.75, align: 'center' },
+        { x: screen.x, y: screen.y + height * 0.75, align: 'center' },
+        { x: screen.x - width * 0.25, y: screen.y, align: 'center' },
+        { x: screen.x + width * 0.25, y: screen.y, align: 'center' },
+        ...beside,
+      ]
+      : beside;
   for (const attempt of attempts) {
     const left = attempt.align === 'left' ? attempt.x
       : attempt.align === 'right' ? attempt.x - width : attempt.x - width / 2;
@@ -4734,9 +5383,15 @@ function layoutFeatureLabel(item, occupied, force = false) {
       startY += dy / reach * radius;
     }
     const leaderLength = Math.hypot(nearX - startX, nearY - startY);
-    // A close, inside-the-ring caption needs no line; a point marker or a
-    // caption that had to step outside the ring still gets one.
-    const leader = leaderLength > 2.5 && (!ringDrawn || reach > radius + 2)
+    // A point marker's ordinary slot is just to its right; a line there is ink
+    // with no job, and the old rule drew one for every unoutlined feature.
+    // Only a caption the avoidance pass pushed clearly farther out earns a
+    // leader.  Outlined features keep the rim rule: outside the rim, re-attach.
+    const normalReach = gap + 6;
+    const needsLeader = ringDrawn
+      ? reach > radius + 2
+      : reach > normalReach + fontPx * 0.75;
+    const leader = leaderLength > 2.5 && needsLeader
       ? { startX, startY, nearX, nearY } : null;
     ctx.restore();
     return {
@@ -4821,7 +5476,7 @@ function paintFeatureLabel(placement) {
     return;
   }
   const { feature, text, fontPx } = placement;
-  const highlight = state.selected === feature && placement.kind !== 'force';
+  const highlight = featureHighlighted(feature) && placement.kind !== 'force';
   const colour = labelTextColourFor(feature);
   const bold = (state.textBold || highlight) ? '600 ' : '';
   ctx.save();
@@ -5649,6 +6304,26 @@ function textDragMove(event) {
   renderSoon();
 }
 
+async function loadFeatureMeta(feature, cells) {
+  if (!feature || !feature.feature_id) return;
+  try {
+    const response = await fetch(
+      '/api/map/meta?id=' + encodeURIComponent(feature.feature_id));
+    const payload = await response.json();
+    if (!response.ok || payload.error) return;
+    if (state.selected !== feature) return;
+    for (const [label, cell] of Object.entries(cells)) {
+      const value = label === 'Satellite Feature(s)'
+        ? payload['Satellite Features'] : payload[label];
+      if (value && (!cell.textContent || cell.textContent === '—')) {
+        cell.textContent = String(value);
+      }
+    }
+  } catch (error) {
+    // Offline is normal for this map; the locally exported fields still show.
+  }
+}
+
 function selectFeature(feature) {
   state.selected = feature;
   const panel = $('selection-info');
@@ -5690,6 +6365,50 @@ function selectFeature(feature) {
       const note = document.createElement('p');
       note.textContent = feature.note;
       panel.appendChild(note);
+    }
+    const meta = feature.meta || {};
+    const remote = !!feature.feature_id;
+    const metaRows = [
+      ['Approval Status', meta['Approval Status']],
+      ['Approval Date', meta['Approval Date']],
+      ['Continent', meta['Continent']],
+      ['Ethnicity', meta['Ethnicity']],
+      ['Origin', meta['Origin']],
+      ['Reference', meta['Reference']],
+      ['Updated', meta['Updated']],
+      ['Satellite Feature(s)', meta['Satellite Features']],
+    ].filter((label, value) => String(value || '').trim()
+      || (remote && ['Reference', 'Updated', 'Satellite Feature(s)'].includes(label)));
+    if (metaRows.length) {
+      const heading = document.createElement('h2');
+      heading.textContent = 'Status and Origin';
+      heading.title = '展开或收起 Status and Origin';
+      const caret = document.createElement('button');
+      caret.className = 'ghost caret';
+      caret.setAttribute('aria-expanded', 'false');
+      caret.title = '展开或收起 Status and Origin';
+      heading.appendChild(caret);
+      const metaFacts = document.createElement('dl');
+      metaFacts.className = 'facts';
+      metaFacts.hidden = true;
+      heading.addEventListener('click', () => {
+        const open = metaFacts.hidden;
+        metaFacts.hidden = !open;
+        caret.setAttribute('aria-expanded', String(open));
+      });
+      const metaCells = {};
+      for (const [label, value] of metaRows) {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = String(value || '—').trim();
+        metaCells[label] = dd;
+        metaFacts.appendChild(dt);
+        metaFacts.appendChild(dd);
+      }
+      panel.appendChild(heading);
+      panel.appendChild(metaFacts);
+      if (remote) loadFeatureMeta(feature, metaCells);
     }
   }
   // The clicked feature's name is highlighted in the same boxes the last pass
@@ -5796,6 +6515,7 @@ function layerColour(layer) {
 function buildLayerList(payload) {
   state.layers = payload;
   state.active.clear();
+  state.emphasis.clear();
   // The raster is one layer and one switch; there is no layer list left to
   // build.  The feature classes still come from the server.
   if (!$('base-on') || $('base-on').checked) state.active.add('base');
@@ -5803,6 +6523,39 @@ function buildLayerList(payload) {
   updateLayerHint();
   render();
   refreshFeatures();
+}
+
+/** One class's public state: hidden, shown, or emphasized. */
+function classState(key) {
+  if (state.emphasis.has(key)) return 'emphasis';
+  return state.active.has(key) ? 'on' : 'off';
+}
+
+/** Paint one chip from the state sets. */
+function paintClassChip(chip, key) {
+  const mode = classState(key);
+  chip.dataset.on = String(mode !== 'off');
+  chip.dataset.state = mode;
+  const input = chip.querySelector('input');
+  if (input) input.checked = mode !== 'off';
+}
+
+/** 关 → 开 → 强调 → 关.  Emphasis means "show this class above everything,
+ *  and highlight every feature in it"; the features themselves are still
+ *  collision-checked, so emphasizing a class does not turn the map into a
+ *  pile of overlapping names. */
+function cycleClassState(key) {
+  const mode = classState(key);
+  if (mode === 'off') {
+    state.active.add(key);
+    state.emphasis.delete(key);
+  } else if (mode === 'on') {
+    state.active.add(key);
+    state.emphasis.add(key);
+  } else {
+    state.active.delete(key);
+    state.emphasis.delete(key);
+  }
 }
 
 /** The class switches, in the top bar: the full-disk page's chips. */
@@ -5836,11 +6589,27 @@ function buildClassChips(payload) {
       count.textContent = layer.count.toLocaleString();
       chip.appendChild(count);
     }
-    chip.dataset.on = String(input.checked);
+    paintClassChip(chip, layer.id);
+    // Three states, one click apart: 关 → 开 → 强调 → 关.  The checkbox is
+    // kept for settings/reset code and assistive technology; the visible
+    // click is the state machine, and preventDefault stops the label from
+    // toggling the hidden box to a second truth.
     input.addEventListener('change', () => {
-      chip.dataset.on = String(input.checked);
       if (input.checked) state.active.add(layer.id);
-      else state.active.delete(layer.id);
+      else {
+        state.active.delete(layer.id);
+        state.emphasis.delete(layer.id);
+      }
+      paintClassChip(chip, layer.id);
+      updateLayerHint();
+      scheduleFeatures();
+      render();
+    });
+    chip.addEventListener('click', (event) => {
+      if (event.target === input) return;
+      event.preventDefault();
+      cycleClassState(layer.id);
+      paintClassChip(chip, layer.id);
       updateLayerHint();
       scheduleFeatures();
       render();
@@ -5874,12 +6643,13 @@ function refreshLayerLanguage() {
 }
 
 function setAllLayers(on) {
+  state.emphasis.clear();
   for (const input of document.querySelectorAll('#label-classes input[data-layer]')) {
     input.checked = on;
-    const chip = input.closest('.cls-chip');
-    if (chip) chip.dataset.on = String(on);
     if (on) state.active.add(input.dataset.layer);
     else state.active.delete(input.dataset.layer);
+    const chip = input.closest('.cls-chip');
+    if (chip) paintClassChip(chip, input.dataset.layer);
   }
   updateLayerHint();
   scheduleFeatures();
@@ -6865,13 +7635,118 @@ function wire() {
       render();
     });
   }
+  if ($('label-crater-emphasis')) {
+    $('label-crater-emphasis').addEventListener('change', (event) => {
+      state.craterEmphasis = Math.max(0, Number(event.target.value) || 0);
+      render();
+    });
+  }
   if ($('map-label-reset')) {
     $('map-label-reset').addEventListener('click', () => { resetLabelSettings(); });
   }
+  if ($('overlay-toggle')) {
+    $('overlay-toggle').addEventListener('change', (event) => {
+      if (state.projection === 'globe' || state.projection === 'earth') {
+        event.target.checked = false;
+        state.overlayOn = false;
+        return;
+      }
+      state.overlayOn = !!event.target.checked;
+      state.overlayRangeManual = false;
+      state.overlayRangeKey = '';
+      if ($('overlay-options')) $('overlay-options').hidden = !state.overlayOn;
+      clearProjectionSource();
+      clearOverlaySource();
+      render();
+    });
+  }
+  if ($('overlay-options')) {
+    const schedule = () => {
+      overlayValues();
+      refreshOverlayColorbar();
+      overlayTilesChanged();
+    };
+    for (const id of ['overlay-interval', 'overlay-contour-scale',
+                      'overlay-alpha', 'overlay-line-alpha',
+                      'overlay-line-color', 'overlay-line-width',
+                      'overlay-scale', 'overlay-palette']) {
+      const control = $(id);
+      if (!control) continue;
+      control.addEventListener('input', schedule);
+      control.addEventListener('change', schedule);
+    }
+    for (const kind of ['min', 'max', 'offset']) {
+      const handle = $('overlay-handle-' + kind);
+      if (!handle) continue;
+      handle.addEventListener('pointerdown', (event) => {
+        if (kind === 'min' || kind === 'max') state.overlayRangeManual = true;
+        state.overlayDragKind = kind;
+        overlaySetFromFraction(kind, overlayTrackFraction(event, kind));
+        if (event.preventDefault) event.preventDefault();
+      });
+    }
+    document.addEventListener('pointermove', overlayPointerMove);
+    document.addEventListener('pointerup', () => { state.overlayDragKind = null; });
+    document.addEventListener('pointercancel', () => { state.overlayDragKind = null; });
+    for (const kind of ['min', 'max']) {
+      const handle = $('overlay-handle-' + kind);
+      if (!handle) continue;
+      handle.addEventListener('dblclick', (event) => {
+        if (event.preventDefault) event.preventDefault();
+        autoFitOverlay(kind);
+      });
+    }
+    if ($('overlay-handle-offset')) {
+      $('overlay-handle-offset').addEventListener('dblclick', (event) => {
+        if (event.preventDefault) event.preventDefault();
+        state.overlayOffset = 0;
+        refreshOverlayColorbar();
+        overlayTilesChanged();
+      });
+    }
+    for (const [id, reset] of [['overlay-alpha', '0.44'],
+                               ['overlay-line-alpha', '0.86']]) {
+      const slider = $(id);
+      if (!slider) continue;
+      slider.addEventListener('dblclick', () => {
+        slider.value = reset;
+        refreshOverlayColorbar();
+        overlayTilesChanged();
+      });
+    }
+    if ($('overlay-reverse')) {
+      $('overlay-reverse').addEventListener('click', () => {
+        state.overlayReverse = !state.overlayReverse;
+        $('overlay-reverse').setAttribute('aria-pressed', String(state.overlayReverse));
+        $('overlay-reverse').textContent = state.overlayReverse ? '颜色反向 ✓' : '颜色反向';
+        refreshOverlayColorbar();
+        overlayTilesChanged();
+      });
+    }
+    if ($('overlay-lock-height')) {
+      $('overlay-lock-height').addEventListener('click', () => {
+        state.overlayHeightLocked = !state.overlayHeightLocked;
+        state.overlayRangeManual = state.overlayHeightLocked;
+        $('overlay-lock-height').setAttribute(
+          'aria-pressed', String(state.overlayHeightLocked));
+        $('overlay-lock-height').textContent = state.overlayHeightLocked
+          ? '解锁高度' : '锁定当前高度';
+        if (!state.overlayHeightLocked) {
+          state.overlayRangeKey = '';
+          scheduleOverlayRange();
+        }
+      });
+    }
+    refreshOverlayColorbar();
+    updateOverlayAvailability();
+  }
   $('projection').addEventListener('change', (event) => {
+    const previous = state.projection;
     resizeCanvas();
-    state.projection = ['mercator', 'globe', 'earth'].includes(event.target.value)
+    const next = ['mercator', 'globe', 'earth'].includes(event.target.value)
       ? event.target.value : 'equirect';
+    transferViewBetweenProjections(previous, next);
+    state.projection = next;
     // A projection change reinterprets the camera's vertical coordinate.
     // Mercator stores it as a log tangent, so the shared centre has to be
     // carried into that axis before the first frame is drawn.
@@ -6887,8 +7762,10 @@ function wire() {
     }
     state.earthPanX = 0;
     state.earthPanY = 0;
+    updateOverlayAvailability();
     clampCenter();
     state.tiles.clear();
+    clearOverlaySource();
     state.sourceCanvas = null;
     state.sourcePixels = null;
     state.sourceKey = '';
@@ -7005,6 +7882,78 @@ function wire() {
     brightness.addEventListener('dblclick', () => {
       brightness.value = '1';
       applyBrightness();
+    });
+  }
+  if ($('surface-texture')) {
+    $('surface-texture').addEventListener('change', (event) => {
+      const label = event.target.closest('.switch-chip');
+      if (label) label.dataset.on = String(event.target.checked);
+      state.surfaceTexture = event.target.checked;
+      clearBaseCaches();
+      render();
+    });
+  }
+  if ($('low-sun-direction')) {
+    $('low-sun-direction').addEventListener('change', (event) => {
+      state.lowSunDirection = ['E', 'S', 'W', 'N'].includes(event.target.value)
+        ? event.target.value : 'W';
+      clearBaseCaches();
+      render();
+    });
+  }
+  if ($('low-sun-static')) {
+    $('low-sun-static').addEventListener('change', (event) => {
+      const on = event.target.checked;
+      const label = event.target.closest('.switch-chip');
+      if (label) label.dataset.on = String(on);
+      if (on) {
+        state.lowSunPrevLighting = state.lightingOn;
+        state.lowSunPrevEarthshine = state.earthshine;
+        state.lowSunPrevTexture = state.surfaceTexture;
+        state.lightingOn = false;
+        state.earthshine = false;
+        state.surfaceTexture = false;
+        if ($('light-on')) $('light-on').checked = false;
+        if ($('earthshine-on')) $('earthshine-on').checked = false;
+        if ($('surface-texture')) $('surface-texture').checked = false;
+        for (const id of ['light-on', 'earthshine-on', 'surface-texture']) {
+          if ($(id)) $(id).disabled = true;
+        }
+        if ($('low-sun-direction')) $('low-sun-direction').disabled = false;
+      } else {
+        state.lightingOn = state.lowSunPrevLighting;
+        state.earthshine = state.lowSunPrevEarthshine;
+        state.surfaceTexture = state.lowSunPrevTexture;
+        if ($('light-on')) $('light-on').checked = state.lightingOn;
+        if ($('earthshine-on')) $('earthshine-on').checked = state.earthshine;
+        if ($('surface-texture')) $('surface-texture').checked = state.surfaceTexture;
+        for (const id of ['light-on', 'earthshine-on', 'surface-texture']) {
+          if ($(id)) $(id).disabled = false;
+        }
+        if ($('low-sun-direction')) $('low-sun-direction').disabled = true;
+      }
+      state.lowSunStatic = on;
+      state.lightingKey = state.lightingOn ? state.lightingKey : '';
+      clearBaseCaches();
+      render();
+    });
+  }
+  if ($('map-contrast')) {
+    let contrastTimer = null;
+    const applyContrast = () => {
+      state.contrast = Math.max(0.5, Math.min(2, Number($('map-contrast').value) || 1));
+      if (contrastTimer) clearTimeout(contrastTimer);
+      contrastTimer = setTimeout(() => {
+        contrastTimer = null;
+        clearBaseCaches();
+        render();
+      }, 120);
+    };
+    $('map-contrast').addEventListener('input', applyContrast);
+    $('map-contrast').addEventListener('change', applyContrast);
+    $('map-contrast').addEventListener('dblclick', () => {
+      $('map-contrast').value = '1';
+      applyContrast();
     });
   }
   if ($('earthshine-on')) {

@@ -98,7 +98,8 @@ from .eclipse import (
     LunarEclipse,
     eclipse_state,
 )
-from .events import EVENT_KINDS, MoonEvent, moon_events
+from .events import (EVENT_KINDS, MoonEvent, clair_obscur_events,
+                     moon_events)
 from .frames import AzEl, RaDec, az_el, angular_separation, position_angle
 from .planets import (
     PLANETS,
@@ -423,6 +424,7 @@ __all__ = [
     "EVENT_KINDS",
     "MoonEvent",
     "moon_events",
+    "clair_obscur_events",
     "PLANETS",
     "PLANET_BY_KEY",
     "Planet",
